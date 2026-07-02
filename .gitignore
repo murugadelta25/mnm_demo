@@ -1,0 +1,33 @@
+# Python
+backend/venv/
+backend/__pycache__/
+backend/app/__pycache__/
+backend/app/routers/__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Logs
+*.log
+backend.log
+frontend.log
+
+# PID files
+.backend.pid
+.frontend.pid
+
+# Env files (keep .env.example, exclude actual .env)
+backend/.env
+frontend/.env
+database/db.config.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Static uploads (optional — include if you want to transfer machine images)
+# backend/static/machines/

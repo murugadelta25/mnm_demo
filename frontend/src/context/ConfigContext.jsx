@@ -1,0 +1,98 @@
+import { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import api from '../api/client';
+import { useAuth } from './AuthContext';
+import { applySiteBranding, fetchPublicBranding } from '../utils/siteBranding';
+
+const DEFAULT_CONFIG = {
+  shifts: [
+    { id: 'A', name: 'Shift A', start: '08:00', end: '20:00', enabled: true },
+    { id: 'B', name: 'Shift B', start: '20:00', end: '08:00', enabled: true },
+    { id: 'C', name: 'Shift C', start: '22:00', end: '06:00', enabled: false },
+  ],
+  breaks: {
+    A: {
+      lunch_break: 30, lunch_start: '12:00', lunch_end: '12:30',
+      tea_break: 10, tea_start: '10:00', tea_end: '10:10',
+      tpm_cleaning: 10, tpm_start: '11:00', tpm_end: '11:10',
+      other_cleaning: 0, management_meeting: 0,
+    },
+    B: {
+      lunch_break: 30, lunch_start: '00:00', lunch_end: '00:30',
+      tea_break: 10, tea_start: '22:00', tea_end: '22:10',
+      tpm_cleaning: 10, tpm_start: '23:00', tpm_end: '23:10',
+      other_cleaning: 0, management_meeting: 0,
+    },
+    C: {
+      lunch_break: 30, lunch_start: '02:00', lunch_end: '02:30',
+      tea_break: 10, tea_start: '00:00', tea_end: '00:10',
+      tpm_cleaning: 10, tpm_start: '01:00', tpm_end: '01:10',
+      other_cleaning: 0, management_meeting: 0,
+    },
+  },
+  checkDataDaysBack: 1
+};
+
+export function getCurrentShift(config) {
+  const now = new Date();
+  const hhmm = now.getHours() * 60 + now.getMinutes();
+  for (const sh of config.shifts) {
+    if (!sh.enabled) continue;
+    const [sH, sM] = sh.start.split(':').map(Number);
+    const [eH, eM] = sh.end.split(':').map(Number);
+    const start = sH * 60 + sM, end = eH * 60 + eM;
+    const inShift = end > start ? hhmm >= start && hhmm < end : hhmm >= start || hhmm < end;
+    if (inShift) return sh;
+  }
+  return null;
+}
+
+export function timeToMinutes(start, end) {
+  if (!start || !end) return 0;
+  const [sh, sm] = start.split(':').map(Number);
+  const [eh, em] = end.split(':').map(Number);
+  let diff = (eh * 60 + em) - (sh * 60 + sm);
+  if (diff < 0) diff += 24 * 60;
+  return diff;
+}
+
+const ConfigContext = createContext({ config: DEFAULT_CONFIG, reload: () => {} });
+
+export function ConfigProvider({ children }) {
+  const { user } = useAuth();
+  const [config, setConfig] = useState(DEFAULT_CONFIG);
+
+  const reload = useCallback(() => {
+    api.get('/api/config/').then(r => setConfig(r.data)).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    fetchPublicBranding().then(b => {
+      if (b) applySiteBranding(b);
+    });
+  }, []);
+
+  useEffect(() => {
+    const fc = config?.factory;
+    if (!fc) return;
+    applySiteBranding({
+      siteTitle: fc.siteTitle,
+      factories: fc.factories,
+      faviconFactoryId: fc.faviconFactoryId,
+    });
+  }, [config?.factory?.siteTitle, config?.factory?.faviconFactoryId, config?.factory?.factories]);
+
+  // Fetch config when user logs in, reset to default on logout
+  useEffect(() => {
+    if (user) {
+      reload();
+    } else {
+      setConfig(DEFAULT_CONFIG);
+    }
+  }, [user, reload]);
+
+  return <ConfigContext.Provider value={{ config, reload }}>{children}</ConfigContext.Provider>;
+}
+
+export function useConfig() {
+  return useContext(ConfigContext);
+}

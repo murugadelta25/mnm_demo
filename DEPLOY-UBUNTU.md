@@ -1,0 +1,215 @@
+# EAP PMS — Ubuntu Deployment
+
+Package the project on Windows, copy to Ubuntu, and run with a single script — similar to `run.ps1` on Windows.
+
+## Ports
+
+| Service  | Port |
+|----------|------|
+| Backend  | 8010 |
+| Frontend | 5174 |
+
+## 1. Create the package (Windows)
+
+From the project root:
+
+```powershell
+.\package.ps1
+```
+
+This creates `eap-pms.zip` with only runtime files (no `venv`, `node_modules`, secrets, or dev clutter).
+
+## 2. Transfer to Ubuntu
+
+```bash
+scp eap-pms.zip user@<server-ip>:~/
+```
+
+On the server:
+
+```bash
+unzip eap-pms.zip
+cd eap-pms
+```
+
+## 3. Configure (optional)
+
+On first run, `./run.sh` prompts for:
+
+| Input | Purpose |
+|-------|---------|
+| **Client name** | Labels systemd services (e.g. `acme-corp-backend`) |
+| **MySQL password** | Database root/user password |
+| **Database name** | MySQL database (default: `eap_pms_<client>`) |
+
+Or pre-configure before first run:
+
+```bash
+cp deploy.env.example deploy.env
+nano deploy.env   # set CLIENT_NAME, DB_PASS, DB_NAME
+```
+
+Values are saved to `deploy.env` and `database/db.config.json`.
+
+## 4. Run the application
+
+```bash
+chmod +x run.sh scripts/*.sh
+./run.sh
+```
+
+`run.sh` will:
+
+1. Install system packages (Python 3, Node.js 20, MySQL client, curl)
+2. Create Python venv and install `requirements.txt`
+3. Run `npm install` in `frontend/`
+4. Apply `database/schema.sql` and migrations
+5. Install **systemd** units named from client (e.g. `acme-corp-backend`, `acme-corp-frontend`)
+6. Start services, verify they are running, and print dashboard URLs
+
+If the database already exists, setup skips creation and shows: **Database already available**.
+
+## 5. Service management
+
+Service names use the **client name** (lowercase, hyphenated):
+
+```bash
+# Example for client "Acme Corp":
+sudo systemctl status acme-corp-backend
+sudo systemctl status acme-corp-frontend
+sudo systemctl stop acme-corp-backend acme-corp-frontend
+```
+
+Or use run.sh helpers:
+
+```bash
+./run.sh status    # service status
+./run.sh restart   # restart after code update
+./run.sh stop      # stop services
+./run.sh logs      # tail journal logs
+```
+
+Services auto-start on boot after the first `./run.sh`.
+
+## 6. Access
+
+- **Dashboard:** `http://<server-ip>:5174`
+- **API docs:** `http://<server-ip>:8010/docs`
+
+### Embed mode (CPLM integration)
+
+Hide navigation when embedded in another app:
+
+| Method | Example |
+|--------|---------|
+| URL param | `?embed=1` or `?hideNav=1` |
+| Env (build) | `VITE_EMBED_INTEGRATION=true` |
+| iframe | Auto-detected |
+| Parent frame | `postMessage({ type: 'titan-shell-nav', hidden: true })` |
+
+App bar shows **Nav On/Off** toggle in integration mode.
+
+### Branding
+
+- Set site title in **Factory Setup** or via `VITE_APP_NAME` at build time
+- Backend env: `SITE_TITLE=Your Plant Name (PMS)`
+
+Default users (from `database/schema.sql` / seed):
+
+- `operator1` / `op123`
+- `admin` — check schema seed for password hash
+
+## 7. Firewall
+
+If UFW is enabled, ports 8010 and 5174 are opened automatically during dependency install.
+
+```bash
+sudo ufw allow 5174/tcp
+sudo ufw allow 8010/tcp
+```
+
+## Files included in package
+
+```
+eap-pms/
+├── backend/          # FastAPI app
+├── frontend/         # React + Vite
+├── database/         # schema.sql, migrations, examples
+├── scripts/          # install-deps, setup-database, install-systemd
+├── run.sh            # main launcher
+├── deploy.sh         # wrapper → run.sh
+├── deploy.env.example
+└── DEPLOY-UBUNTU.md
+```
+
+## Troubleshooting
+
+**Backend won't start**
+
+```bash
+sudo journalctl -u titan-backend -n 50
+tail -f backend.log
+```
+
+Check `backend/.env` — `DATABASE_URL` must match your MySQL user/password.
+
+**Frontend won't start**
+
+```bash
+sudo journalctl -u groz-frontend -n 50
+cd frontend && npm install && npm run build && npm run preview -- --host 0.0.0.0 --port 5174
+```
+
+**`$RefreshSig$ is not defined` in browser (AuthContext.jsx)**
+
+The frontend systemd unit is still running `npm run dev` with `NODE_ENV=production`. Reinstall the unit and restart:
+
+```bash
+bash scripts/install-systemd.sh
+sudo systemctl daemon-reload
+sudo systemctl restart groz-frontend
+curl -s http://localhost:5174/ | grep -E '/assets/.*\.js'   # should match; must NOT show /src/main.jsx
+```
+
+Or run `./run.sh restart` after copying the updated `scripts/` and `run.sh` from the latest package.
+
+**API returns 500 (`/api/config/branding`, `/api/auth/login`)**
+
+`/health` can pass while the database is misconfigured — API routes need MySQL. Usually `backend/.env` has a stale `DATABASE_URL` (wrong database name or password).
+
+```bash
+# Diagnose
+curl -s http://localhost:8010/health
+curl -s http://localhost:8010/health/db
+curl -s http://localhost:8010/api/config/branding
+grep DATABASE_URL backend/.env
+cat database/db.config.json
+
+# Fix: sync DATABASE_URL from db.config.json and restart backend
+python3 - <<'PY'
+import json, urllib.parse
+from pathlib import Path
+cfg = json.load(open("database/db.config.json"))
+enc = urllib.parse.quote(cfg["password"], safe="")
+url = f"mysql+pymysql://{cfg['user']}:{enc}@localhost:3306/{cfg['database']}"
+lines = Path("backend/.env").read_text().splitlines()
+out = [f"DATABASE_URL={url}" if l.startswith("DATABASE_URL=") else l for l in lines]
+if not any(l.startswith("DATABASE_URL=") for l in out):
+    out.insert(0, f"DATABASE_URL={url}")
+Path("backend/.env").write_text("\n".join(out) + "\n")
+print("Updated:", url)
+PY
+sudo systemctl restart groz-backend
+curl -s http://localhost:8010/health/db
+```
+
+Default login after seed: `operator1` / `op123` (not `opt123`).
+
+**MySQL connection failed**
+
+```bash
+sudo systemctl status mysql
+mysql -u root -p -e "SHOW DATABASES;"
+```
+
+Update `deploy.env` and `backend/.env`, then `./run.sh restart`.

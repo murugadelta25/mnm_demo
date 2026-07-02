@@ -1,0 +1,146 @@
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pathlib import Path
+from .routers import auth, oee, model_change, breakdown, plans
+from .routers import email_router
+from .routers import machines as machines_router
+from .routers import stations as stations_router
+from .routers import users as users_router
+from .routers import config as config_router
+from .routers import hourly_output as hourly_output_router
+from .routers import parts as parts_router
+from .routers import operator_dashboard as operator_dashboard_router
+from .routers import qc_inspection as qc_inspection_router
+from .routers import deviation_alerts as deviation_alerts_router
+from .ws_manager import manager
+from sqlalchemy import text, inspect
+from sqlalchemy.orm import Session
+from .models import get_db, engine
+from .scheduler_service import start_scheduler, stop_scheduler
+
+
+def _ensure_work_instruction_tables():
+    """Create part/WI tables in DATABASE_URL if migration was not run yet."""
+    try:
+        if not inspect(engine).has_table("parts"):
+            sql_path = Path(__file__).resolve().parent.parent.parent / "database" / "migrate_work_instructions.sql"
+            if sql_path.exists():
+                sql = sql_path.read_text(encoding="utf-8")
+                for raw in sql.split(";"):
+                    stmt = "\n".join(
+                        ln for ln in raw.strip().splitlines()
+                        if ln.strip() and not ln.strip().startswith("--")
+                    ).strip()
+                    if not stmt or stmt.upper().startswith("USE "):
+                        continue
+                    with engine.begin() as conn:
+                        conn.execute(text(stmt))
+                print("[OK] Work instruction tables created")
+    except Exception as exc:
+        print(f"[WARN] Work instruction table bootstrap failed: {exc}")
+    try:
+        from migrate_qc_enhancements import main as qc_migrate
+        qc_migrate()
+    except Exception as exc:
+        print(f"[WARN] QC enhancement migration skipped: {exc}")
+    try:
+        from migrate_quality_role import main as quality_role_migrate
+        quality_role_migrate()
+    except Exception as exc:
+        print(f"[WARN] Quality role migration skipped: {exc}")
+    try:
+        from migrate_operation_code import main as operation_code_migrate
+        operation_code_migrate()
+    except Exception as exc:
+        print(f"[WARN] operation_code migration skipped: {exc}")
+
+
+def _ensure_deviation_alert_table():
+    try:
+        if not inspect(engine).has_table("deviation_alert_log"):
+            from .models import DeviationAlertLog
+            DeviationAlertLog.__table__.create(bind=engine)
+            print("[OK] deviation_alert_log table created")
+        else:
+            cols = {c["name"] for c in inspect(engine).get_columns("deviation_alert_log")}
+            if "escalation_level" not in cols:
+                with engine.begin() as conn:
+                    conn.execute(text(
+                        "ALTER TABLE deviation_alert_log ADD COLUMN escalation_level INT DEFAULT 0"
+                    ))
+                print("[OK] deviation_alert_log.escalation_level column added")
+        if not inspect(engine).has_table("deviation_escalation_cases"):
+            from .models import DeviationEscalationCase
+            DeviationEscalationCase.__table__.create(bind=engine)
+            print("[OK] deviation_escalation_cases table created")
+    except Exception as exc:
+        print(f"[WARN] deviation_alert_log bootstrap failed: {exc}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _ensure_work_instruction_tables()
+    _ensure_deviation_alert_table()
+    try:
+        db = next(get_db())
+        try:
+            start_scheduler(db)
+        except Exception as e:
+            print(f"[WARN] Scheduler start failed (app will still run): {e}")
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"[WARN] Database unavailable at startup (app will still run): {e}")
+    yield
+    stop_scheduler()
+
+app = FastAPI(title="PMS Dashboard API", lifespan=lifespan)
+
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True,
+                   allow_methods=["*"], allow_headers=["*"])
+
+app.include_router(auth.router)
+app.include_router(oee.router)
+app.include_router(model_change.router)
+app.include_router(breakdown.router)
+app.include_router(plans.router)
+app.include_router(email_router.router)
+app.include_router(stations_router.router)
+app.include_router(machines_router.router)
+app.include_router(users_router.router)
+app.include_router(config_router.router)
+app.include_router(hourly_output_router.router)
+app.include_router(parts_router.router)
+app.include_router(operator_dashboard_router.router)
+app.include_router(qc_inspection_router.router)
+app.include_router(deviation_alerts_router.router)
+
+# Serve uploaded machine images — pathlib works on both Windows and Linux
+STATIC_DIR = Path(__file__).parent.parent / "static"
+(STATIC_DIR / "machines").mkdir(parents=True, exist_ok=True)
+(STATIC_DIR / "factory").mkdir(parents=True, exist_ok=True)
+(STATIC_DIR / "work-instructions").mkdir(parents=True, exist_ok=True)
+(STATIC_DIR / "parts").mkdir(parents=True, exist_ok=True)
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(websocket)
+
+@app.get("/health")
+def health(): return {"status": "ok"}
+
+@app.get("/health/db")
+def health_db(db: Session = Depends(get_db)):
+    try:
+        db.execute(text("SELECT 1"))
+        return {"status": "ok", "database": "connected"}
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Database unavailable: {exc}") from exc

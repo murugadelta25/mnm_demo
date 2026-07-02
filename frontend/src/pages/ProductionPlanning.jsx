@@ -1,0 +1,1110 @@
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import * as XLSX from 'xlsx';
+import api from '../api/client';
+import { useAuth } from '../context/AuthContext';
+import { useWebSocket } from '../api/useWebSocket';
+import PageHeader from '../components/PageHeader';
+import { useTheme } from '../context/ThemeContext';
+import { pageClass, surfaceClass } from '../themes/tileHelpers';
+import { useConfig, getCurrentShift } from '../context/ConfigContext';
+import { parseCtSeconds, sumCt, formatCtSeconds, isValidDecimalInput } from '../utils/cycleTime';
+import { partToPlanningVariant, planModelVariant } from '../utils/partVariant';
+import { DRAFT_KEYS } from '../utils/formPersistence';
+import usePersistedState from '../hooks/usePersistedState';
+
+const STATUS_CFG = {
+  pending:   { color: '#64748b', label: 'Pending',   icon: '⏳' },
+  running:   { color: '#0ea5e9', label: 'Running',   icon: '▶️' },
+  completed: { color: '#10b981', label: 'Completed', icon: '✅' },
+  paused:    { color: '#f59e0b', label: 'Paused',    icon: '⏸️' },
+  cancelled: { color: '#ef4444', label: 'Cancelled', icon: '❌' },
+};
+
+const TYPE_CFG = {
+  scheduled: { color: '#0ea5e9', label: 'Scheduled' },
+  urgent:    { color: '#ef4444', label: 'Urgent' },
+  trial:     { color: '#8b5cf6', label: 'Trial' },
+};
+
+const INIT_FORM = {
+  plan_date: new Date().toISOString().split('T')[0],
+  start_date: new Date().toISOString().split('T')[0],
+  end_date: new Date().toISOString().split('T')[0],
+  shift: 'A', station_no: 1, machine_id: '',
+  part_id: '',
+  current_operation: '', next_operation: '', model_variant: '',
+  process_time: '', loading_unloading: 10,
+  planned_qty: '', priority: 1,
+  plan_type: 'scheduled', plan_mode: 'single', notes: '',
+  use_machine: false  // false = station mode, true = individual machine mode
+};
+
+const PLC_ITEMS = [
+  { label: 'MQTT',       desc: 'Topic: titan/station/{station_no}/actual_qty',  color: '#8b5cf6' },
+  { label: 'Modbus TCP', desc: 'Register mapped to actual_qty per station',  color: '#0ea5e9' },
+  { label: 'OPC-UA',     desc: 'Node: ns=2;s=Station{n}.ActualQty',          color: '#10b981' },
+  { label: 'Manual',     desc: 'Click actual qty value in table to edit', color: '#f59e0b' },
+];
+
+// Helper functions for date calculations
+const getDateString = (date) => date.toISOString().split('T')[0];
+const getToday = () => new Date();
+const addDays = (date, days) => {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
+};
+// Returns the Monday of the week containing the given date
+const getMondayOf = (dateStr) => {
+  const d = new Date(dateStr);
+  const day = d.getDay(); // 0=Sun, 1=Mon
+  const diff = day === 0 ? -6 : 1 - day;
+  d.setDate(d.getDate() + diff);
+  return d.toISOString().split('T')[0];
+};
+
+const getWeekStart = (date) => {
+  const d = new Date(date);
+  const day = d.getDay();
+  const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+  return new Date(d.setDate(diff));
+};
+const getMonthStart = (date) => new Date(date.getFullYear(), date.getMonth(), 1);
+const getMonthEnd = (date) => new Date(date.getFullYear(), date.getMonth() + 1, 0);
+
+export default function ProductionPlanning() {
+  const { user } = useAuth();
+  const { theme: t } = useTheme();
+  const { config } = useConfig();
+  const enabledShifts = useMemo(() => config.shifts.filter(s => s.enabled), [config.shifts]);
+  const [plans, setPlans]       = useState([]);
+  const [machines, setMachines] = useState([]);
+  const [stations, setStations]       = useState([]);
+  const [parts, setParts]       = useState([]);
+  const [summary, setSummary]   = useState(null);
+  const [form, setForm] = usePersistedState(DRAFT_KEYS.productionPlanning, INIT_FORM);
+
+  const getStationLabel = (stationId) => {
+    const station = stations.find(s => s.id === stationId);
+    return station ? (station.display_name || station.name || `Station ${station.id}`) : stationId;
+  };
+  const [showForm, setShowForm] = useState(false);
+  const [showPlcInfo, setShowPlcInfo] = useState(false);
+  const [viewMode, setViewMode] = useState('day');
+  const [historicMode, setHistoricMode] = useState(null); // 'prev_day', 'prev_week', 'prev_month', null
+  const [filters, setFilters]   = useState({
+    start_date: new Date().toISOString().split('T')[0],
+    end_date: new Date().toISOString().split('T')[0],
+    plan_date: new Date().toISOString().split('T')[0],
+    shift: '', station_no: '', month: '', year: new Date().getFullYear(),
+    use_date_range: false
+  });
+  const [pipeline, setPipeline] = useState({});
+  const [planSearch, setPlanSearch] = useState('');
+  const [actualEdit, setActualEdit] = useState({ id: null, qty: '' });
+  const [msg, setMsg] = useState('');
+
+  // Default form shift from Configuration (enabled shifts)
+  useEffect(() => {
+    if (!enabledShifts.length) return;
+    const defaultShift = getCurrentShift(config)?.id || enabledShifts[0].id;
+    setForm(prev => (
+      enabledShifts.some(s => s.id === prev.shift)
+        ? prev
+        : { ...prev, shift: defaultShift }
+    ));
+  }, [config, enabledShifts]);
+
+  // Auto-set Monday when weekly mode is selected
+  useEffect(() => {
+    if (form.plan_mode === 'weekly') {
+      const monday = getMondayOf(form.start_date || new Date().toISOString().split('T')[0]);
+      setForm(p => ({ ...p, start_date: monday }));
+    }
+  }, [form.plan_mode]);
+
+  // Update filter dates when historic mode changes
+  useEffect(() => {
+    if (!historicMode) return;
+    const today = getToday();
+    let start, end;
+    
+    if (historicMode === 'prev_day') {
+      start = addDays(today, -1);
+      end = start;
+    } else if (historicMode === 'prev_week') {
+      end = addDays(today, -1);
+      start = addDays(getWeekStart(end), -6);
+    } else if (historicMode === 'prev_month') {
+      end = addDays(new Date(today.getFullYear(), today.getMonth(), 1), -1);
+      start = getMonthStart(end);
+    }
+    
+    setFilters(p => ({
+      ...p,
+      start_date: getDateString(start),
+      end_date: getDateString(end),
+      use_date_range: true
+    }));
+  }, [historicMode]);
+
+  const buildParams = () => {
+    const p = {};
+    if (filters.use_date_range && filters.start_date && filters.end_date) {
+      p.date_from = filters.start_date;
+      p.date_to = filters.end_date;
+    } else if (!filters.use_date_range && viewMode === 'day' && filters.plan_date) {
+      p.plan_date = filters.plan_date;
+    }
+    if (viewMode === 'month' && filters.month && !filters.use_date_range) p.month = filters.month;
+    if (filters.year && !filters.use_date_range) p.year = filters.year;
+    if (filters.shift)   p.shift = filters.shift;
+    if (filters.station_no) p.station_no = parseInt(filters.station_no, 10);
+    return p;
+  };
+
+  const fetchAll = useCallback(async () => {
+    const params = buildParams();
+    const [pl, sm, mc, pr] = await Promise.all([
+      api.get('/api/plans/', { params }),
+      api.get('/api/plans/summary', { params }),
+      api.get('/api/machines/'),
+      api.get('/api/stations/'),
+    ]);
+    setPlans(pl.data);
+    setSummary(sm.data);
+    setMachines(mc.data);
+    setStations(pr.data);
+
+    setForm(prev => {
+      if (prev.use_machine) return prev;
+      const validStationIds = new Set(pr.data.map(station => station.id));
+      if (validStationIds.has(prev.station_no)) return prev;
+      return { ...prev, station_no: pr.data[0]?.id || '' };
+    });
+
+    const validStationIds = new Set(pr.data.map(station => station.id));
+    const planStationNos = [...new Set(pl.data.map(p => p.station_no).filter(pn => validStationIds.has(pn)))];
+    const pipelineData = {};
+    await Promise.all(planStationNos.map(async pn => {
+      const r = await api.get(`/api/plans/pipeline/${pn}`);
+      if (r.data.length > 0) pipelineData[pn] = r.data;
+    }));
+    setPipeline(pipelineData);
+  }, [filters, viewMode]);
+
+  useEffect(() => { fetchAll(); }, [fetchAll]);
+
+  useEffect(() => {
+    api.get('/api/parts/options', { params: { active_only: true, limit: 500 } })
+      .then((r) => setParts(r.data))
+      .catch(() => setParts([]));
+  }, []);
+
+  const applyPartToForm = useCallback((partId) => {
+    if (!partId) {
+      setForm((p) => ({ ...p, part_id: '' }));
+      return;
+    }
+    const part = parts.find((p) => String(p.id) === String(partId));
+    if (!part) return;
+    setForm((p) => ({
+      ...p,
+      part_id: String(partId),
+      model_variant: partToPlanningVariant(part),
+      process_time: part.process_time != null && part.process_time !== ''
+        ? String(part.process_time)
+        : '',
+      loading_unloading: part.loading_unloading != null && part.loading_unloading !== ''
+        ? String(part.loading_unloading)
+        : '10',
+    }));
+  }, [parts]);
+
+  useWebSocket(useCallback(msg => {
+    if (['plan_created','plan_started','plan_completed','plan_updated','plan_deleted','actual_qty_updated','station_created','station_updated','station_deleted'].includes(msg.type))
+      fetchAll();
+  }, [fetchAll]));
+
+  const createPlan = async e => {
+    e.preventDefault();
+    try {
+      let payload = {
+        machine_id:        form.machine_id === '' ? null : parseInt(form.machine_id),
+        process_time:      parseCtSeconds(form.process_time),
+        loading_unloading: parseCtSeconds(form.loading_unloading),
+        planned_qty:       parseInt(form.planned_qty),
+        priority:          parseInt(form.priority),
+        shift:             form.shift,
+        station_no:           parseInt(form.station_no),
+        current_operation:       form.current_operation,
+        next_operation:       form.next_operation,
+        model_variant:       form.model_variant || null,
+        plan_type:         form.plan_type,
+        notes:             form.notes
+      };
+
+      // Handle different plan modes
+      if (form.plan_mode === 'single') {
+        payload.plan_date = form.plan_date;
+        await api.post('/api/plans/', payload);
+        setMsg('✅ Plan created for single day');
+      } else if (form.plan_mode === 'weekly') {
+        // Create plan for 7 days starting from start_date
+        payload.plan_date = form.start_date;
+        const end = new Date(form.start_date);
+        end.setDate(end.getDate() + 6);
+        payload.end_date = end.toISOString().split('T')[0];
+        await api.post('/api/plans/', payload);
+        setMsg('✅ Weekly plan created (7 days)');
+      } else if (form.plan_mode === 'monthly') {
+        // Create plan for entire month
+        const start = new Date(form.start_date);
+        payload.plan_date = form.start_date;
+        const year = start.getFullYear();
+        const month = start.getMonth();
+        const daysInMonth = new Date(year, month + 1, 0).getDate();
+        const end = new Date(year, month, daysInMonth);
+        payload.end_date = end.toISOString().split('T')[0];
+        await api.post('/api/plans/', payload);
+        setMsg(`✅ Monthly plan created (${daysInMonth} days)`);
+      } else if (form.plan_mode === 'custom_range') {
+        // Create plan for custom date range
+        payload.plan_date = form.start_date;
+        payload.end_date = form.end_date;
+        const dayCount = Math.ceil((new Date(form.end_date) - new Date(form.start_date)) / (1000 * 60 * 60 * 24)) + 1;
+        await api.post('/api/plans/', payload);
+        setMsg(`✅ Plan created for ${dayCount} days`);
+      }
+      
+      setForm(INIT_FORM);
+      setShowForm(false);
+      fetchAll();
+    } catch (err) { 
+      const errMsg = err.response?.data?.detail || err.response?.data?.message || err.message;
+      setMsg('❌ Error: ' + errMsg); 
+    }
+  };
+
+  const setStatus = async (id, status) => {
+    await api.patch(`/api/plans/${id}/status`, { status });
+    fetchAll();
+  };
+
+  const saveActual = async (id) => {
+    await api.patch(`/api/plans/${id}/actual`, { actual_qty: parseInt(actualEdit.qty), source: 'manual' });
+    setActualEdit({ id: null, qty: '' });
+    fetchAll();
+  };
+
+  const deletePlan = async id => {
+    if (!window.confirm('Delete this plan?')) return;
+    await api.delete(`/api/plans/${id}`);
+    fetchAll();
+  };
+
+  const clearHistoricMode = () => {
+    setHistoricMode(null);
+    setFilters(p => ({ ...p, use_date_range: false, plan_date: getDateString(getToday()) }));
+  };
+
+  const exportToExcel = () => {
+    try {
+      const wb = XLSX.utils.book_new();
+      
+      // Get date range for filename and title
+      let dateRange = '';
+      if (filters.use_date_range) {
+        dateRange = `${filters.start_date} to ${filters.end_date}`;
+      } else if (viewMode === 'day') {
+        dateRange = filters.plan_date;
+      } else if (viewMode === 'month' && filters.month) {
+        dateRange = `${MONTHS[filters.month - 1]} ${filters.year}`;
+      } else if (viewMode === 'month') {
+        dateRange = `All of ${filters.year}`;
+      } else if (viewMode === 'week') {
+        dateRange = `Week of ${filters.plan_date}`;
+      }
+
+      // ==================== Sheet 1: Summary ==================== 
+      const summaryData = [
+        ['PRODUCTION PLANNING REPORT'],
+        [''],
+        ['Report Date:', new Date().toLocaleDateString('en-GB')],
+        ['Period:', dateRange],
+        [''],
+        ['SUMMARY METRICS'],
+        ['Total Plans:', summary?.total_plans || 0],
+        ['Planned Quantity:', summary?.total_planned || 0],
+        ['Actual Quantity:', summary?.total_actual || 0],
+        ['Achievement %:', (summary?.achievement_pct || 0) + '%'],
+        [''],
+        ['STATUS BREAKDOWN'],
+        ['Pending:', summary?.by_status?.pending || 0],
+        ['Running:', summary?.by_status?.running || 0],
+        ['Completed:', summary?.by_status?.completed || 0],
+        ['Paused:', summary?.by_status?.paused || 0],
+        ['Cancelled:', summary?.by_status?.cancelled || 0],
+      ];
+      const summaryWs = XLSX.utils.aoa_to_sheet(summaryData);
+      summaryWs['!cols'] = [{ wch: 20 }, { wch: 15 }];
+      XLSX.utils.book_append_sheet(wb, summaryWs, 'Summary');
+
+      // ==================== Sheet 2: Detailed Plans ====================
+      const plansHeader = [
+        'Date', 'Shift', 'Station', 'Current Operation', 'Next Operation', 'Process Time (s)',
+        'Loading/Unloading (s)', 'Cycle Time (s)', 'Type', 'Priority', 'Planned Qty',
+        'Actual Qty', 'Achievement %', 'Status', 'Notes'
+      ];
+      
+      const plansData = plans.map(p => {
+        const pct = p.planned_qty > 0 ? Math.round(p.actual_qty / p.planned_qty * 100) : 0;
+        return [
+          p.plan_date,
+          p.shift,
+          p.station_no,
+          p.current_operation,
+          p.next_operation,
+          p.process_time,
+          p.loading_unloading,
+          sumCt(p.process_time, p.loading_unloading),
+          p.plan_type,
+          p.priority,
+          p.planned_qty,
+          p.actual_qty,
+          pct + '%',
+          p.status,
+          p.notes || ''
+        ];
+      });
+
+      const detailWs = XLSX.utils.aoa_to_sheet([plansHeader, ...plansData]);
+      
+      // Set column widths
+      detailWs['!cols'] = [
+        { wch: 12 }, { wch: 8 }, { wch: 6 }, { wch: 14 }, { wch: 14 },
+        { wch: 15 }, { wch: 17 }, { wch: 14 }, { wch: 12 }, { wch: 10 },
+        { wch: 12 }, { wch: 12 }, { wch: 14 }, { wch: 12 }, { wch: 20 }
+      ];
+
+      // Style header row (bold + background)
+      for (let i = 0; i < plansHeader.length; i++) {
+        const cellRef = XLSX.utils.encode_col(i) + '1';
+        if (!detailWs[cellRef]) continue;
+        detailWs[cellRef].s = {
+          font: { bold: true, color: { rgb: 'FFFFFF' } },
+          fill: { fgColor: { rgb: '1e293b' } },
+          alignment: { horizontal: 'center', vertical: 'center' }
+        };
+      }
+
+      XLSX.utils.book_append_sheet(wb, detailWs, 'Plans Details');
+
+      // ==================== Sheet 3: Production By Station ====================
+      const stationStats = {};
+      plans.forEach(p => {
+        if (!stationStats[p.station_no]) {
+          stationStats[p.station_no] = {
+            stationKey: p.station_no,
+            totalPlans: 0,
+            plannedQty: 0,
+            actualQty: 0,
+            completed: 0,
+            running: 0,
+            pending: 0
+          };
+        }
+        stationStats[p.station_no].totalPlans++;
+        stationStats[p.station_no].plannedQty += p.planned_qty;
+        stationStats[p.station_no].actualQty += p.actual_qty;
+        if (p.status === 'completed') stationStats[p.station_no].completed++;
+        else if (p.status === 'running') stationStats[p.station_no].running++;
+        else if (p.status === 'pending') stationStats[p.station_no].pending++;
+      });
+
+      const stationHeader = ['Station No', 'Total Plans', 'Planned Qty', 'Actual Qty', 'Achievement %', 'Completed', 'Running', 'Pending'];
+      const stationRows = Object.values(stationStats).map(ps => {
+        const achievementPct = ps.plannedQty > 0 ? Math.round(ps.actualQty / ps.plannedQty * 100) : 0;
+        return [
+          ps.stationKey,
+          ps.totalPlans,
+          ps.plannedQty,
+          ps.actualQty,
+          achievementPct + '%',
+          ps.completed,
+          ps.running,
+          ps.pending
+        ];
+      });
+
+      const stationWs = XLSX.utils.aoa_to_sheet([stationHeader, ...stationRows]);
+      stationWs['!cols'] = [
+        { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 12 },
+        { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 12 }
+      ];
+
+      // Style header row
+      for (let i = 0; i < stationHeader.length; i++) {
+        const cellRef = XLSX.utils.encode_col(i) + '1';
+        if (!stationWs[cellRef]) continue;
+        stationWs[cellRef].s = {
+          font: { bold: true, color: { rgb: 'FFFFFF' } },
+          fill: { fgColor: { rgb: '1e293b' } },
+          alignment: { horizontal: 'center', vertical: 'center' }
+        };
+      }
+
+      XLSX.utils.book_append_sheet(wb, stationWs, 'By Station');
+
+      // ==================== Sheet 4: Shift Analysis ====================
+      const shiftStats = {};
+      plans.forEach(p => {
+        if (!shiftStats[p.shift]) {
+          shiftStats[p.shift] = {
+            shift: p.shift,
+            totalPlans: 0,
+            plannedQty: 0,
+            actualQty: 0,
+            completed: 0,
+            running: 0
+          };
+        }
+        shiftStats[p.shift].totalPlans++;
+        shiftStats[p.shift].plannedQty += p.planned_qty;
+        shiftStats[p.shift].actualQty += p.actual_qty;
+        if (p.status === 'completed') shiftStats[p.shift].completed++;
+        else if (p.status === 'running') shiftStats[p.shift].running++;
+      });
+
+      const shiftHeader = ['Shift', 'Total Plans', 'Planned Qty', 'Actual Qty', 'Achievement %', 'Completed', 'Running'];
+      const shiftRows = Object.values(shiftStats).map(ss => {
+        const achievementPct = ss.plannedQty > 0 ? Math.round(ss.actualQty / ss.plannedQty * 100) : 0;
+        return [
+          ss.shift,
+          ss.totalPlans,
+          ss.plannedQty,
+          ss.actualQty,
+          achievementPct + '%',
+          ss.completed,
+          ss.running
+        ];
+      });
+
+      const shiftWs = XLSX.utils.aoa_to_sheet([shiftHeader, ...shiftRows]);
+      shiftWs['!cols'] = [
+        { wch: 10 }, { wch: 12 }, { wch: 12 }, { wch: 12 },
+        { wch: 14 }, { wch: 12 }, { wch: 12 }
+      ];
+
+      // Style header row
+      for (let i = 0; i < shiftHeader.length; i++) {
+        const cellRef = XLSX.utils.encode_col(i) + '1';
+        if (!shiftWs[cellRef]) continue;
+        shiftWs[cellRef].s = {
+          font: { bold: true, color: { rgb: 'FFFFFF' } },
+          fill: { fgColor: { rgb: '1e293b' } },
+          alignment: { horizontal: 'center', vertical: 'center' }
+        };
+      }
+
+      XLSX.utils.book_append_sheet(wb, shiftWs, 'By Shift');
+
+      // Generate filename with date range
+      const timestamp = new Date().toISOString().split('T')[0];
+      const filename = `Production_Plan_${timestamp}_${dateRange.replace(/\s+/g, '_')}.xlsx`;
+
+      // Download file
+      XLSX.writeFile(wb, filename);
+      setMsg('✅ Report exported successfully');
+      setTimeout(() => setMsg(''), 3000);
+    } catch (err) {
+      setMsg('Error: Failed to export report - ' + err.message);
+    }
+  };
+
+  const canEdit   = user?.role === 'supervisor' || user?.role === 'admin';
+  const canCreate = user?.role !== 'maintenance';
+
+  const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const daysDiff = filters.start_date && filters.end_date ? 
+    Math.ceil((new Date(filters.end_date) - new Date(filters.start_date)) / (1000 * 60 * 60 * 24)) + 1 : 0;
+
+  // derive runtime styles from theme
+  const s = getStyles(t);
+
+  return (
+    <div className={pageClass(t)} style={{ padding: 20, background: t.bg, minHeight: 'calc(100vh - 52px)', color: t.text, transition: 'background 0.2s, color 0.2s' }}>
+      {/* Header with clock + refresh + info button */}
+      <PageHeader
+        title="PRODUCTION PLANNING"
+        onRefresh={fetchAll}
+        extra={
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <button
+              style={s.exportBtn}
+              onClick={exportToExcel}
+              title="Download planning report as Excel"
+            >
+              ⬇ Export Excel
+            </button>
+            {canCreate && (
+              <button style={s.addBtn} onClick={() => setShowForm(v => !v)}>
+                {showForm ? '✕ Cancel' : '+ New Plan'}
+              </button>
+            )}
+            <button
+              style={s.infoBtn}
+              onClick={() => setShowPlcInfo(v => !v)}
+              title="PLC / Machine Integration Info"
+            >
+              ⓘ
+            </button>
+          </div>
+        }
+      />
+
+      {/* PLC Info Panel — hidden by default, shown on ⓘ click */}
+      {showPlcInfo && (
+        <div style={s.plcCard}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+            <h4 style={{ ...s.cardTitle, margin: 0 }}>🔌 PLC / Machine Integration</h4>
+            <button style={s.closeBtn} onClick={() => setShowPlcInfo(false)}>✕</button>
+          </div>
+          <p style={{ color: t.textDim, fontSize: 13, marginBottom: 12 }}>
+            Actual production count is automatically updated when received from the machine via:
+          </p>
+          <div style={s.plcGrid}>
+            {PLC_ITEMS.map(i => (
+              <div key={i.label} style={{ ...s.plcItem, borderLeft: `3px solid ${i.color}` }}>
+                <div style={{ color: i.color, fontWeight: 700, fontSize: 13 }}>{i.label}</div>
+                <div style={{ color: t.textDim, fontSize: 12 }}>{i.desc}</div>
+              </div>
+            ))}
+          </div>
+          <p style={{ color: t.textFaint, fontSize: 12, marginTop: 10 }}>
+            API endpoint: <code style={{ color: t.accent }}>PATCH /api/plans/{'{id}'}/actual</code> —{' '}
+            called by Node-RED, MQTT bridge, or Modbus bridge with{' '}
+            <code style={{ color: t.accent }}>{'{"actual_qty": 123, "source": "mqtt"}'}</code>
+          </p>
+        </div>
+      )}
+
+      {/* Create Plan Form - Enhanced with date range and weekly/monthly options */}
+      {showForm && (
+        <div className={surfaceClass(t)} style={s.card}>
+          <h4 style={s.cardTitle}>Create Production Plan</h4>
+          <form onSubmit={createPlan}>
+            {/* Plan Mode Selection */}
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ color: t.textDim, fontSize: 11, marginBottom: 8, display: 'block' }}>Plan Mode</label>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                {[
+                  { value: 'single', label: '📅 Single Day', desc: 'Create plan for one date' },
+                  { value: 'weekly', label: '📆 Weekly', desc: '7 consecutive days' },
+                  { value: 'monthly', label: '📊 Monthly', desc: 'Full month plan' },
+                  { value: 'custom_range', label: '📋 Custom Range', desc: 'Any date range' },
+                ].map(mode => (
+                  <div key={mode.value} style={{ flex: '1 1 auto', minWidth: 140 }}>
+                    <button
+                      type="button"
+                      style={{
+                        ...s.modeBtn,
+                        ...(form.plan_mode === mode.value ? s.modeBtnActive : s.modeBtnInactive)
+                      }}
+                      onClick={() => setForm(p => ({ ...p, plan_mode: mode.value }))}
+                    >
+                      <div style={{ fontWeight: 600, fontSize: 13 }}>{mode.label}</div>
+                      <div style={{ fontSize: 11, opacity: 0.8, marginTop: 2 }}>{mode.desc}</div>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div style={s.formGrid}>
+              {/* Date fields based on plan mode */}
+              {form.plan_mode === 'single' && (
+                <FField t={t} label="Date">
+                  <input style={s.inp} type="date" value={form.plan_date}
+                    onChange={e => setForm(p => ({ ...p, plan_date: e.target.value }))} required />
+                </FField>
+              )}
+              {form.plan_mode === 'weekly' && (
+                <FField t={t} label="Start Date (Monday)">
+                  <input style={s.inp} type="date" value={form.start_date}
+                    onChange={e => setForm(p => ({ ...p, start_date: e.target.value }))} required />
+                </FField>
+              )}
+              {form.plan_mode === 'monthly' && (
+                <FField t={t} label="Start Date (1st of month)">
+                  <input style={s.inp} type="date" value={form.start_date}
+                    onChange={e => setForm(p => ({ ...p, start_date: e.target.value }))} required />
+                </FField>
+              )}
+              {form.plan_mode === 'custom_range' && (
+                <>
+                  <FField t={t} label="Start Date">
+                    <input style={s.inp} type="date" value={form.start_date}
+                      onChange={e => setForm(p => ({ ...p, start_date: e.target.value }))} required />
+                  </FField>
+                  <FField t={t} label="End Date">
+                    <input style={s.inp} type="date" value={form.end_date}
+                      onChange={e => setForm(p => ({ ...p, end_date: e.target.value }))} required />
+                  </FField>
+                </>
+              )}
+
+              <FField t={t} label="Shift">
+                <select style={s.inp} value={form.shift} onChange={e => setForm(p => ({ ...p, shift: e.target.value }))}>
+                  {enabledShifts.length === 0 ? (
+                    <option value="">No shifts configured</option>
+                  ) : enabledShifts.map(sh => (
+                    <option key={sh.id} value={sh.id}>{sh.name} ({sh.start}–{sh.end})</option>
+                  ))}
+                </select>
+              </FField>
+              <FField t={t} label="Station No">
+                <select style={s.inp} value={form.station_no || ''}
+                  disabled={form.use_machine || stations.length === 0}
+                  onChange={e => setForm(p => ({ ...p, station_no: parseInt(e.target.value), machine_id: '' }))}>
+                  {stations.length === 0 ? (
+                    <option value="">No stations available</option>
+                  ) : (
+                    stations.map(station => (
+                      <option key={station.id} value={station.id}>
+                        {station.display_name || station.name}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </FField>
+              <FField t={t} label="Select Machine">
+                <select style={s.inp} value={form.machine_id}
+                  onChange={e => setForm(p => ({ ...p, machine_id: e.target.value }))}>
+                  <option value="">— Any machine in station —</option>
+                  {machines
+                    .filter(m => !form.station_no || m.station_id === parseInt(form.station_no, 10))
+                    .map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+                </select>
+              </FField>
+              <FField t={t} label="Part (Part Master)" wide>
+                <select
+                  style={s.inp}
+                  value={form.part_id}
+                  onChange={(e) => applyPartToForm(e.target.value)}
+                >
+                  <option value="">— Select part to auto-fill details —</option>
+                  {parts.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {partToPlanningVariant(p)}
+                      {p.model_variant && p.model_variant !== p.part_no ? ` (variant: ${p.model_variant})` : ''}
+                    </option>
+                  ))}
+                </select>
+              </FField>
+              <FField t={t} label="Current Operation"><input style={s.inp} value={form.current_operation}
+                onChange={e => setForm(p => ({ ...p, current_operation: e.target.value }))} required /></FField>
+              <FField t={t} label="Next Operation"><input style={s.inp} value={form.next_operation}
+                onChange={e => setForm(p => ({ ...p, next_operation: e.target.value }))} required /></FField>
+              <FField t={t} label="Model / Variant">
+                <input
+                  style={s.inp}
+                  value={form.model_variant}
+                  onChange={(e) => setForm((p) => ({ ...p, model_variant: e.target.value, part_id: '' }))}
+                  placeholder="e.g. TL/TQW/DI/12/250/80"
+                  list="plan-part-variants"
+                />
+                <datalist id="plan-part-variants">
+                  {parts.map((p) => (
+                    <option key={p.id} value={partToPlanningVariant(p)} />
+                  ))}
+                </datalist>
+              </FField>
+              <FField t={t} label="Process Time (sec)"><input style={s.inp} type="number" min="0" step="0.01" value={form.process_time}
+                onChange={e => isValidDecimalInput(e.target.value) && setForm(p => ({ ...p, process_time: e.target.value }))} required /></FField>
+              <FField t={t} label="L&U Time (sec)"><input style={s.inp} type="number" min="0" step="0.01" value={form.loading_unloading}
+                onChange={e => isValidDecimalInput(e.target.value) && setForm(p => ({ ...p, loading_unloading: e.target.value }))} /></FField>
+              <FField t={t} label="Cycle Time CT (sec)">
+                <input style={{ ...s.inp, background: t.surface2, color: t.brand, fontWeight: 700 }} readOnly
+                  value={formatCtSeconds(sumCt(form.process_time, form.loading_unloading))} />
+              </FField>
+              <FField t={t} label="Planned Qty"><input style={s.inp} type="number" value={form.planned_qty}
+                onChange={e => setForm(p => ({ ...p, planned_qty: parseInt(e.target.value) }))} required /></FField>
+              <FField t={t} label="Priority (1=High)"><input style={s.inp} type="number" min="1" max="10" value={form.priority}
+                onChange={e => setForm(p => ({ ...p, priority: parseInt(e.target.value) }))} /></FField>
+              <FField t={t} label="Type">
+                <select style={s.inp} value={form.plan_type} onChange={e => setForm(p => ({ ...p, plan_type: e.target.value }))}>
+                  <option value="scheduled">Scheduled</option>
+                  <option value="urgent">Urgent</option>
+                  <option value="trial">Trial</option>
+                </select>
+              </FField>
+              <FField t={t} label="Notes" wide><input style={s.inp} value={form.notes}
+                onChange={e => setForm(p => ({ ...p, notes: e.target.value }))} placeholder="Optional notes..." /></FField>
+            </div>
+            {msg && <p style={{ color: msg.startsWith('Error') ? '#ef4444' : t.brand, fontSize: 13 }}>{msg}</p>}
+            <button style={s.submitBtn} type="submit">
+              {form.plan_mode === 'single' && '✓ Create Plan'}
+              {form.plan_mode === 'weekly' && '✓ Create Weekly Plan'}
+              {form.plan_mode === 'monthly' && '✓ Create Monthly Plan'}
+              {form.plan_mode === 'custom_range' && '✓ Create Plan Range'}
+            </button>
+          </form>
+        </div>
+      )}
+
+      {/* Filters - Enhanced with date range and historic quick select */}
+      <div style={s.filterBar}>
+        <div style={s.filterSection}>
+          <label style={{ color: t.textMuted, fontSize: 11, fontWeight: 600, marginRight: 8 }}>View Period:</label>
+          <div style={s.viewBtns}>
+            {['day','week','month'].map(v => (
+              <button key={v} style={{ ...s.vBtn, ...(viewMode === v && !filters.use_date_range ? s.vBtnActive : {}) }}
+                onClick={() => {
+                  setViewMode(v);
+                  clearHistoricMode();
+                }}>
+                {v.charAt(0).toUpperCase()+v.slice(1)}
+              </button>
+            ))}
+            <button style={{ ...s.vBtn, ...(filters.use_date_range ? s.vBtnActive : {}) }}
+              onClick={() => setFilters(p => ({ ...p, use_date_range: !p.use_date_range }))}>
+              📋 Date Range
+            </button>
+          </div>
+        </div>
+
+        {/* Historic Data Quick Select */}
+        <div style={s.filterSection}>
+          <label style={{ color: t.textMuted, fontSize: 11, fontWeight: 600, marginRight: 8 }}>Historic Data:</label>
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            <button style={{ ...s.histBtn, ...(historicMode === 'prev_day' ? s.histBtnActive : {}) }}
+              onClick={() => setHistoricMode(historicMode === 'prev_day' ? null : 'prev_day')} title="View previous day data">
+              ← Prev Day
+            </button>
+            <button style={{ ...s.histBtn, ...(historicMode === 'prev_week' ? s.histBtnActive : {}) }}
+              onClick={() => setHistoricMode(historicMode === 'prev_week' ? null : 'prev_week')} title="View previous week data">
+              ← Prev Week
+            </button>
+            <button style={{ ...s.histBtn, ...(historicMode === 'prev_month' ? s.histBtnActive : {}) }}
+              onClick={() => setHistoricMode(historicMode === 'prev_month' ? null : 'prev_month')} title="View previous month data">
+              ← Prev Month
+            </button>
+          </div>
+        </div>
+
+        {/* Date Range Inputs */}
+        {filters.use_date_range && (
+          <div style={s.filterSection}>
+            <label style={{ color: t.textMuted, fontSize: 11, fontWeight: 600, marginRight: 8 }}>Date Range:</label>
+            <input style={s.inp} type="date" value={filters.start_date}
+              onChange={e => setFilters(p => ({ ...p, start_date: e.target.value }))} />
+            <span style={{ color: t.textDim, padding: '0 8px', alignSelf: 'center' }}>to</span>
+            <input style={s.inp} type="date" value={filters.end_date}
+              onChange={e => setFilters(p => ({ ...p, end_date: e.target.value }))} />
+            {daysDiff > 0 && <span style={{ color: t.textMuted, fontSize: 11, alignSelf: 'center' }}>({daysDiff} days)</span>}
+          </div>
+        )}
+
+        {/* Standard date filters when not using range */}
+        {!filters.use_date_range && (
+          <div style={s.filterSection}>
+            {viewMode === 'day' && <input style={s.inp} type="date" value={filters.plan_date}
+              onChange={e => setFilters(p => ({ ...p, plan_date: e.target.value }))} />}
+            {viewMode === 'month' && (
+              <select style={s.inp} value={filters.month} onChange={e => setFilters(p => ({ ...p, month: e.target.value }))}>
+                <option value="">All Months</option>
+                {MONTHS.map((m, i) => <option key={i} value={i+1}>{m}</option>)}
+              </select>
+            )}
+            <select style={s.inp} value={filters.year} onChange={e => setFilters(p => ({ ...p, year: e.target.value }))}>
+              {[2025,2026,2027].map(y => <option key={y} value={y}>{y}</option>)}
+            </select>
+          </div>
+        )}
+
+        {/* Common filters */}
+        <div style={s.filterSection}>
+          <select style={s.inp} value={filters.shift} onChange={e => setFilters(p => ({ ...p, shift: e.target.value }))}>
+            <option value="">All Shifts</option>
+            {enabledShifts.map(sh => (
+              <option key={sh.id} value={sh.id}>{sh.name}</option>
+            ))}
+          </select>
+          <select style={s.inp} value={filters.station_no} onChange={e => setFilters(p => ({ ...p, station_no: e.target.value }))}>
+            <option value="">All Stations</option>
+            {stations.map(station => (
+              <option key={station.id} value={station.id}>
+                {station.display_name || station.name || `Station ${station.id}`}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* Display active filter info */}
+        {historicMode && (
+          <div style={s.histInfoBadge}>
+            {historicMode === 'prev_day' && '📅 Viewing previous day'}
+            {historicMode === 'prev_week' && '📆 Viewing previous week'}
+            {historicMode === 'prev_month' && '📊 Viewing previous month'}
+          </div>
+        )}
+        {filters.use_date_range && !historicMode && (
+          <div style={s.histInfoBadge}>
+            📋 Viewing {daysDiff} days ({filters.start_date} to {filters.end_date})
+          </div>
+        )}
+      </div>
+
+      {/* Summary KPIs */}
+      {summary && (
+        <div style={s.kpiRow}>
+          {[
+            { label: 'Total Plans',  value: summary.total_plans,   color: '#64748b' },
+            { label: 'Planned Qty',  value: summary.total_planned, color: '#0ea5e9' },
+            { label: 'Actual Qty',   value: summary.total_actual,  color: '#8b5cf6' },
+            { label: 'Achievement',  value: summary.achievement_pct + '%',
+              color: summary.achievement_pct >= 90 ? '#10b981' : summary.achievement_pct >= 70 ? '#f59e0b' : '#ef4444' },
+            { label: 'Running',   value: summary.by_status?.running   || 0, color: '#0ea5e9' },
+            { label: 'Completed', value: summary.by_status?.completed || 0, color: '#10b981' },
+            { label: 'Pending',   value: summary.by_status?.pending   || 0, color: '#64748b' },
+          ].map(k => (
+            <div key={k.label} style={{ ...s.kpi, borderTop: `3px solid ${k.color}` }}>
+              <div style={{ color: k.color, fontSize: 22, fontWeight: 700 }}>{k.value}</div>
+              <div style={{ color: t.textMuted, fontSize: 11, marginTop: 4 }}>{k.label}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Pipeline View per Station */}
+      {Object.keys(pipeline).length > 0 && (
+        <div className={surfaceClass(t)} style={s.card}>
+          <h4 style={s.cardTitle}>🔁 Production Pipeline (Next to Load)</h4>
+          <div style={s.pipelineGrid}>
+            {Object.entries(pipeline).map(([stationNo, queue]) => (
+              <div key={stationNo} className={surfaceClass(t, 'nested')} style={s.pipelineCol}>
+                <div style={s.pipelineHeader}>{getStationLabel(parseInt(stationNo))}</div>
+                {queue.length === 0 && <div style={s.pipelineEmpty}>Queue empty</div>}
+                {queue.map((p, idx) => {
+                  const partLabel = planModelVariant(p, parts);
+                  return (
+                  <div key={p.id} className={surfaceClass(t, 'raised')} style={{ ...s.pipelineItem, borderLeft: `3px solid ${idx === 0 ? t.accent : t.border}` }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span style={{ color: idx === 0 ? t.accent : t.textMuted, fontWeight: idx === 0 ? 700 : 400, fontSize: 13 }}>
+                        {idx === 0 ? '▶ ' : `${idx+1}. `}{p.current_operation}
+                      </span>
+                      <span style={{ ...s.typeBadge, background: TYPE_CFG[p.plan_type]?.color + '33',
+                                     color: TYPE_CFG[p.plan_type]?.color }}>
+                        {p.plan_type}
+                      </span>
+                    </div>
+                    <div style={{ color: t.textDim, fontSize: 11 }}>→ {p.next_operation}</div>
+                    {partLabel && (
+                      <div style={{ color: t.text, fontSize: 11, fontWeight: 600, marginTop: 2 }}>
+                        {partLabel}
+                      </div>
+                    )}
+                    <div style={{ color: t.textMuted, fontSize: 11 }}>
+                      Planned: {p.planned_qty} | CT: {formatCtSeconds(sumCt(p.process_time, p.loading_unloading))}s | {p.shift} | {p.plan_date}
+                    </div>
+                    {idx === 0 && p.status === 'pending' && canEdit && (
+                      <button style={{ ...s.miniBtn, background: t.accent, marginTop: 4 }}
+                        onClick={() => setStatus(p.id, 'running')}>▶ Start</button>
+                    )}
+                  </div>
+                  );
+                })}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Plans Table */}
+      <div className={surfaceClass(t)} style={s.card}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
+          <h4 style={{ ...s.cardTitle, margin: 0 }}>All Plans ({plans.length})</h4>
+          <input
+            style={{ padding: '5px 10px', borderRadius: 6, border: `1px solid ${t.inpBorder}`,
+                     background: t.inp, color: t.text, fontSize: 13, minWidth: 220 }}
+            placeholder="Search model, variant, station, shift, status…"
+            value={planSearch}
+            onChange={e => setPlanSearch(e.target.value)}
+          />
+          {planSearch && (
+            <button onClick={() => setPlanSearch('')}
+              style={{ padding: '4px 8px', borderRadius: 6, border: `1px solid ${t.border}`,
+                       background: t.surface2, color: t.textMuted, cursor: 'pointer', fontSize: 12 }}>✕</button>
+          )}
+        </div>
+        <div style={{ overflowX: 'auto' }}>
+          <table style={s.table}>
+            <thead>
+              <tr>
+                {['Date','Shift','Station','Machine','Model / Variant','Current Operation','Next Operation','CT(s)','Type','Priority',
+                  'Planned','Actual','%','Status','Actions'].map(h =>
+                  <th key={h} style={s.th}>{h}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {plans.filter(p => {
+                if (!planSearch.trim()) return true;
+                const q = planSearch.toLowerCase();
+                const variant = (planModelVariant(p, parts) || p.model_variant || '').toLowerCase();
+                const machineName = (machines.find(m => m.id === p.machine_id)?.name || '').toLowerCase();
+                return (
+                  variant.includes(q) ||
+                  (p.current_operation || '').toLowerCase().includes(q) ||
+                  (p.next_operation || '').toLowerCase().includes(q) ||
+                  getStationLabel(p.station_no).toLowerCase().includes(q) ||
+                  machineName.includes(q) ||
+                  (p.shift || '').toLowerCase().includes(q) ||
+                  (p.status || '').toLowerCase().includes(q)
+                );
+              }).map(p => {
+                const pct = p.planned_qty > 0 ? Math.round(p.actual_qty / p.planned_qty * 100) : 0;
+                const cfg = STATUS_CFG[p.status];
+                return (
+                  <tr key={p.id}>
+                    <td style={s.td}>{p.plan_date}</td>
+                    <td style={s.td}>{p.shift}</td>
+                    <td style={s.td}>{getStationLabel(p.station_no)}</td>
+                    <td style={s.td}>{machines.find(m => m.id === p.machine_id)?.name || '—'}</td>
+                    <td style={s.td}>{planModelVariant(p, parts) || '—'}</td>
+                    <td style={s.td}>{p.current_operation}</td>
+                    <td style={s.td}>{p.next_operation}</td>
+                    <td style={s.td}>{formatCtSeconds(sumCt(p.process_time, p.loading_unloading))}</td>
+                    <td style={s.td}>
+                      <span style={{ ...s.typeBadge, background: TYPE_CFG[p.plan_type]?.color + '33',
+                                     color: TYPE_CFG[p.plan_type]?.color }}>
+                        {p.plan_type}
+                      </span>
+                    </td>
+                    <td style={s.td}>{p.priority}</td>
+                    <td style={s.td}>{p.planned_qty}</td>
+                    <td style={s.td}>
+                      {actualEdit.id === p.id ? (
+                        <div style={{ display: 'flex', gap: 4 }}>
+                          <input style={{ ...s.inp, width: 70, padding: '3px 6px' }} type="number"
+                            value={actualEdit.qty} onChange={e => setActualEdit(v => ({ ...v, qty: e.target.value }))} />
+                          <button style={{ ...s.miniBtn, background: t.brand }} onClick={() => saveActual(p.id)}>✓</button>
+                          <button style={{ ...s.miniBtn, background: t.textFaint }} onClick={() => setActualEdit({ id: null, qty: '' })}>✕</button>
+                        </div>
+                      ) : (
+                        <span style={{ cursor: 'pointer', color: t.text }}
+                          onClick={() => setActualEdit({ id: p.id, qty: p.actual_qty })}>
+                          {p.actual_qty}
+                        </span>
+                      )}
+                    </td>
+                    <td style={s.td}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <div style={{ flex: 1, height: 6, background: t.scrollTrack, borderRadius: 3, minWidth: 50 }}>
+                          <div style={{ width: `${Math.min(pct,100)}%`, height: '100%', borderRadius: 3,
+                                        background: pct >= 100 ? '#10b981' : pct >= 70 ? '#f59e0b' : '#0ea5e9' }} />
+                        </div>
+                        <span style={{ color: t.textMuted, fontSize: 11 }}>{pct}%</span>
+                      </div>
+                    </td>
+                    <td style={s.td}>
+                      <span style={{ ...s.statusBadge, background: cfg?.color + '22', color: cfg?.color }}>
+                        {cfg?.icon} {cfg?.label}
+                      </span>
+                    </td>
+                    <td style={s.td}>
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                        {p.status === 'pending' && canEdit && (
+                          <button style={{ ...s.miniBtn, background: t.accent }} onClick={() => setStatus(p.id, 'running')}>▶</button>
+                        )}
+                        {p.status === 'running' && (
+                          <>
+                            <button style={{ ...s.miniBtn, background: '#f59e0b' }} onClick={() => setStatus(p.id, 'paused')}>⏸</button>
+                            {canEdit && <button style={{ ...s.miniBtn, background: t.brand }} onClick={() => setStatus(p.id, 'completed')}>✓</button>}
+                          </>
+                        )}
+                        {p.status === 'paused' && (
+                          <button style={{ ...s.miniBtn, background: t.accent }} onClick={() => setStatus(p.id, 'running')}>▶</button>
+                        )}
+                        {canEdit && p.status !== 'completed' && (
+                          <button style={{ ...s.miniBtn, background: '#ef4444' }} onClick={() => deletePlan(p.id)}>🗑</button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FField({ label, children, wide, t }) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 4, gridColumn: wide ? 'span 2' : 'span 1' }}>
+      <label style={{ color: t?.textDim, fontSize: 11 }}>{label}</label>
+      {children}
+    </div>
+  );
+}
+
+function getStyles(t) {
+  return {
+    page: { padding: 20, background: t.bg, minHeight: 'calc(100vh - 52px)', color: t.text },
+    addBtn: { padding: '8px 20px', background: t.accent, color: '#fff', border: 'none',
+              borderRadius: 8, cursor: 'pointer', fontWeight: 600, fontSize: 14 },
+    exportBtn: { padding: '8px 20px', background: t.brand, color: '#fff', border: 'none',
+                 borderRadius: 8, cursor: 'pointer', fontWeight: 600, fontSize: 14 },
+    infoBtn: { width: 30, height: 30, borderRadius: '50%', border: `1px solid ${t.border}`,
+               background: t.surface, color: t.accent, cursor: 'pointer', fontSize: 15,
+               fontWeight: 700, lineHeight: 1, flexShrink: 0 },
+    closeBtn: { background: 'none', border: 'none', color: t.textDim, cursor: 'pointer',
+                fontSize: 16, padding: '2px 6px' },
+    card: { background: t.surface, borderRadius: 10, padding: 20, marginBottom: 16 },
+    cardTitle: { color: t.accent, margin: '0 0 14px', fontSize: 14, fontWeight: 600 },
+    formGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(180px, 1fr))', gap: 12, marginBottom: 14 },
+    inp: { padding: '7px 10px', borderRadius: 6, border: `1px solid ${t.inpBorder}`, background: t.inp,
+           color: t.text, fontSize: 13 },
+    submitBtn: { padding: '9px 28px', background: t.brand, color: '#fff', border: 'none',
+                 borderRadius: 8, cursor: 'pointer', fontWeight: 600, fontSize: 14 },
+    filterBar: { display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 16, alignItems: 'center' },
+    viewBtns: { display: 'flex', gap: 4 },
+    vBtn: { padding: '6px 14px', borderRadius: 6, border: `1px solid ${t.border}`, background: t.surface,
+            color: t.textMuted, cursor: 'pointer', fontSize: 13 },
+    vBtnActive: { background: t.accent, color: '#fff', border: `1px solid ${t.accent}` },
+    kpiRow: { display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 16 },
+    kpi: { background: t.surface, borderRadius: 10, padding: '14px 18px', flex: 1, minWidth: 100 },
+    pipelineGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12 },
+    pipelineCol: { background: t.surface2, borderRadius: 8, padding: 12 },
+    pipelineHeader: { color: t.accent, fontWeight: 700, fontSize: 13, marginBottom: 8,
+                      borderBottom: `1px solid ${t.border}`, paddingBottom: 6 },
+    pipelineEmpty: { color: t.textFaint, fontSize: 12, fontStyle: 'italic' },
+    pipelineItem: { padding: '8px 10px', marginBottom: 6, background: t.surfaceRaised ?? t.surface, borderRadius: 6 },
+    typeBadge: { padding: '1px 7px', borderRadius: 10, fontSize: 11, fontWeight: 600 },
+    miniBtn: { padding: '3px 8px', border: 'none', borderRadius: 4, color: '#fff',
+               cursor: 'pointer', fontSize: 12, fontWeight: 600 },
+    table: { width: '100%', borderCollapse: 'collapse', fontSize: 12 },
+    th: { padding: '9px 8px', background: t.surface2, color: t.textDim, textAlign: 'left', whiteSpace: 'nowrap' },
+    td: { padding: '8px', borderBottom: `1px solid ${t.border}`, color: t.textMuted, whiteSpace: 'nowrap' },
+    statusBadge: { padding: '2px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600 },
+    plcCard: { background: t.surface, borderRadius: 10, padding: 20, marginBottom: 16,
+               border: `1px solid ${t.border}` },
+    plcGrid: { display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 10 },
+    plcItem: { background: t.surface2, borderRadius: 6, padding: '10px 12px' },
+    // New styles for enhanced planning features
+    filterSection: { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' },
+    modeBtn: { padding: '10px 12px', borderRadius: 6, border: `1px solid ${t.border}`, background: t.surface,
+               cursor: 'pointer', textAlign: 'center', transition: 'all 0.2s' },
+    modeBtnActive: { background: t.accent, color: '#fff', border: `1px solid ${t.accent}` },
+    modeBtnInactive: { color: t.textMuted, hover: { background: t.border } },
+    histBtn: { padding: '6px 12px', borderRadius: 6, border: `1px solid ${t.border}`, background: t.surface,
+               color: t.textMuted, cursor: 'pointer', fontSize: 13, fontWeight: 500 },
+    histBtnActive: { background: t.brand, color: '#fff', border: `1px solid ${t.brand}` },
+    histInfoBadge: { padding: '6px 12px', borderRadius: 6, background: t.brand + '33', color: t.brand,
+                     fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap' },
+  };
+}
+

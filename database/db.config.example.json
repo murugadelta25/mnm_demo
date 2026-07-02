@@ -1,0 +1,8 @@
+{
+  "clientName": "client_x",
+  "user": "root",
+  "password": "YourMySqlPassword",
+  "database": "eap_pms_client_x",
+  "migrate": false,
+  "legacyDatabase": "titan_oee"
+}
