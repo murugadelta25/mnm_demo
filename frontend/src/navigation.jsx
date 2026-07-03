@@ -26,6 +26,7 @@ export const TITAN_NAVIGATION = [
     roles: ['admin', 'supervisor', 'operator', 'quality'],
     items: [
       { path: '/planning', label: 'Planning', icon: NAV_ICONS.planning, roles: ['admin', 'supervisor', 'operator'] },
+      { path: '/work-orders', label: 'Work Orders', icon: NAV_ICONS.workOrders, roles: ['admin', 'supervisor', 'operator'] },
       { path: '/entry', label: 'Data Entry', icon: NAV_ICONS.entry, roles: ['admin', 'supervisor', 'operator'] },
       { path: '/hourly-output', label: 'Hourly Output', icon: NAV_ICONS.hourlyOutput, roles: ['admin', 'supervisor', 'operator'] },
       { path: '/work-instructions', label: 'Work Instructions', icon: NAV_ICONS.workInstructions },

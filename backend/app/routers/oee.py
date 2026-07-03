@@ -109,6 +109,8 @@ def create_entry(data: OEECreate, db: Session = Depends(get_db), user=Depends(ge
     if plan:
         plan.actual_qty = data.actual_qty
         if data.actual_qty >= plan.planned_qty and plan.status in ("pending", "running"):
+            from .plans import _validate_may_complete_plan
+            _validate_may_complete_plan(plan)
             plan.status = "completed"
 
     db.commit()

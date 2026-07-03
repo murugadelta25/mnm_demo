@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import extract, func
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Optional, List
 from pydantic import BaseModel
 import io, smtplib, os
@@ -12,9 +12,10 @@ from email.mime.text import MIMEText
 from email import encoders
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
-from ..models import ProductionPlan, Machine, ModelChangeRequest, EmailLog, get_db, now_ist
+from ..models import ProductionPlan, Machine, ModelChangeRequest, EmailLog, get_db, now_ist, WorkOrder
 from ..auth import get_current_user, require_role
 from ..ws_manager import manager
+from .work_orders import sync_work_order_after_plan_change
 
 router = APIRouter(prefix="/api/plans", tags=["plans"])
 
@@ -22,8 +23,10 @@ class PlanCreate(BaseModel):
     plan_date: date
     end_date: Optional[date] = None   # if set, creates plans for each day in range
     shift: str
+    shifts: Optional[List[str]] = None  # if set, creates one plan per day per shift
     station_no: int
     machine_id: Optional[int] = None
+    work_order_id: Optional[int] = None
     current_operation: str
     next_operation: str
     model_variant: Optional[str] = None
@@ -45,21 +48,135 @@ class ActualQtyUpdate(BaseModel):
     actual_qty: int
     source: str = "manual"  # manual | modbus | opcua | mqtt
 
+class RescheduleRequest(BaseModel):
+    new_date: Optional[date] = None
+    new_shift: Optional[str] = None
+    new_machine_id: Optional[int] = None
+    new_station_no: Optional[int] = None
+    mode: str = "custom"  # custom | next_week | split_remaining
+    days_offset: Optional[int] = None
+    split_remaining: bool = False
+
+class BulkRescheduleRequest(BaseModel):
+    plan_ids: List[int]
+    mode: str = "next_week"  # next_week | custom
+    days_offset: int = 7
+    new_start_date: Optional[date] = None
+    split_remaining: bool = True
+
+def _resolve_shifts(data: PlanCreate) -> List[str]:
+    if data.shifts:
+        return list(dict.fromkeys(data.shifts))
+    return [data.shift]
+
+def _plan_copy_fields(plan: ProductionPlan) -> dict:
+    return {
+        "work_order_id": plan.work_order_id,
+        "station_no": plan.station_no,
+        "machine_id": plan.machine_id,
+        "current_operation": plan.current_operation,
+        "next_operation": plan.next_operation,
+        "model_variant": plan.model_variant,
+        "process_time": plan.process_time,
+        "loading_unloading": plan.loading_unloading,
+        "priority": plan.priority,
+        "plan_type": plan.plan_type,
+        "created_by": plan.created_by,
+    }
+
+def _compute_new_date(plan: ProductionPlan, data: RescheduleRequest) -> date:
+    if data.mode == "next_week":
+        return plan.plan_date + timedelta(days=7)
+    if data.new_date:
+        return data.new_date
+    if data.days_offset is not None:
+        return plan.plan_date + timedelta(days=data.days_offset)
+    raise HTTPException(400, "Provide new_date, days_offset, or use mode=next_week")
+
+def _validate_move_date(new_date: date) -> None:
+    today = now_ist().date()
+    if new_date < today:
+        raise HTTPException(
+            400,
+            f"Cannot move plan to a past date ({new_date}). Earliest allowed date is {today}.",
+        )
+
+def _validate_may_complete_plan(plan: ProductionPlan) -> None:
+    today = now_ist().date()
+    if plan.plan_date > today:
+        raise HTTPException(
+            400,
+            f"Cannot complete plan scheduled for {plan.plan_date}. "
+            f"Completion is only allowed on or after the plan date (today: {today}).",
+        )
+
+def _validate_may_start_plan(plan: ProductionPlan) -> None:
+    today = now_ist().date()
+    if plan.plan_date > today:
+        raise HTTPException(
+            400,
+            f"Cannot start plan scheduled for {plan.plan_date}. "
+            f"Start is only allowed on or after the plan date (today: {today}).",
+        )
+
+def _should_split(plan: ProductionPlan, data: RescheduleRequest) -> bool:
+    if data.mode == "split_remaining" or data.split_remaining:
+        return plan.actual_qty > 0 and plan.actual_qty < plan.planned_qty
+    return plan.status == "paused" and plan.actual_qty > 0 and plan.actual_qty < plan.planned_qty
+
+def _apply_machine_relocation(plan: ProductionPlan, data: RescheduleRequest, db: Session) -> Optional[str]:
+    if data.new_machine_id is None:
+        return None
+    if data.new_machine_id == plan.machine_id:
+        return None
+    machine = db.query(Machine).filter(Machine.id == data.new_machine_id).first()
+    if not machine:
+        raise HTTPException(404, "Target machine not found")
+    if machine.status == "breakdown":
+        raise HTTPException(400, f"Cannot move plan to {machine.name} — machine is in breakdown")
+    old_m = db.query(Machine).filter(Machine.id == plan.machine_id).first() if plan.machine_id else None
+    old_name = old_m.name if old_m else "unassigned"
+    plan.machine_id = data.new_machine_id
+    plan.station_no = data.new_station_no or machine.station_id
+    return f" [Machine relocated: {old_name} → {machine.name}]"
+
 @router.post("/")
 async def create_plan(data: PlanCreate, db: Session = Depends(get_db),
                       user=Depends(get_current_user)):
-    from datetime import timedelta
     start = data.plan_date
     end   = data.end_date if data.end_date and data.end_date >= start else start
     delta = (end - start).days + 1
+    shifts = _resolve_shifts(data)
+
+    if data.work_order_id:
+        wo = db.query(WorkOrder).filter(WorkOrder.id == data.work_order_id).first()
+        if not wo:
+            raise HTTPException(404, "Work order not found")
+        if wo.status == "cancelled":
+            raise HTTPException(400, "Cannot plan against a cancelled work order")
+        existing_planned = db.query(func.coalesce(func.sum(ProductionPlan.planned_qty), 0)).filter(
+            ProductionPlan.work_order_id == wo.id,
+            ProductionPlan.status != "cancelled",
+        ).scalar() or 0
+        total_new = data.planned_qty * delta * len(shifts)
+        if existing_planned + total_new > wo.target_qty:
+            remaining = max(wo.target_qty - existing_planned, 0)
+            raise HTTPException(
+                400,
+                f"Planned qty exceeds work order remaining capacity ({remaining} pcs left to plan)",
+            )
+
     created = []
-    base = data.model_dump(exclude={"end_date"})
+    base = data.model_dump(exclude={"end_date", "shifts"})
     for i in range(delta):
-        day_data = {**base, "plan_date": start + timedelta(days=i)}
-        plan = ProductionPlan(**day_data, created_by=user.id, created_at=now_ist())
-        db.add(plan)
-        db.flush()
-        created.append(plan)
+        for shift in shifts:
+            day_data = {**base, "plan_date": start + timedelta(days=i), "shift": shift}
+            plan = ProductionPlan(**day_data, created_by=user.id, created_at=now_ist())
+            db.add(plan)
+            db.flush()
+            created.append(plan)
+    if data.work_order_id:
+        sync_work_order_after_plan_change(db, data.work_order_id)
     db.commit()
     for plan in created:
         db.refresh(plan)
@@ -143,6 +260,10 @@ async def update_status(plan_id: int, data: PlanUpdate, db: Session = Depends(ge
                         user=Depends(get_current_user)):
     plan = db.query(ProductionPlan).filter(ProductionPlan.id == plan_id).first()
     if not plan: raise HTTPException(404, "Plan not found")
+    if data.status == "completed":
+        _validate_may_complete_plan(plan)
+    if data.status == "running" and plan.status != "running":
+        _validate_may_start_plan(plan)
     if data.status: plan.status = data.status
     if data.planned_qty is not None: plan.planned_qty = data.planned_qty
     if data.priority is not None: plan.priority = data.priority
@@ -166,6 +287,7 @@ async def update_status(plan_id: int, data: PlanUpdate, db: Session = Depends(ge
     elif data.status == "completed":
         machine = db.query(Machine).filter(Machine.id == plan.machine_id).first()
         if machine: machine.status = "idle"
+        sync_work_order_after_plan_change(db, plan.work_order_id)
         db.commit()
         await manager.broadcast({"type": "plan_completed", "plan_id": plan_id,
                                   "machine_id": plan.machine_id, "station_no": plan.station_no})
@@ -183,9 +305,11 @@ async def update_actual_qty(plan_id: int, data: ActualQtyUpdate, db: Session = D
     plan.actual_qty = data.actual_qty
     plan.updated_at = now_ist()
     if data.actual_qty >= plan.planned_qty and plan.status == "running":
+        _validate_may_complete_plan(plan)
         plan.status = "completed"
         machine = db.query(Machine).filter(Machine.id == plan.machine_id).first()
         if machine: machine.status = "idle"
+    sync_work_order_after_plan_change(db, plan.work_order_id)
     db.commit()
     await manager.broadcast({
         "type": "actual_qty_updated", "plan_id": plan_id,
@@ -203,6 +327,181 @@ async def delete_plan(plan_id: int, db: Session = Depends(get_db),
     db.commit()
     await manager.broadcast({"type": "plan_deleted", "plan_id": plan_id})
     return {"ok": True}
+
+
+@router.post("/{plan_id}/reschedule")
+async def reschedule_plan(
+    plan_id: int,
+    data: RescheduleRequest,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("supervisor", "admin")),
+):
+    plan = db.query(ProductionPlan).filter(ProductionPlan.id == plan_id).first()
+    if not plan:
+        raise HTTPException(404, "Plan not found")
+    if plan.status in ("completed", "cancelled"):
+        raise HTTPException(400, f"Cannot reschedule a {plan.status} plan")
+    if plan.status == "running":
+        raise HTTPException(400, "Pause the plan before moving it")
+
+    new_date = _compute_new_date(plan, data)
+    _validate_move_date(new_date)
+    new_shift = data.new_shift or plan.shift
+    old_date = plan.plan_date
+    created = None
+
+    if _should_split(plan, data):
+        remaining = plan.planned_qty - plan.actual_qty
+        _validate_may_complete_plan(plan)
+        plan.planned_qty = plan.actual_qty
+        plan.status = "completed"
+        suffix = f" [Partial: {remaining} pcs moved to {new_date} shift {new_shift}]"
+        plan.notes = ((plan.notes or "") + suffix).strip()
+        plan.updated_at = now_ist()
+
+        created = ProductionPlan(
+            **_plan_copy_fields(plan),
+            plan_date=new_date,
+            shift=new_shift,
+            planned_qty=remaining,
+            actual_qty=0,
+            status="pending",
+            notes=f"Moved from plan #{plan_id} ({old_date} shift {plan.shift})",
+            created_at=now_ist(),
+            updated_at=now_ist(),
+        )
+        machine_note = _apply_machine_relocation(created, data, db)
+        if machine_note:
+            created.notes = (created.notes + machine_note).strip()
+        db.add(created)
+    else:
+        old_shift = plan.shift
+        plan.plan_date = new_date
+        plan.shift = new_shift
+        if plan.status == "paused":
+            plan.status = "pending"
+        suffix = f" [Rescheduled from {old_date} shift {old_shift}]"
+        plan.notes = ((plan.notes or "") + suffix).strip()
+        machine_note = _apply_machine_relocation(plan, data, db)
+        if machine_note:
+            plan.notes = (plan.notes + machine_note).strip()
+        plan.updated_at = now_ist()
+
+    if plan.work_order_id:
+        sync_work_order_after_plan_change(db, plan.work_order_id)
+    db.commit()
+    db.refresh(plan)
+    if created:
+        db.refresh(created)
+
+    await manager.broadcast({
+        "type": "plan_rescheduled",
+        "plan_id": plan_id,
+        "new_plan_id": created.id if created else None,
+        "new_date": str(new_date),
+    })
+    return {
+        "original": plan,
+        "new_plan": created,
+        "split": created is not None,
+    }
+
+
+@router.post("/bulk-reschedule")
+async def bulk_reschedule(
+    data: BulkRescheduleRequest,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("supervisor", "admin")),
+):
+    if not data.plan_ids:
+        raise HTTPException(400, "No plans selected")
+
+    plans = db.query(ProductionPlan).filter(ProductionPlan.id.in_(data.plan_ids)).all()
+    if len(plans) != len(data.plan_ids):
+        raise HTTPException(404, "One or more plans not found")
+
+    movable = [p for p in plans if p.status in ("pending", "paused")]
+    if not movable:
+        raise HTTPException(400, "No pending or paused plans to move")
+
+    if data.new_start_date:
+        anchor = min(p.plan_date for p in movable)
+        offset_days = (data.new_start_date - anchor).days
+    elif data.mode == "next_week":
+        offset_days = data.days_offset if data.days_offset else 7
+    else:
+        offset_days = data.days_offset or 0
+
+    today = now_ist().date()
+    if data.new_start_date and data.new_start_date < today:
+        raise HTTPException(
+            400,
+            f"Start date cannot be in the past ({data.new_start_date}). Earliest allowed date is {today}.",
+        )
+
+    invalid_moves = []
+    for plan in movable:
+        candidate = plan.plan_date + timedelta(days=offset_days)
+        if candidate < today:
+            invalid_moves.append(plan.id)
+    if invalid_moves:
+        raise HTTPException(
+            400,
+            f"Cannot move plan(s) {invalid_moves} to a past date. Earliest allowed date is {today}.",
+        )
+
+    results = []
+    work_order_ids = set()
+
+    for plan in movable:
+        if plan.status == "running":
+            continue
+        req = RescheduleRequest(
+            mode="custom",
+            days_offset=offset_days,
+            split_remaining=data.split_remaining,
+        )
+        new_date = plan.plan_date + timedelta(days=offset_days)
+        new_shift = plan.shift
+        old_date = plan.plan_date
+        created = None
+
+        if _should_split(plan, req):
+            remaining = plan.planned_qty - plan.actual_qty
+            _validate_may_complete_plan(plan)
+            plan.planned_qty = plan.actual_qty
+            plan.status = "completed"
+            plan.notes = ((plan.notes or "") + f" [Bulk move: {remaining} pcs → {new_date}]").strip()
+            plan.updated_at = now_ist()
+            created = ProductionPlan(
+                **_plan_copy_fields(plan),
+                plan_date=new_date,
+                shift=new_shift,
+                planned_qty=remaining,
+                actual_qty=0,
+                status="pending",
+                notes=f"Bulk moved from plan #{plan.id} ({old_date})",
+                created_at=now_ist(),
+                updated_at=now_ist(),
+            )
+            db.add(created)
+        else:
+            plan.plan_date = new_date
+            if plan.status == "paused":
+                plan.status = "pending"
+            plan.notes = ((plan.notes or "") + f" [Bulk moved from {old_date}]").strip()
+            plan.updated_at = now_ist()
+
+        if plan.work_order_id:
+            work_order_ids.add(plan.work_order_id)
+        results.append({"plan_id": plan.id, "new_date": str(new_date), "split": created is not None})
+
+    for wo_id in work_order_ids:
+        sync_work_order_after_plan_change(db, wo_id)
+    db.commit()
+
+    await manager.broadcast({"type": "plans_bulk_rescheduled", "count": len(results)})
+    return {"moved": len(results), "results": results, "days_offset": offset_days}
 
 @router.get("/pipeline/{station_no}")
 def get_pipeline(station_no: int, db: Session = Depends(get_db), _=Depends(get_current_user)):
@@ -223,7 +522,8 @@ def _style_header_row(ws, ncols):
         cell.font = hdr_font
         cell.alignment = Alignment(horizontal="center")
 
-def _build_excel(plans) -> io.BytesIO:
+def _build_excel(plans, work_orders: Optional[dict] = None) -> io.BytesIO:
+    work_orders = work_orders or {}
     wb = openpyxl.Workbook()
     now = datetime.now()
 
@@ -261,18 +561,21 @@ def _build_excel(plans) -> io.BytesIO:
 
     # ── Sheet 2: Plans Details ────────────────────────────────────────────────
     ws2 = wb.create_sheet("Plans Details")
-    headers2 = ["Date","Shift","Station","Current Operation","Next Operation","Process Time (s)",
+    headers2 = ["Date","Shift","Station","Work Order No","WO Target Qty","Current Operation","Next Operation","Process Time (s)",
                 "Loading/Unloading (s)","Cycle Time (s)","Type","Priority",
                 "Planned Qty","Actual Qty","Achievement %","Status","Notes"]
     ws2.append(headers2)
     _style_header_row(ws2, len(headers2))
     for p in plans:
         pct = round(p.actual_qty / p.planned_qty * 100, 1) if p.planned_qty else 0
-        ws2.append([str(p.plan_date), p.shift, getattr(p, '_station_label', p.station_no), p.current_operation, p.next_operation,
+        wo = work_orders.get(p.work_order_id) if p.work_order_id else None
+        ws2.append([str(p.plan_date), p.shift, getattr(p, '_station_label', p.station_no),
+                    wo.work_order_no if wo else "", wo.target_qty if wo else "",
+                    p.current_operation, p.next_operation,
                     p.process_time, p.loading_unloading, p.process_time + p.loading_unloading,
                     p.plan_type, p.priority, p.planned_qty, p.actual_qty,
                     str(pct) + "%", p.status, p.notes or ""])
-    col_widths2 = [12,8,6,14,14,16,20,14,12,10,12,12,14,12,20]
+    col_widths2 = [12,8,6,14,12,14,14,16,20,14,12,10,12,12,14,12,20]
     for i, w in enumerate(col_widths2, 1):
         ws2.column_dimensions[ws2.cell(row=1, column=i).column_letter].width = w
 
@@ -347,12 +650,20 @@ def _filter_plans(q, params: ExportParams):
     return q
 
 
+def _work_orders_for_plans(db: Session, plans) -> dict:
+    wo_ids = {p.work_order_id for p in plans if p.work_order_id}
+    if not wo_ids:
+        return {}
+    rows = db.query(WorkOrder).filter(WorkOrder.id.in_(wo_ids)).all()
+    return {w.id: w for w in rows}
+
+
 @router.post("/export")
 def export_excel(params: ExportParams, db: Session = Depends(get_db),
                  _=Depends(get_current_user)):
     q = _filter_plans(db.query(ProductionPlan), params)
     plans = q.order_by(ProductionPlan.plan_date, ProductionPlan.shift, ProductionPlan.priority).all()
-    buf = _build_excel(plans)
+    buf = _build_excel(plans, _work_orders_for_plans(db, plans))
     filename = f"production_plan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     return StreamingResponse(buf,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -372,7 +683,7 @@ def email_report(req: EmailReportRequest, db: Session = Depends(get_db),
                  user=Depends(get_current_user)):
     q = _filter_plans(db.query(ProductionPlan), req)
     plans = q.order_by(ProductionPlan.plan_date, ProductionPlan.shift, ProductionPlan.priority).all()
-    buf = _build_excel(plans)
+    buf = _build_excel(plans, _work_orders_for_plans(db, plans))
     filename = f"production_plan_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
 
     from ..models import EmailSmtpConfig

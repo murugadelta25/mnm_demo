@@ -564,11 +564,9 @@ def build_loss_tracker_xlsx(db: Session, report_date=None) -> bytes:
     machine_map = {m.id: m for m in db.query(Machine).all()}
     station_map    = {p.id: (p.display_name or p.name) for p in db.query(Station).all()}
 
-    IST = 5.5 * 3600
-    LIMITS = {
-        'idle': 60, 'breakdown': 5400, 'alarm': 1800,
-        'offline': 1800, 'setting_change': 7200
-    }
+    from ..deviation_alert_service import get_limits_min
+    limits_min = get_limits_min(db)
+    LIMITS = {k: int(v) * 60 for k, v in limits_min.items()}
     TRACK = set(LIMITS.keys())
 
     def fmt_ist(dt_val):

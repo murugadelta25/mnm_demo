@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil, uuid
 from ..models import SiteConfig, get_db
 from ..auth import get_current_user, require_role
+from ..network_utils import build_network_payload
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 
@@ -42,6 +43,13 @@ DEFAULT_CONFIG = {
         },
     },
     "checkDataDaysBack": 1,
+    "loss_tracker_limits": {
+        "idle": 1,
+        "breakdown": 90,
+        "alarm": 30,
+        "offline": 30,
+        "setting_change": 120,
+    },
     "deviation_escalation": {
         "enabled": True,
         "levels": [
@@ -84,6 +92,9 @@ def merge_config(stored: dict) -> dict:
         "enabled": esc.get("enabled", default_esc["enabled"]),
         "levels": esc.get("levels") or default_esc["levels"],
     }
+    lt = stored.get("loss_tracker_limits") or {}
+    default_lt = DEFAULT_CONFIG["loss_tracker_limits"]
+    merged["loss_tracker_limits"] = {**default_lt, **lt}
     return merged
 
 
@@ -119,6 +130,12 @@ def get_branding(db: Session = Depends(get_db)):
                 favicon_url = f["logoUrl"]
                 break
     return {"siteTitle": site_title, "faviconUrl": favicon_url}
+
+
+@router.get("/network")
+def get_network_info():
+    """Public LAN URLs and auto-detected IPs (no auth). Use when din.eappms DNS is unavailable."""
+    return build_network_payload()
 
 
 @router.get("/")

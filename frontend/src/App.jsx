@@ -4,6 +4,7 @@ import { ThemeProvider } from './context/ThemeContext';
 import { BrandingProvider } from './context/BrandingContext';
 import { EmbedProvider } from './context/EmbedContext';
 import AppShell from './components/layout/AppShell';
+import IdleTimeoutGuard from './components/IdleTimeoutGuard';
 import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import DataEntry from './pages/DataEntry';
@@ -12,6 +13,7 @@ import Breakdown from './pages/Breakdown';
 import MaintenanceDashboard from './pages/MaintenanceDashboard';
 import LossTracker from './pages/LossTracker';
 import ProductionPlanning from './pages/ProductionPlanning';
+import WorkOrderManagement from './pages/WorkOrderManagement';
 import EmailAlerts from './pages/EmailAlerts';
 import { ConfigProvider } from './context/ConfigContext';
 import Configuration from './pages/Configuration';
@@ -28,7 +30,11 @@ import WorkInstructionRevision from './pages/WorkInstructionRevision';
 function AuthenticatedShell() {
   const { user } = useAuth();
   if (!user) return <Navigate to="/login" replace />;
-  return <AppShell />;
+  return (
+    <IdleTimeoutGuard>
+      <AppShell />
+    </IdleTimeoutGuard>
+  );
 }
 
 function AppRoutes() {
@@ -40,6 +46,7 @@ function AppRoutes() {
       <Route element={<AuthenticatedShell />}>
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="/planning" element={<ProductionPlanning />} />
+        <Route path="/work-orders" element={<WorkOrderManagement />} />
         <Route path="/entry" element={<DataEntry />} />
         <Route path="/model-change" element={<ModelChange />} />
         <Route path="/breakdown" element={<Breakdown />} />

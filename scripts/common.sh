@@ -7,6 +7,13 @@ FRONTEND_DIR="$PROJECT_DIR/frontend"
 DATABASE_DIR="$PROJECT_DIR/database"
 DEPLOY_ENV="$PROJECT_DIR/deploy.env"
 DB_CONFIG="$DATABASE_DIR/db.config.json"
+DOMAIN_CONFIG="$PROJECT_DIR/deploy/domain.config.json"
+
+APP_DOMAIN="${APP_DOMAIN:-din.eappms}"
+APP_USE_HTTPS="${APP_USE_HTTPS:-no}"
+APP_SCHEME="${APP_SCHEME:-http}"
+APP_SSL_CERT=""
+APP_SSL_KEY=""
 
 BACKEND_PORT="${BACKEND_PORT:-8010}"
 FRONTEND_PORT="${FRONTEND_PORT:-5174}"
@@ -94,6 +101,89 @@ PY
 
 detect_server_ip() {
   hostname -I 2>/dev/null | awk '{print $1}'
+}
+
+load_domain_config() {
+  APP_DOMAIN="din.eappms"
+  APP_USE_HTTPS="no"
+  APP_SCHEME="http"
+  APP_SSL_CERT=""
+  APP_SSL_KEY=""
+
+  if [ -f "$DOMAIN_CONFIG" ]; then
+    eval "$(python3 - "$DOMAIN_CONFIG" <<'PY'
+import json, shlex, sys
+raw = json.load(open(sys.argv[1], encoding="utf-8"))
+domain = raw.get("domain") or "din.eappms"
+use_https = bool(raw.get("useHttps"))
+print(f"APP_DOMAIN={shlex.quote(domain)}")
+print(f"APP_USE_HTTPS={'yes' if use_https else 'no'}")
+print(f"APP_SCHEME={'https' if use_https else 'http'}")
+print(f"APP_SSL_CERT={shlex.quote(str(raw.get('sslCert') or ''))}")
+print(f"APP_SSL_KEY={shlex.quote(str(raw.get('sslKey') or ''))}")
+PY
+)"
+  fi
+  APP_URL="${APP_SCHEME}://${APP_DOMAIN}"
+}
+
+print_app_urls() {
+  load_domain_config
+  SERVER_IP="$(detect_server_ip)"
+  ALL_IPS=""
+  if command -v hostname >/dev/null 2>&1; then
+    ALL_IPS=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^127\.' | grep -v '^$' || true)
+  fi
+
+  echo ""
+  echo -e "${GREEN}================================================${NC}"
+  echo -e "${GREEN}  EAP PMS is running — ${CLIENT_NAME:-EAP PMS}${NC}"
+  echo -e "${GREEN}================================================${NC}"
+  echo ""
+  echo -e "  ${YELLOW}Standard URL (use this):${NC}"
+  echo -e "    ${GREEN}${APP_URL}${NC}"
+  echo -e "  ${YELLOW}API Docs:${NC} ${APP_URL}/docs"
+  echo ""
+  echo -e "  ${YELLOW}Direct access (fallback):${NC}"
+  echo -e "    Local  : http://localhost:${FRONTEND_PORT}"
+  if [ -n "$ALL_IPS" ]; then
+    while IFS= read -r ip; do
+      [ -z "$ip" ] && continue
+      echo -e "    Network (port 80) : ${GREEN}http://${ip}${NC}"
+      echo -e "    Network (Vite)    : http://${ip}:${FRONTEND_PORT}"
+    done <<< "$ALL_IPS"
+  elif [ -n "$SERVER_IP" ]; then
+    echo -e "    Network (port 80) : ${GREEN}http://${SERVER_IP}${NC}"
+    echo -e "    Network (Vite)    : http://${SERVER_IP}:${FRONTEND_PORT}"
+  fi
+  echo ""
+  echo -e "  ${YELLOW}Network access (Windows / Ubuntu / Android):${NC}"
+  echo -e "    Standard URL : ${GREEN}${APP_URL}${NC}"
+  echo -e "    Primary IP   : ${GREEN}${SERVER_IP:-<this-server-ip>}${NC}  (http://IP works without DNS)"
+  echo ""
+  echo -e "  ${YELLOW}If IPC IP changes (DHCP):${NC}"
+  echo -e "    Direct http://<new-ip> still works; LAN DNS auto-refreshes din.eappms every 30s"
+  echo -e "    Reserve a static DHCP IP for the IPC in production; update router DNS if IP changes"
+  echo ""
+  echo -e "  ${YELLOW}ONE-TIME router/IT setup (PC + Android + tablets):${NC}"
+  echo -e "    Set DHCP DNS server to: ${YELLOW}${SERVER_IP:-<this-server-ip>}${NC}"
+  echo -e "    Then all devices open ${APP_URL} on the LAN"
+  echo ""
+  echo -e "  ${YELLOW}Fallback (no router access):${NC} deploy/Setup-Client-PC.bat on each PC"
+  echo ""
+  echo -e "  Default login: ${YELLOW}operator1 / op123${NC}"
+  echo ""
+  if [ -n "${BACKEND_SERVICE:-}" ]; then
+    echo -e "  ${CYAN}systemd services (client: ${CLIENT_NAME})${NC}"
+    echo -e "    sudo systemctl status ${BACKEND_SERVICE}"
+    echo -e "    sudo systemctl status ${FRONTEND_SERVICE}"
+    echo -e "    sudo systemctl stop ${BACKEND_SERVICE} ${FRONTEND_SERVICE}"
+    echo ""
+    echo -e "  Logs:"
+    echo -e "    sudo journalctl -u ${BACKEND_SERVICE} -f"
+    echo -e "    sudo journalctl -u ${FRONTEND_SERVICE} -f"
+    echo ""
+  fi
 }
 
 read_db_creds() {

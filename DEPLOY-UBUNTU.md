@@ -1,6 +1,8 @@
 # EAP PMS — Ubuntu Deployment
 
-Package the project on Windows, copy to Ubuntu, and run with a single script — similar to `run.ps1` on Windows.
+Deploy on Ubuntu IPC/server using **git clone** (recommended) or a **zip package** from Windows.
+
+**Repository:** https://github.com/murugadelta25/Groz_eap_pms.git
 
 ## Ports
 
@@ -8,6 +10,38 @@ Package the project on Windows, copy to Ubuntu, and run with a single script —
 |----------|------|
 | Backend  | 8010 |
 | Frontend | 5174 |
+
+## Option A — Git clone on Ubuntu (recommended for IPC server)
+
+On the Ubuntu IPC/server:
+
+```bash
+# One-time: install git
+sudo apt update && sudo apt install -y git
+
+# Clone (or update) the repository
+git clone https://github.com/murugadelta25/Groz_eap_pms.git
+cd Groz_eap_pms
+
+# First deploy
+chmod +x run.sh scripts/*.sh
+./run.sh
+
+# Later updates (pull latest code and restart)
+git pull origin main
+./run.sh restart
+```
+
+Pre-configure before first `./run.sh` (optional):
+
+```bash
+cp deploy.env.example deploy.env
+nano deploy.env   # CLIENT_NAME, DB_PASS, DB_NAME
+```
+
+See [DOMAIN-SETUP.md](DOMAIN-SETUP.md) for `din.eappms` DNS and nginx.
+
+## Option B — Zip package from Windows
 
 ## 1. Create the package (Windows)
 
@@ -93,8 +127,10 @@ Services auto-start on boot after the first `./run.sh`.
 
 ## 6. Access
 
-- **Dashboard:** `http://<server-ip>:5174`
-- **API docs:** `http://<server-ip>:8010/docs`
+- **Standard URL:** `http://din.eappms` (configured automatically by `./run.sh` via nginx)
+- **API docs:** `http://din.eappms/docs`
+- **Fallback:** `http://<server-ip>:5174`
+- **DNS:** Ask IT for `din.eappms` A → server IP (see `DOMAIN-SETUP.md`)
 
 ### Embed mode (CPLM integration)
 

@@ -3,7 +3,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPExcept
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
-from .routers import auth, oee, model_change, breakdown, plans
+from .routers import auth, oee, model_change, breakdown, plans, work_orders
 from .routers import email_router
 from .routers import machines as machines_router
 from .routers import stations as stations_router
@@ -55,6 +55,11 @@ def _ensure_work_instruction_tables():
         operation_code_migrate()
     except Exception as exc:
         print(f"[WARN] operation_code migration skipped: {exc}")
+    try:
+        from migrate_work_orders import main as work_orders_migrate
+        work_orders_migrate()
+    except Exception as exc:
+        print(f"[WARN] work_orders migration skipped: {exc}")
 
 
 def _ensure_deviation_alert_table():
@@ -106,6 +111,7 @@ app.include_router(oee.router)
 app.include_router(model_change.router)
 app.include_router(breakdown.router)
 app.include_router(plans.router)
+app.include_router(work_orders.router)
 app.include_router(email_router.router)
 app.include_router(stations_router.router)
 app.include_router(machines_router.router)

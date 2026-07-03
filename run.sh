@@ -99,35 +99,17 @@ cmd_restart() {
   bash "$SCRIPTS_DIR/setup-database.sh"
   bash "$SCRIPTS_DIR/install-systemd.sh"
   service_ctl restart
-  verify_services_running
+  if ! verify_services_running; then
+    log_fail "Restart verification failed"
+    exit 1
+  fi
+  bash "$SCRIPTS_DIR/install-nginx.sh" || log_warn "nginx setup skipped or failed"
+  bash "$SCRIPTS_DIR/install-local-dns.sh" || log_warn "LAN DNS skipped or failed"
   print_urls
 }
 
 print_urls() {
-  SERVER_IP="$(detect_server_ip)"
-  echo ""
-  echo -e "${GREEN}================================================${NC}"
-  echo -e "${GREEN}  EAP PMS is running — ${CLIENT_NAME}${NC}"
-  echo -e "${GREEN}================================================${NC}"
-  echo ""
-  echo -e "  ${YELLOW}Dashboard:${NC}"
-  echo -e "    Local  : http://localhost:${FRONTEND_PORT}"
-  if [ -n "$SERVER_IP" ]; then
-    echo -e "    Network: http://${SERVER_IP}:${FRONTEND_PORT}"
-  fi
-  echo -e "  ${YELLOW}API Docs :${NC} http://localhost:${BACKEND_PORT}/docs"
-  echo ""
-  echo -e "  Default login: ${YELLOW}operator1 / op123${NC}"
-  echo ""
-  echo -e "  ${CYAN}systemd services (client: ${CLIENT_NAME})${NC}"
-  echo -e "    sudo systemctl status ${BACKEND_SERVICE}"
-  echo -e "    sudo systemctl status ${FRONTEND_SERVICE}"
-  echo -e "    sudo systemctl stop ${BACKEND_SERVICE} ${FRONTEND_SERVICE}"
-  echo ""
-  echo -e "  Logs:"
-  echo -e "    sudo journalctl -u ${BACKEND_SERVICE} -f"
-  echo -e "    sudo journalctl -u ${FRONTEND_SERVICE} -f"
-  echo ""
+  print_app_urls
 }
 
 cmd_start() {
@@ -155,11 +137,17 @@ cmd_start() {
     exit 1
   fi
 
+  log_step "[nginx] Standard URL reverse proxy..."
+  bash "$SCRIPTS_DIR/install-nginx.sh" || log_warn "nginx setup skipped or failed — direct ports still work"
+
+  log_step "[dns] LAN DNS for network-wide din.eappms..."
+  bash "$SCRIPTS_DIR/install-local-dns.sh" || log_warn "LAN DNS skipped or failed"
+
   print_urls
 
-  APP_URL="http://$(detect_server_ip):${FRONTEND_PORT}"
-  if command -v xdg-open >/dev/null 2>&1 && [ -n "$(detect_server_ip)" ]; then
-    xdg-open "$APP_URL" >/dev/null 2>&1 &
+  load_domain_config
+  if command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "${APP_URL}" >/dev/null 2>&1 &
   fi
 }
 

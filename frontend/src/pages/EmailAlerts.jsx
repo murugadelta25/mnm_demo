@@ -640,10 +640,10 @@ export default function EmailAlerts() {
             </div>
             <p style={{ color: t.textDim, fontSize: 13, margin: '0 0 12px' }}>
               Automatic emails when Loss Tracker thresholds are exceeded (idle, breakdown, alarm, offline, setting change),
-              when a breakdown ticket is raised, or when an alarm status is detected. With escalation enabled, Level 1
-              (production) is notified first; if no action is taken within the configured delay, alerts escalate to
-              supervisor then manager. Recipients are mapped by email group name.
-              Ongoing breaches and escalations are re-checked every 5 minutes.
+              when a breakdown ticket is raised, or when an alarm status is detected. Threshold limits shown below are
+              read from <b style={{ color: t.accent }}>Loss Tracker → Thresholds</b> (shared with scheduled loss tracker reports).
+              With escalation enabled, Level 1 (production) is notified first; if no action is taken within the configured
+              delay, alerts escalate to supervisor then manager. Ongoing breaches and escalations are re-checked every 5 minutes.
             </p>
             {deviationConfig && (
               <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 14 }}>

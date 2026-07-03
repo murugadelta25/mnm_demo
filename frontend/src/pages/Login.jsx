@@ -1,19 +1,40 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useBranding } from '../context/BrandingContext';
 import { useTheme } from '../context/ThemeContext';
 import LogoIcon from '../components/graphics/LogoIcon';
 import ThemeModeToggler from '../components/layout/ThemeModeToggler';
+import api from '../api/client';
+import { SESSION_EXPIRED_KEY } from '../components/IdleTimeoutGuard';
 
 export default function Login() {
   const [creds, setCreds] = useState({ username: '', password: '' });
   const [error, setError] = useState('');
+  const [sessionNotice, setSessionNotice] = useState('');
   const [loading, setLoading] = useState(false);
+  const [networkUrls, setNetworkUrls] = useState([]);
   const { login } = useAuth();
   const nav = useNavigate();
   const { theme: t } = useTheme();
   const { siteTitle } = useBranding();
+
+  useEffect(() => {
+    const reason = sessionStorage.getItem(SESSION_EXPIRED_KEY);
+    if (reason === 'idle') {
+      setSessionNotice('Your session ended after 30 minutes of inactivity. Please sign in again.');
+      sessionStorage.removeItem(SESSION_EXPIRED_KEY);
+    }
+  }, []);
+
+  useEffect(() => {
+    api.get('/api/config/network')
+      .then(r => {
+        const urls = r.data?.access_urls;
+        if (Array.isArray(urls) && urls.length) setNetworkUrls(urls);
+      })
+      .catch(() => {});
+  }, []);
 
   const handleSubmit = async e => {
     e.preventDefault();
@@ -62,6 +83,12 @@ export default function Login() {
                           fontSize: 14, boxSizing: 'border-box' }}
             type="password" placeholder="Password" value={creds.password}
             onChange={e => setCreds(p => ({ ...p, password: e.target.value }))} />
+          {sessionNotice && (
+            <div style={{ background: '#f59e0b22', border: '1px solid #f59e0b', borderRadius: 6,
+                          padding: '8px 12px', marginBottom: 12 }}>
+              <p style={{ color: '#d97706', fontSize: 13, margin: 0 }}>{sessionNotice}</p>
+            </div>
+          )}
           {error && (
             <div style={{ background: '#ef444422', border: '1px solid #ef4444', borderRadius: 6,
                           padding: '8px 12px', marginBottom: 12 }}>
@@ -75,6 +102,22 @@ export default function Login() {
             {loading ? 'Connecting...' : 'Login'}
           </button>
         </form>
+        {networkUrls.length > 0 && (
+          <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${t.border}` }}>
+            <p style={{ color: t.textMuted, fontSize: 12, margin: '0 0 8px' }}>
+              LAN access (Windows, Ubuntu, Android):
+            </p>
+            {networkUrls.map(url => (
+              <a
+                key={url}
+                href={url}
+                style={{ display: 'block', color: t.accent, fontSize: 12, marginBottom: 4, wordBreak: 'break-all' }}
+              >
+                {url}
+              </a>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

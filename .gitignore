@@ -15,19 +15,45 @@ frontend/dist/
 *.log
 backend.log
 frontend.log
+deploy/nginx-win/logs/
 
 # PID files
 .backend.pid
 .frontend.pid
 
-# Env files (keep .env.example, exclude actual .env)
+# Env / secrets (keep .env.example)
 backend/.env
 frontend/.env
 database/db.config.json
+deploy.env
 
-# OS
+# OS / IDE
 .DS_Store
 Thumbs.db
+.cursor/
+.vscode/
+.claude/
+.codex/
 
-# Static uploads (optional — include if you want to transfer machine images)
-# backend/static/machines/
+# Build / package artifacts
+*.zip
+eap-pms.zip
+*.xlsx
+
+# Database backups
+database/backups/
+
+# Dev-only bundles (not for deployment)
+bug_fixing_patch1/
+TITAN_OEE_FULL_PACKAGE/
+new_theme/
+demo/
+frontend/src/pages/gemini_*
+frontend/src/pages/old_*
+frontend/src/pages/bug_*
+
+# Bundled nginx binary (use scripts/install-nginx.sh on server)
+deploy/nginx-win/
+
+# Uploaded work-instruction PDFs (runtime data)
+backend/static/work-instructions/

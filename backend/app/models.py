@@ -133,9 +133,27 @@ class ModelChangeRequest(Base):
     end_time = Column(DateTime)
     created_at = Column(TIMESTAMP)
 
+class WorkOrder(Base):
+    __tablename__ = "work_orders"
+    id = Column(Integer, primary_key=True, index=True)
+    work_order_no = Column(String(100), unique=True, nullable=False)
+    part_id = Column(Integer, ForeignKey("parts.id"))
+    model_variant = Column(String(100))
+    description = Column(String(255))
+    target_qty = Column(Integer, nullable=False)
+    start_date = Column(Date)
+    end_date = Column(Date)
+    status = Column(Enum("draft", "in_progress", "completed", "cancelled"), default="draft")
+    spares_tools_json = Column(Text)
+    created_by = Column(Integer, ForeignKey("users.id"))
+    created_at = Column(TIMESTAMP)
+    updated_at = Column(TIMESTAMP)
+
+
 class ProductionPlan(Base):
     __tablename__ = "production_plans"
     id = Column(Integer, primary_key=True, index=True)
+    work_order_id = Column(Integer, ForeignKey("work_orders.id"))
     plan_date = Column(Date, nullable=False)
     shift = Column(String(1), nullable=False)
     station_no = Column(Integer, nullable=False)

@@ -11,6 +11,22 @@ import { parseCtSeconds, sumCt, formatCtSeconds, isValidDecimalInput } from '../
 import { partToPlanningVariant, planModelVariant } from '../utils/partVariant';
 import { DRAFT_KEYS } from '../utils/formPersistence';
 import usePersistedState from '../hooks/usePersistedState';
+import MachineSuggestions from '../components/production-planning/MachineSuggestions';
+import MovePlanModal from '../components/production-planning/MovePlanModal';
+import { Link } from 'react-router-dom';
+
+/** Distinct from accent blue — work order links/labels across planning UI */
+const WO_LINK_COLOR = '#f97316';
+const woLinkStyle = { color: WO_LINK_COLOR, fontWeight: 700, textDecoration: 'none' };
+
+function resolveFormShifts(form, enabledShifts) {
+  if (form.shift_scope === 'all') return enabledShifts.map((s) => s.id);
+  if (form.shift_scope === 'custom') {
+    const sel = form.selected_shifts?.filter((id) => enabledShifts.some((s) => s.id === id));
+    return sel?.length ? sel : [form.shift];
+  }
+  return [form.shift];
+}
 
 const STATUS_CFG = {
   pending:   { color: '#64748b', label: 'Pending',   icon: '⏳' },
@@ -30,13 +46,16 @@ const INIT_FORM = {
   plan_date: new Date().toISOString().split('T')[0],
   start_date: new Date().toISOString().split('T')[0],
   end_date: new Date().toISOString().split('T')[0],
-  shift: 'A', station_no: 1, machine_id: '',
+  shift: 'A', shift_scope: 'single', selected_shifts: ['A'],
+  station_no: 1, machine_id: '',
   part_id: '',
   current_operation: '', next_operation: '', model_variant: '',
   process_time: '', loading_unloading: 10,
   planned_qty: '', priority: 1,
   plan_type: 'scheduled', plan_mode: 'single', notes: '',
-  use_machine: false  // false = station mode, true = individual machine mode
+  use_machine: false,  // false = station mode, true = individual machine mode
+  work_order_id: '',
+  enable_machine_suggestions: true,
 };
 
 const PLC_ITEMS = [
@@ -49,6 +68,9 @@ const PLC_ITEMS = [
 // Helper functions for date calculations
 const getDateString = (date) => date.toISOString().split('T')[0];
 const getToday = () => new Date();
+// IST calendar date (match Loss Tracker — avoid UTC drift from toISOString)
+const todayDateStr = () => getToday().toLocaleDateString('en-CA');
+const isPlanDateReached = (planDate) => !planDate || planDate <= todayDateStr();
 const addDays = (date, days) => {
   const d = new Date(date);
   d.setDate(d.getDate() + days);
@@ -78,6 +100,7 @@ export default function ProductionPlanning() {
   const { config } = useConfig();
   const enabledShifts = useMemo(() => config.shifts.filter(s => s.enabled), [config.shifts]);
   const [plans, setPlans]       = useState([]);
+  const [workOrders, setWorkOrders] = useState([]);
   const [machines, setMachines] = useState([]);
   const [stations, setStations]       = useState([]);
   const [parts, setParts]       = useState([]);
@@ -89,6 +112,8 @@ export default function ProductionPlanning() {
     return station ? (station.display_name || station.name || `Station ${station.id}`) : stationId;
   };
   const [showForm, setShowForm] = useState(false);
+  const [movePlan, setMovePlan] = useState(null);
+  const [selectedPlanIds, setSelectedPlanIds] = useState(new Set());
   const [showPlcInfo, setShowPlcInfo] = useState(false);
   const [viewMode, setViewMode] = useState('day');
   const [historicMode, setHistoricMode] = useState(null); // 'prev_day', 'prev_week', 'prev_month', null
@@ -111,7 +136,7 @@ export default function ProductionPlanning() {
     setForm(prev => (
       enabledShifts.some(s => s.id === prev.shift)
         ? prev
-        : { ...prev, shift: defaultShift }
+        : { ...prev, shift: defaultShift, selected_shifts: [defaultShift] }
     ));
   }, [config, enabledShifts]);
 
@@ -163,6 +188,15 @@ export default function ProductionPlanning() {
     return p;
   };
 
+  const fetchWorkOrders = useCallback(async () => {
+    try {
+      const r = await api.get('/api/work-orders/');
+      setWorkOrders(r.data);
+    } catch {
+      setWorkOrders([]);
+    }
+  }, []);
+
   const fetchAll = useCallback(async () => {
     const params = buildParams();
     const [pl, sm, mc, pr] = await Promise.all([
@@ -193,7 +227,7 @@ export default function ProductionPlanning() {
     setPipeline(pipelineData);
   }, [filters, viewMode]);
 
-  useEffect(() => { fetchAll(); }, [fetchAll]);
+  useEffect(() => { fetchAll(); fetchWorkOrders(); }, [fetchAll, fetchWorkOrders]);
 
   useEffect(() => {
     api.get('/api/parts/options', { params: { active_only: true, limit: 500 } })
@@ -222,20 +256,34 @@ export default function ProductionPlanning() {
   }, [parts]);
 
   useWebSocket(useCallback(msg => {
-    if (['plan_created','plan_started','plan_completed','plan_updated','plan_deleted','actual_qty_updated','station_created','station_updated','station_deleted'].includes(msg.type))
+    if (['plan_created','plan_started','plan_completed','plan_updated','plan_deleted','actual_qty_updated','station_created','station_updated','station_deleted','work_order_created','work_order_updated','plan_rescheduled','plans_bulk_rescheduled'].includes(msg.type)) {
       fetchAll();
-  }, [fetchAll]));
+      fetchWorkOrders();
+    }
+  }, [fetchAll, fetchWorkOrders]));
+
+  const selectedWorkOrder = useMemo(
+    () => workOrders.find((wo) => String(wo.id) === String(form.work_order_id)),
+    [workOrders, form.work_order_id],
+  );
 
   const createPlan = async e => {
     e.preventDefault();
     try {
+      const shifts = resolveFormShifts(form, enabledShifts);
+      if (!shifts.length) {
+        setMsg('❌ Select at least one shift');
+        return;
+      }
       let payload = {
         machine_id:        form.machine_id === '' ? null : parseInt(form.machine_id),
+        work_order_id:     form.work_order_id ? parseInt(form.work_order_id, 10) : null,
         process_time:      parseCtSeconds(form.process_time),
         loading_unloading: parseCtSeconds(form.loading_unloading),
         planned_qty:       parseInt(form.planned_qty),
         priority:          parseInt(form.priority),
-        shift:             form.shift,
+        shift:             shifts[0],
+        shifts,
         station_no:           parseInt(form.station_no),
         current_operation:       form.current_operation,
         next_operation:       form.next_operation,
@@ -244,21 +292,23 @@ export default function ProductionPlanning() {
         notes:             form.notes
       };
 
+      const shiftLabel = shifts.length > 1 ? `${shifts.length} shifts (${shifts.join(', ')})` : `shift ${shifts[0]}`;
+
       // Handle different plan modes
       if (form.plan_mode === 'single') {
         payload.plan_date = form.plan_date;
-        await api.post('/api/plans/', payload);
-        setMsg('✅ Plan created for single day');
+        const r = await api.post('/api/plans/', payload);
+        const count = Array.isArray(r.data) ? r.data.length : 1;
+        setMsg(`✅ Plan created for ${form.plan_date} · ${count} slot(s) · ${shiftLabel}`);
       } else if (form.plan_mode === 'weekly') {
-        // Create plan for 7 days starting from start_date
         payload.plan_date = form.start_date;
         const end = new Date(form.start_date);
         end.setDate(end.getDate() + 6);
         payload.end_date = end.toISOString().split('T')[0];
-        await api.post('/api/plans/', payload);
-        setMsg('✅ Weekly plan created (7 days)');
+        const r = await api.post('/api/plans/', payload);
+        const count = Array.isArray(r.data) ? r.data.length : 1;
+        setMsg(`✅ Weekly plan created · ${count} slot(s) · ${shiftLabel}`);
       } else if (form.plan_mode === 'monthly') {
-        // Create plan for entire month
         const start = new Date(form.start_date);
         payload.plan_date = form.start_date;
         const year = start.getFullYear();
@@ -266,15 +316,15 @@ export default function ProductionPlanning() {
         const daysInMonth = new Date(year, month + 1, 0).getDate();
         const end = new Date(year, month, daysInMonth);
         payload.end_date = end.toISOString().split('T')[0];
-        await api.post('/api/plans/', payload);
-        setMsg(`✅ Monthly plan created (${daysInMonth} days)`);
+        const r = await api.post('/api/plans/', payload);
+        const count = Array.isArray(r.data) ? r.data.length : 1;
+        setMsg(`✅ Monthly plan created · ${count} slot(s) · ${shiftLabel}`);
       } else if (form.plan_mode === 'custom_range') {
-        // Create plan for custom date range
         payload.plan_date = form.start_date;
         payload.end_date = form.end_date;
-        const dayCount = Math.ceil((new Date(form.end_date) - new Date(form.start_date)) / (1000 * 60 * 60 * 24)) + 1;
-        await api.post('/api/plans/', payload);
-        setMsg(`✅ Plan created for ${dayCount} days`);
+        const r = await api.post('/api/plans/', payload);
+        const count = Array.isArray(r.data) ? r.data.length : 1;
+        setMsg(`✅ Plan created · ${count} slot(s) · ${shiftLabel}`);
       }
       
       setForm(INIT_FORM);
@@ -287,20 +337,61 @@ export default function ProductionPlanning() {
   };
 
   const setStatus = async (id, status) => {
-    await api.patch(`/api/plans/${id}/status`, { status });
-    fetchAll();
+    try {
+      await api.patch(`/api/plans/${id}/status`, { status });
+      fetchAll();
+    } catch (err) {
+      setMsg('❌ ' + (err.response?.data?.detail || err.message));
+    }
   };
 
   const saveActual = async (id) => {
-    await api.patch(`/api/plans/${id}/actual`, { actual_qty: parseInt(actualEdit.qty), source: 'manual' });
-    setActualEdit({ id: null, qty: '' });
-    fetchAll();
+    try {
+      await api.patch(`/api/plans/${id}/actual`, { actual_qty: parseInt(actualEdit.qty), source: 'manual' });
+      setActualEdit({ id: null, qty: '' });
+      fetchAll();
+    } catch (err) {
+      setMsg('❌ ' + (err.response?.data?.detail || err.message));
+    }
   };
 
   const deletePlan = async id => {
     if (!window.confirm('Delete this plan?')) return;
     await api.delete(`/api/plans/${id}`);
     fetchAll();
+  };
+
+  const bulkMovePlans = async (daysOffset = 7) => {
+    const ids = [...selectedPlanIds];
+    if (!ids.length) return;
+    if (!window.confirm(`Move ${ids.length} selected plan(s) forward by ${daysOffset} day(s)?`)) return;
+    try {
+      const r = await api.post('/api/plans/bulk-reschedule', {
+        plan_ids: ids,
+        mode: 'next_week',
+        days_offset: daysOffset,
+        split_remaining: true,
+      });
+      setMsg(`✅ Moved ${r.data.moved} plan(s) by ${r.data.days_offset} days`);
+      setSelectedPlanIds(new Set());
+      fetchAll();
+    } catch (err) {
+      setMsg('❌ ' + (err.response?.data?.detail || err.message));
+    }
+  };
+
+  const togglePlanSelect = (id) => {
+    setSelectedPlanIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const selectMovablePlans = () => {
+    const movable = plans.filter((p) => ['pending', 'paused'].includes(p.status)).map((p) => p.id);
+    setSelectedPlanIds(new Set(movable));
   };
 
   const clearHistoricMode = () => {
@@ -352,17 +443,23 @@ export default function ProductionPlanning() {
 
       // ==================== Sheet 2: Detailed Plans ====================
       const plansHeader = [
-        'Date', 'Shift', 'Station', 'Current Operation', 'Next Operation', 'Process Time (s)',
+        'Date', 'Shift', 'Station', 'Work Order No', 'WO Target Qty', 'WO Completed', 'WO Remaining',
+        'Current Operation', 'Next Operation', 'Process Time (s)',
         'Loading/Unloading (s)', 'Cycle Time (s)', 'Type', 'Priority', 'Planned Qty',
         'Actual Qty', 'Achievement %', 'Status', 'Notes'
       ];
       
       const plansData = plans.map(p => {
         const pct = p.planned_qty > 0 ? Math.round(p.actual_qty / p.planned_qty * 100) : 0;
+        const wo = workOrders.find(w => w.id === p.work_order_id);
         return [
           p.plan_date,
           p.shift,
           p.station_no,
+          wo?.work_order_no || '',
+          wo?.target_qty ?? '',
+          wo?.completed_qty ?? '',
+          wo?.remaining_qty ?? '',
           p.current_operation,
           p.next_operation,
           p.process_time,
@@ -382,7 +479,8 @@ export default function ProductionPlanning() {
       
       // Set column widths
       detailWs['!cols'] = [
-        { wch: 12 }, { wch: 8 }, { wch: 6 }, { wch: 14 }, { wch: 14 },
+        { wch: 12 }, { wch: 8 }, { wch: 6 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 12 },
+        { wch: 14 }, { wch: 14 },
         { wch: 15 }, { wch: 17 }, { wch: 14 }, { wch: 12 }, { wch: 10 },
         { wch: 12 }, { wch: 12 }, { wch: 14 }, { wch: 12 }, { wch: 20 }
       ];
@@ -537,7 +635,7 @@ export default function ProductionPlanning() {
       {/* Header with clock + refresh + info button */}
       <PageHeader
         title="PRODUCTION PLANNING"
-        onRefresh={fetchAll}
+        onRefresh={() => { fetchAll(); fetchWorkOrders(); }}
         extra={
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <button
@@ -563,7 +661,23 @@ export default function ProductionPlanning() {
         }
       />
 
-      {/* PLC Info Panel — hidden by default, shown on ⓘ click */}
+      {movePlan && (
+        <MovePlanModal
+          t={t}
+          plan={movePlan}
+          enabledShifts={enabledShifts}
+          machines={machines}
+          stations={stations}
+          onClose={() => setMovePlan(null)}
+          onMoved={(result) => {
+            setMsg(result.split
+              ? '✅ Plan split — completed portion kept, remainder moved'
+              : '✅ Plan moved successfully');
+            fetchAll();
+          }}
+        />
+      )}
+
       {showPlcInfo && (
         <div style={s.plcCard}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
@@ -621,6 +735,50 @@ export default function ProductionPlanning() {
               </div>
             </div>
 
+            {/* Work Order linkage */}
+            <div style={{ marginBottom: 16, padding: 12, background: t.surface2, borderRadius: 8 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <label style={{ color: t.accent, fontSize: 12, fontWeight: 600 }}>Master Work Order</label>
+                <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                  <Link to="/work-orders" style={{ color: t.accent, fontSize: 12, textDecoration: 'none' }}>Manage work orders →</Link>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: t.textMuted, cursor: 'pointer' }}>
+                  <input type="checkbox" checked={form.enable_machine_suggestions}
+                    onChange={(e) => setForm((p) => ({ ...p, enable_machine_suggestions: e.target.checked }))} />
+                  Smart machine suggestions
+                </label>
+                </div>
+              </div>
+              <select style={s.inp} value={form.work_order_id}
+                onChange={(e) => {
+                  const wo = workOrders.find((w) => String(w.id) === e.target.value);
+                  setForm((p) => ({
+                    ...p,
+                    work_order_id: e.target.value,
+                    part_id: wo?.part_id ? String(wo.part_id) : p.part_id,
+                    model_variant: wo?.model_variant || p.model_variant,
+                  }));
+                }}>
+                <option value="">— Optional: link plan to work order —</option>
+                {workOrders.map((wo) => (
+                  <option key={wo.id} value={wo.id}>
+                    {wo.work_order_no} · {wo.model_variant || wo.part_no} · {wo.remaining_qty}/{wo.target_qty} remaining
+                  </option>
+                ))}
+              </select>
+              {selectedWorkOrder && (
+                <div style={{ display: 'flex', gap: 16, marginTop: 8, fontSize: 12, flexWrap: 'wrap' }}>
+                  <span style={{ color: t.text }}>Target: <strong>{selectedWorkOrder.target_qty}</strong> pcs</span>
+                  <span style={{ color: '#10b981' }}>Completed: {selectedWorkOrder.completed_qty}</span>
+                  <span style={{ color: '#f59e0b' }}>Remaining: {selectedWorkOrder.remaining_qty}</span>
+                  <span style={{ color: t.textMuted }}>Unplanned: {selectedWorkOrder.unplanned_qty}</span>
+                  <Link to={`/work-orders?id=${selectedWorkOrder.id}`}
+                    style={{ ...woLinkStyle, fontSize: 12 }}>
+                    View work order details →
+                  </Link>
+                </div>
+              )}
+            </div>
+
             <div style={s.formGrid}>
               {/* Date fields based on plan mode */}
               {form.plan_mode === 'single' && (
@@ -654,14 +812,77 @@ export default function ProductionPlanning() {
                 </>
               )}
 
-              <FField t={t} label="Shift">
-                <select style={s.inp} value={form.shift} onChange={e => setForm(p => ({ ...p, shift: e.target.value }))}>
-                  {enabledShifts.length === 0 ? (
-                    <option value="">No shifts configured</option>
-                  ) : enabledShifts.map(sh => (
-                    <option key={sh.id} value={sh.id}>{sh.name} ({sh.start}–{sh.end})</option>
+              <FField t={t} label="Shift Coverage" wide>
+                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 8 }}>
+                  {[
+                    { id: 'single', label: 'Single shift' },
+                    { id: 'custom', label: 'Pick shifts' },
+                    { id: 'all', label: 'All shifts (full day)' },
+                  ].map((opt) => (
+                    <button key={opt.id} type="button"
+                      onClick={() => setForm((p) => ({
+                        ...p,
+                        shift_scope: opt.id,
+                        selected_shifts: opt.id === 'all'
+                          ? enabledShifts.map((s) => s.id)
+                          : (p.selected_shifts?.length ? p.selected_shifts : [p.shift]),
+                      }))}
+                      style={{
+                        ...s.modeBtn,
+                        padding: '6px 12px',
+                        ...(form.shift_scope === opt.id ? s.modeBtnActive : s.modeBtnInactive),
+                      }}>
+                      {opt.label}
+                    </button>
                   ))}
-                </select>
+                </div>
+                {form.shift_scope === 'single' && (
+                  <select style={s.inp} value={form.shift}
+                    onChange={(e) => setForm((p) => ({ ...p, shift: e.target.value, selected_shifts: [e.target.value] }))}>
+                    {enabledShifts.length === 0 ? (
+                      <option value="">No shifts configured</option>
+                    ) : enabledShifts.map((sh) => (
+                      <option key={sh.id} value={sh.id}>{sh.name} ({sh.start}–{sh.end})</option>
+                    ))}
+                  </select>
+                )}
+                {form.shift_scope === 'custom' && (
+                  <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                    {enabledShifts.map((sh) => {
+                      const checked = (form.selected_shifts || []).includes(sh.id);
+                      return (
+                        <label key={sh.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: t.textMuted, cursor: 'pointer' }}>
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(e) => {
+                              setForm((p) => {
+                                const cur = new Set(p.selected_shifts || []);
+                                if (e.target.checked) cur.add(sh.id);
+                                else cur.delete(sh.id);
+                                const next = [...cur];
+                                return {
+                                  ...p,
+                                  selected_shifts: next.length ? next : [sh.id],
+                                  shift: next[0] || p.shift,
+                                };
+                              });
+                            }}
+                          />
+                          {sh.name} ({sh.start}–{sh.end})
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+                {form.shift_scope === 'all' && (
+                  <div style={{ fontSize: 12, color: t.textDim }}>
+                    Creates one plan per shift per day: {enabledShifts.map((s) => s.name).join(', ') || '—'}
+                  </div>
+                )}
+                <div style={{ fontSize: 11, color: t.textFaint, marginTop: 6 }}>
+                  Qty applies per shift slot (e.g. 500 pcs × 2 shifts = 2 plans of 500 each).
+                </div>
               </FField>
               <FField t={t} label="Station No">
                 <select style={s.inp} value={form.station_no || ''}
@@ -686,6 +907,18 @@ export default function ProductionPlanning() {
                     .filter(m => !form.station_no || m.station_id === parseInt(form.station_no, 10))
                     .map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
                 </select>
+                <MachineSuggestions
+                  t={t}
+                  partId={form.part_id}
+                  modelVariant={form.model_variant}
+                  enabled={form.enable_machine_suggestions}
+                  machines={machines}
+                  onSelectMachine={(machineId, stationId) => setForm((p) => ({
+                    ...p,
+                    machine_id: String(machineId),
+                    station_no: stationId || p.station_no,
+                  }))}
+                />
               </FField>
               <FField t={t} label="Part (Part Master)" wide>
                 <select
@@ -728,8 +961,15 @@ export default function ProductionPlanning() {
                 <input style={{ ...s.inp, background: t.surface2, color: t.brand, fontWeight: 700 }} readOnly
                   value={formatCtSeconds(sumCt(form.process_time, form.loading_unloading))} />
               </FField>
-              <FField t={t} label="Planned Qty"><input style={s.inp} type="number" value={form.planned_qty}
-                onChange={e => setForm(p => ({ ...p, planned_qty: parseInt(e.target.value) }))} required /></FField>
+              <FField t={t} label="Planned Qty">
+                <input style={s.inp} type="number" value={form.planned_qty}
+                  onChange={e => setForm(p => ({ ...p, planned_qty: parseInt(e.target.value) }))} required />
+                {selectedWorkOrder && form.planned_qty > selectedWorkOrder.remaining_qty && (
+                  <span style={{ color: '#ef4444', fontSize: 11 }}>
+                    Exceeds work order remaining ({selectedWorkOrder.remaining_qty} pcs)
+                  </span>
+                )}
+              </FField>
               <FField t={t} label="Priority (1=High)"><input style={s.inp} type="number" min="1" max="10" value={form.priority}
                 onChange={e => setForm(p => ({ ...p, priority: parseInt(e.target.value) }))} /></FField>
               <FField t={t} label="Type">
@@ -888,6 +1128,7 @@ export default function ProductionPlanning() {
                 {queue.length === 0 && <div style={s.pipelineEmpty}>Queue empty</div>}
                 {queue.map((p, idx) => {
                   const partLabel = planModelVariant(p, parts);
+                  const wo = workOrders.find(w => w.id === p.work_order_id);
                   return (
                   <div key={p.id} className={surfaceClass(t, 'raised')} style={{ ...s.pipelineItem, borderLeft: `3px solid ${idx === 0 ? t.accent : t.border}` }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -900,6 +1141,15 @@ export default function ProductionPlanning() {
                       </span>
                     </div>
                     <div style={{ color: t.textDim, fontSize: 11 }}>→ {p.next_operation}</div>
+                    {wo && (
+                      <div style={{ marginTop: 2 }}>
+                        <Link to={`/work-orders?id=${wo.id}`}
+                          style={{ ...woLinkStyle, fontSize: 11 }}
+                          title="View work order">
+                          📋 <strong style={{ color: WO_LINK_COLOR }}>{wo.work_order_no}</strong>
+                        </Link>
+                      </div>
+                    )}
                     {partLabel && (
                       <div style={{ color: t.text, fontSize: 11, fontWeight: 600, marginTop: 2 }}>
                         {partLabel}
@@ -908,9 +1158,15 @@ export default function ProductionPlanning() {
                     <div style={{ color: t.textMuted, fontSize: 11 }}>
                       Planned: {p.planned_qty} | CT: {formatCtSeconds(sumCt(p.process_time, p.loading_unloading))}s | {p.shift} | {p.plan_date}
                     </div>
-                    {idx === 0 && p.status === 'pending' && canEdit && (
+                    {idx === 0 && p.status === 'pending' && canEdit && canStart && (
                       <button style={{ ...s.miniBtn, background: t.accent, marginTop: 4 }}
                         onClick={() => setStatus(p.id, 'running')}>▶ Start</button>
+                    )}
+                    {idx === 0 && p.status === 'pending' && canEdit && !canStart && (
+                      <span title={`Start allowed on or after ${p.plan_date}`}
+                        style={{ fontSize: 10, color: t.textFaint, marginTop: 4, display: 'inline-block' }}>
+                        🔒 Starts {p.plan_date}
+                      </span>
                     )}
                   </div>
                   );
@@ -925,6 +1181,24 @@ export default function ProductionPlanning() {
       <div className={surfaceClass(t)} style={s.card}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12, flexWrap: 'wrap' }}>
           <h4 style={{ ...s.cardTitle, margin: 0 }}>All Plans ({plans.length})</h4>
+          {canEdit && selectedPlanIds.size > 0 && (
+            <>
+              <button onClick={() => bulkMovePlans(7)}
+                style={{ padding: '5px 12px', borderRadius: 6, border: 'none', background: t.brand, color: '#fff', cursor: 'pointer', fontSize: 12 }}>
+                Move {selectedPlanIds.size} → Next Week
+              </button>
+              <button onClick={() => setSelectedPlanIds(new Set())}
+                style={{ padding: '5px 10px', borderRadius: 6, border: `1px solid ${t.border}`, background: t.surface2, color: t.textMuted, cursor: 'pointer', fontSize: 12 }}>
+                Clear selection
+              </button>
+            </>
+          )}
+          {canEdit && (
+            <button onClick={selectMovablePlans}
+              style={{ padding: '5px 10px', borderRadius: 6, border: `1px solid ${t.border}`, background: t.surface2, color: t.textMuted, cursor: 'pointer', fontSize: 12 }}>
+              Select pending/paused
+            </button>
+          )}
           <input
             style={{ padding: '5px 10px', borderRadius: 6, border: `1px solid ${t.inpBorder}`,
                      background: t.inp, color: t.text, fontSize: 13, minWidth: 220 }}
@@ -942,7 +1216,8 @@ export default function ProductionPlanning() {
           <table style={s.table}>
             <thead>
               <tr>
-                {['Date','Shift','Station','Machine','Model / Variant','Current Operation','Next Operation','CT(s)','Type','Priority',
+                {canEdit && <th style={s.th}>☑</th>}
+                {['Date','Shift','Station','Machine','Work Order','Model / Variant','Current Operation','Next Operation','CT(s)','Type','Priority',
                   'Planned','Actual','%','Status','Actions'].map(h =>
                   <th key={h} style={s.th}>{h}</th>)}
               </tr>
@@ -965,12 +1240,31 @@ export default function ProductionPlanning() {
               }).map(p => {
                 const pct = p.planned_qty > 0 ? Math.round(p.actual_qty / p.planned_qty * 100) : 0;
                 const cfg = STATUS_CFG[p.status];
+                const wo = workOrders.find(w => w.id === p.work_order_id);
+                const canComplete = isPlanDateReached(p.plan_date);
+                const canStart = isPlanDateReached(p.plan_date);
                 return (
                   <tr key={p.id}>
+                    {canEdit && (
+                      <td style={s.td}>
+                        {['pending', 'paused'].includes(p.status) && (
+                          <input type="checkbox" checked={selectedPlanIds.has(p.id)}
+                            onChange={() => togglePlanSelect(p.id)} />
+                        )}
+                      </td>
+                    )}
                     <td style={s.td}>{p.plan_date}</td>
                     <td style={s.td}>{p.shift}</td>
                     <td style={s.td}>{getStationLabel(p.station_no)}</td>
                     <td style={s.td}>{machines.find(m => m.id === p.machine_id)?.name || '—'}</td>
+                    <td style={s.td}>
+                      {wo ? (
+                        <Link to={`/work-orders?id=${wo.id}`}
+                          style={{ ...woLinkStyle, fontSize: 12 }}>
+                          <strong style={{ color: WO_LINK_COLOR }}>{wo.work_order_no}</strong>
+                        </Link>
+                      ) : '—'}
+                    </td>
                     <td style={s.td}>{planModelVariant(p, parts) || '—'}</td>
                     <td style={s.td}>{p.current_operation}</td>
                     <td style={s.td}>{p.next_operation}</td>
@@ -1014,17 +1308,36 @@ export default function ProductionPlanning() {
                     </td>
                     <td style={s.td}>
                       <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                        {p.status === 'pending' && canEdit && (
+                        {p.status === 'pending' && canEdit && canStart && (
                           <button style={{ ...s.miniBtn, background: t.accent }} onClick={() => setStatus(p.id, 'running')}>▶</button>
+                        )}
+                        {p.status === 'pending' && canEdit && !canStart && (
+                          <span title={`Start allowed on or after ${p.plan_date}`}
+                            style={{ fontSize: 10, color: t.textFaint, alignSelf: 'center' }}>🔒</span>
                         )}
                         {p.status === 'running' && (
                           <>
                             <button style={{ ...s.miniBtn, background: '#f59e0b' }} onClick={() => setStatus(p.id, 'paused')}>⏸</button>
-                            {canEdit && <button style={{ ...s.miniBtn, background: t.brand }} onClick={() => setStatus(p.id, 'completed')}>✓</button>}
+                            {canEdit && canComplete && (
+                              <button style={{ ...s.miniBtn, background: t.brand }} title="Mark completed"
+                                onClick={() => setStatus(p.id, 'completed')}>✓</button>
+                            )}
+                            {canEdit && !canComplete && (
+                              <span title={`Completion allowed on or after ${p.plan_date}`}
+                                style={{ fontSize: 10, color: t.textFaint, alignSelf: 'center' }}>🔒 {p.plan_date}</span>
+                            )}
                           </>
                         )}
-                        {p.status === 'paused' && (
+                        {p.status === 'paused' && canStart && (
                           <button style={{ ...s.miniBtn, background: t.accent }} onClick={() => setStatus(p.id, 'running')}>▶</button>
+                        )}
+                        {p.status === 'paused' && !canStart && (
+                          <span title={`Resume allowed on or after ${p.plan_date}`}
+                            style={{ fontSize: 10, color: t.textFaint, alignSelf: 'center' }}>🔒</span>
+                        )}
+                        {canEdit && ['pending', 'paused'].includes(p.status) && (
+                          <button style={{ ...s.miniBtn, background: '#6366f1' }} title="Move to next week or custom date"
+                            onClick={() => setMovePlan(p)}>↪</button>
                         )}
                         {canEdit && p.status !== 'completed' && (
                           <button style={{ ...s.miniBtn, background: '#ef4444' }} onClick={() => deletePlan(p.id)}>🗑</button>
