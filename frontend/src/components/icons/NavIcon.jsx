@@ -99,6 +99,7 @@ export const NAV_ICONS = {
 
 export const NAV_GROUP_ICONS = {
   production: icon('factory', 20),
+  qc: icon('menuBook', 20),
   maintenance: icon('build', 20),
   alerts: icon('notifications', 20),
   settings: icon('settings', 20),

@@ -14,6 +14,7 @@ from .routers import parts as parts_router
 from .routers import operator_dashboard as operator_dashboard_router
 from .routers import qc_inspection as qc_inspection_router
 from .routers import deviation_alerts as deviation_alerts_router
+from .routers import notifications as notifications_router
 from .ws_manager import manager
 from sqlalchemy import text, inspect
 from sqlalchemy.orm import Session
@@ -122,6 +123,7 @@ app.include_router(parts_router.router)
 app.include_router(operator_dashboard_router.router)
 app.include_router(qc_inspection_router.router)
 app.include_router(deviation_alerts_router.router)
+app.include_router(notifications_router.router)
 
 # Serve uploaded machine images — pathlib works on both Windows and Linux
 STATIC_DIR = Path(__file__).parent.parent / "static"

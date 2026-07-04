@@ -4,8 +4,11 @@ import { surfaceClass } from '../../themes/tileHelpers';
 /**
  * Theme-aware modal overlay — matches Titan page chrome (no raw MUI Dialog).
  */
-export default function TitanModal({ title, subtitle, onClose, children, footer, wide = false }) {
+export default function TitanModal({
+  title, subtitle, onClose, children, footer, wide = false, maxWidth,
+}) {
   const { theme: t } = useTheme();
+  const width = maxWidth || (wide ? 1120 : 720);
 
   return (
     <div
@@ -30,7 +33,7 @@ export default function TitanModal({ title, subtitle, onClose, children, footer,
         className={surfaceClass(t, 'main') || undefined}
         style={{
           width: '100%',
-          maxWidth: wide ? 1120 : 720,
+          maxWidth: width,
           margin: 'auto',
           background: t.surface,
           border: `1px solid ${t.border}`,
@@ -67,7 +70,7 @@ export default function TitanModal({ title, subtitle, onClose, children, footer,
             ×
           </button>
         </header>
-        <div style={{ padding: '16px 20px' }}>{children}</div>
+        <div style={{ padding: '16px 20px', maxHeight: 'calc(100vh - 120px)', overflow: 'auto' }}>{children}</div>
         {footer && (
           <footer
             style={{

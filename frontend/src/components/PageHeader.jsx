@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useConfig, getCurrentShift } from '../context/ConfigContext';
 import { useTheme } from '../context/ThemeContext';
+import NotificationBell from './NotificationBell';
 
 const AUTO_REFRESH_SEC = 60;
 
@@ -99,6 +100,7 @@ export default function PageHeader({ title, onRefresh, extra }) {
         {currentShift && (
           <span style={{ ...s.shiftBadge, background: t.bg, borderColor: '#f59e0b44' }}>⏱ {currentShift.name}</span>
         )}
+        <NotificationBell />
         <span style={{ ...s.lastRefresh, color: t.textFaint }}>↻ {fmtShort(lastRefresh)}</span>
         <button style={{ ...s.refreshBtn, ...(spinning ? s.refreshBtnSpin : {}) }}
           onClick={triggerRefresh} title={`Auto-refresh in ${countdown}s — click to refresh now`}>

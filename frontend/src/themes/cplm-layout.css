@@ -98,25 +98,93 @@ body {
   color: var(--accent) !important;
 }
 
-/* CPLM SideDrawer nav hover/focus — Tech Blue (and Dark) accent nav only */
+/* Main menu — bold, high-contrast labels on nav background */
+.titan-nav-group-btn,
+.titan-nav-leaf {
+  font-weight: 600 !important;
+}
+
+.titan-nav-group-btn {
+  font-weight: 700 !important;
+  text-transform: uppercase !important;
+  letter-spacing: 0.04em !important;
+}
+
+/* Top-level items only (e.g. Dashboard) — uppercase */
+.titan-nav-list a.titan-nav-leaf-top {
+  text-transform: uppercase !important;
+  letter-spacing: 0.04em !important;
+  font-weight: 700 !important;
+}
+
+/* Child menus under groups — Title Case (Pascal-style labels), not all caps */
+.titan-nav-list a.titan-nav-leaf-child,
+.titan-nav-list a.titan-nav-leaf-child span {
+  text-transform: none !important;
+  letter-spacing: normal !important;
+}
+
+[data-theme='dark'] .titan-nav-group-btn,
+[data-theme='techBlue'] .titan-nav-group-btn,
+[data-theme='light'] .titan-nav-group-btn {
+  color: #fbbf24 !important;
+}
+
 [data-theme='dark'] .titan-nav-group-btn:hover,
-[data-theme='dark'] .titan-nav-leaf:hover,
 [data-theme='techBlue'] .titan-nav-group-btn:hover,
+[data-theme='light'] .titan-nav-group-btn:hover {
+  color: #fcd34d !important;
+}
+
+[data-theme='dark'] .titan-nav-leaf:not(.titan-logout-btn),
+[data-theme='techBlue'] .titan-nav-leaf:not(.titan-logout-btn) {
+  color: #f8fafc !important;
+}
+
+[data-theme='dark'] .titan-nav-leaf[aria-current='page'],
+[data-theme='dark'] a.titan-nav-leaf.active,
+[data-theme='techBlue'] .titan-nav-leaf[aria-current='page'],
+[data-theme='techBlue'] a.titan-nav-leaf.active {
+  background: var(--nav-focus) !important;
+  color: var(--accent) !important;
+  font-weight: 700 !important;
+}
+
+[data-theme='dark'] .titan-nav-leaf:hover,
 [data-theme='techBlue'] .titan-nav-leaf:hover {
   background: var(--nav-hover) !important;
   color: var(--accent) !important;
 }
 
-[data-theme='light'] .titan-nav-group-btn:hover,
-[data-theme='light'] .titan-nav-leaf:hover {
-  background: var(--bg) !important;
-  color: var(--text) !important;
+[data-theme='dark'] .titan-nav-group-btn:hover,
+[data-theme='techBlue'] .titan-nav-group-btn:hover {
+  background: var(--nav-hover) !important;
 }
 
-[data-theme='techBlue'] .titan-nav-leaf[aria-current='page'],
-[data-theme='techBlue'] a.titan-nav-leaf.active {
+[data-theme='light'] .titan-nav-leaf:not(.titan-logout-btn) {
+  color: #1e293b !important;
+  font-weight: 600 !important;
+}
+
+[data-theme='light'] .titan-nav-group-btn {
+  font-weight: 700 !important;
+}
+
+[data-theme='light'] .titan-nav-leaf[aria-current='page'],
+[data-theme='light'] a.titan-nav-leaf.active {
   background: var(--nav-focus) !important;
   color: var(--accent) !important;
+  font-weight: 700 !important;
+}
+
+[data-theme='light'] .titan-nav-leaf:hover {
+  background: var(--bg) !important;
+  color: var(--accent) !important;
+}
+
+[data-theme='light'] .titan-nav-group-btn:hover {
+  background: var(--bg) !important;
+  color: #fcd34d !important;
 }
 
 .titan-logout-btn:hover {
