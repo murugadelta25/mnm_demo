@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 
-/** 30 minutes of no mouse, keyboard, scroll, or touch activity */
-export const IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+/** 60 minutes of no mouse, keyboard, scroll, or touch activity */
+export const IDLE_TIMEOUT_MS = 60 * 60 * 1000;
 
 const ACTIVITY_EVENTS = [
   'mousedown',

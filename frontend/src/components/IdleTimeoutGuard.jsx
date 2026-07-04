@@ -6,7 +6,7 @@ import useIdleTimeout, { IDLE_TIMEOUT_MS } from '../hooks/useIdleTimeout';
 export const SESSION_EXPIRED_KEY = 'session_expired_reason';
 
 /**
- * Signs the user out after 30 minutes of no screen interaction.
+ * Signs the user out after 60 minutes of no screen interaction.
  * Any mouse, keyboard, scroll, or touch activity keeps the session alive.
  */
 export default function IdleTimeoutGuard({ children }) {
