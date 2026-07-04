@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import api from '../api/client';
 import { assetUrl } from '../api/config';
 import PageHeader from '../components/PageHeader';
@@ -13,26 +13,63 @@ import {
   emptyParamFromSchema,
   serializeParamColumns,
 } from '../utils/qcColumnSchema';
+import {
+  DEFAULT_TOOLS_COLUMNS,
+  DEFAULT_MACHINE_PARAM_COLUMNS,
+  DEFAULT_JIGS_COLUMNS,
+  emptyParamTable,
+  normalizeParamTable,
+  emptyRowFromColumns,
+  serializeParamTable,
+} from '../utils/paramTableSchema';
 import { MAX_IMAGE_BYTES, validateFileSize, validateWiDocFile, WI_DOC_ACCEPT } from '../utils/uploadLimits';
+import {
+  OTHER_DOC_TYPE,
+  mergeDocTypes,
+  resolveDocTypeSelection,
+  docTypeLabel,
+} from '../utils/docTypes';
+import SymbolInput, { isSpecColumn } from '../components/SymbolInput';
 
 const PARTS_PAGE_SIZE = 50;
 
 const PARAMETER_PRESETS = [
+  'Dimension', 'Chamfer', 'Symmetry', 'Appearance', 'Surface Finish',
   'Thread', 'Thread Length', 'Inner Dia', 'Outer Dia', 'Total Length',
-  'Perpendicularity', 'Appearance', 'Hardness', 'Weight', 'Visual',
+  'Perpendicularity', 'Hardness', 'Weight', 'Visual',
+];
+
+const MANUFACTURING_STATUS_OPTIONS = [
+  { value: 'prototype', label: 'Prototype' },
+  { value: 'pre-launch', label: 'Pre-Launch' },
+  { value: 'production', label: 'Production' },
+  { value: 'other', label: 'Other' },
 ];
 
 const EMPTY_PART = {
   part_no: '',
+  part_name: '',
   model_variant: '',
   description: '',
   tool_no: '',
   production_section: '',
+  input_material: '',
+  previous_operation: '',
+  next_operation: '',
+  machine_type: '',
   operation_code: '',
+  operation_name: '',
+  operation_sequence_steps: [''],
   process_time: '',
   loading_unloading: '10',
+  drawing_revision: '',
+  manufacturing_status: 'production',
+  manufacturing_status_other: '',
   qc_column_schema: [...DEFAULT_QC_COLUMNS],
   qc_parameters: [],
+  tools_parameters: emptyParamTable(DEFAULT_TOOLS_COLUMNS),
+  machine_parameters: emptyParamTable(DEFAULT_MACHINE_PARAM_COLUMNS),
+  jigs_fixtures: emptyParamTable(DEFAULT_JIGS_COLUMNS),
 };
 
 const DOC_TYPES = [
@@ -43,6 +80,24 @@ const DOC_TYPES = [
 ];
 
 const DOC_LABEL_BY_KEY = Object.fromEntries(DOC_TYPES.map((d) => [d.key, d.label]));
+
+const SEQ_ARROW = '→';
+
+function parseOperationSequence(raw) {
+  if (raw == null || !String(raw).trim()) return [''];
+  const steps = String(raw)
+    .split(/\s*(?:→|➔|->|—>|›)\s*/)
+    .map((s) => s.replace(/^\d+\)\s*/, '').trim())
+    .filter(Boolean);
+  return steps.length ? steps : [''];
+}
+
+function joinOperationSequence(steps) {
+  return (steps || [])
+    .map((s) => String(s || '').trim())
+    .filter(Boolean)
+    .join(` ${SEQ_ARROW} `);
+}
 
 /** Safe value for controlled type="number" inputs — avoids React NaN warnings. */
 function toNumberInputValue(val, fallback = '') {
@@ -65,6 +120,37 @@ function normalizeQcParamRow(q, seqNo) {
   };
 }
 
+function partFormFromApi(p, { includeImages = true } = {}) {
+  return {
+    part_no: includeImages ? (p.part_no || '') : '',
+    part_name: p.part_name || '',
+    model_variant: includeImages ? (p.model_variant || p.part_no || '') : '',
+    description: p.description || '',
+    tool_no: p.tool_no || '',
+    production_section: p.production_section || '',
+    input_material: p.input_material || '',
+    previous_operation: p.previous_operation || '',
+    next_operation: p.next_operation || '',
+    machine_type: p.machine_type || '',
+    operation_code: p.operation_code || '',
+    operation_name: p.operation_name || '',
+    operation_sequence_steps: parseOperationSequence(p.operation_sequence),
+    process_time: toNumberInputValue(p.process_time),
+    loading_unloading: toNumberInputValue(p.loading_unloading, '10'),
+    drawing_revision: p.drawing_revision || '',
+    manufacturing_status: p.manufacturing_status || 'production',
+    manufacturing_status_other: p.manufacturing_status_other || '',
+    image_url: includeImages ? (p.image_url || '') : '',
+    sketch_image_url: includeImages ? (p.sketch_image_url || '') : '',
+    qc_column_schema: normalizeQcColumnSchema(p.qc_column_schema, p.qc_parameters),
+    qc_parameters: (p.qc_parameters || []).map((q, i) => normalizeQcParamRow(q, i + 1)),
+    tools_parameters: normalizeParamTable(p.tools_parameters, DEFAULT_TOOLS_COLUMNS),
+    machine_parameters: normalizeParamTable(p.machine_parameters, DEFAULT_MACHINE_PARAM_COLUMNS),
+    jigs_fixtures: normalizeParamTable(p.jigs_fixtures, DEFAULT_JIGS_COLUMNS),
+    active: includeImages ? (p.active ?? 1) : 1,
+  };
+}
+
 function PartThumbImage({ url, alt, style, placeholder }) {
   const [broken, setBroken] = useState(false);
   if (!url || broken) return placeholder;
@@ -78,6 +164,252 @@ function PartThumbImage({ url, alt, style, placeholder }) {
   );
 }
 
+function ImageUploadBox({
+  label, url, alt, t, s, selectedId, onUpload, placeholderIcon = '📷',
+}) {
+  return (
+    <div style={{ flexShrink: 0 }}>
+      <div style={{
+        width: 120, height: 120, borderRadius: 10,
+        border: `2px dashed ${url ? t.brand : t.border}`,
+        background: t.surface2, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        overflow: 'hidden', marginBottom: 6,
+      }}
+      >
+        {url ? (
+          <PartThumbImage
+            url={url}
+            alt={alt}
+            style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+            placeholder={<span style={{ fontSize: 32, opacity: 0.3, color: t.textDim }}>{placeholderIcon}</span>}
+          />
+        ) : (
+          <span style={{ fontSize: 32, opacity: 0.3, color: t.textDim }}>{placeholderIcon}</span>
+        )}
+      </div>
+      <div style={{ fontSize: 12, fontWeight: 600, color: t.text, marginBottom: 4 }}>{label}</div>
+      {selectedId ? (
+        <>
+          <input
+            type="file"
+            accept="image/*"
+            onChange={(e) => { onUpload(e.target.files?.[0]); e.target.value = ''; }}
+            style={{ fontSize: 11, maxWidth: 130 }}
+          />
+          <div style={{ fontSize: 10, color: t.textFaint }}>Max 2 MB</div>
+        </>
+      ) : (
+        <p style={{ margin: 0, fontSize: 11, color: t.textDim }}>Save part first</p>
+      )}
+    </div>
+  );
+}
+
+function CollapsibleSection({ title, defaultOpen = true, headerExtra, children, t, s, summary }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div style={{
+      marginBottom: 16,
+      border: `1px solid ${t.border}`,
+      borderRadius: 8,
+      background: t.surface2,
+      overflow: 'hidden',
+    }}
+    >
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        gap: 8,
+        padding: '10px 12px',
+        background: t.surface,
+        borderBottom: open ? `1px solid ${t.border}` : 'none',
+      }}
+      >
+        <div style={{ minWidth: 0 }}>
+          <strong style={{ fontSize: 13, color: t.text }}>{title}</strong>
+          {!open && summary && (
+            <div style={{ fontSize: 11, color: t.textDim, marginTop: 2 }}>{summary}</div>
+          )}
+        </div>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
+          {open && headerExtra}
+          <button type="button" onClick={() => setOpen((v) => !v)} style={s.btnSecondary}>
+            {open ? 'Hide' : 'Show'}
+          </button>
+        </div>
+      </div>
+      {open && (
+        <div style={{ padding: 12 }}>
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DynamicParamTable({
+  title, table, onChange, t, s, inp, defaultOpen = true,
+}) {
+  const columns = table?.columns || [];
+  const rows = table?.rows || [];
+
+  const updateColumnLabel = (key, label) => {
+    onChange({
+      ...table,
+      columns: columns.map((c) => (c.key === key ? { ...c, label } : c)),
+    });
+  };
+
+  const addColumn = () => {
+    const key = `col_${Date.now()}`;
+    onChange({
+      columns: [...columns, { key, label: '' }],
+      rows: rows.map((r) => ({ ...r, [key]: '' })),
+    });
+  };
+
+  const removeColumn = (key) => {
+    if (columns.length <= 1) return;
+    onChange({
+      columns: columns.filter((c) => c.key !== key),
+      rows: rows.map((r) => {
+        const next = { ...r };
+        delete next[key];
+        return next;
+      }),
+    });
+  };
+
+  const addRow = () => {
+    onChange({
+      ...table,
+      rows: [...rows, emptyRowFromColumns(columns)],
+    });
+  };
+
+  const updateCell = (rowIdx, key, val) => {
+    const nextRows = [...rows];
+    nextRows[rowIdx] = { ...nextRows[rowIdx], [key]: val };
+    onChange({ ...table, rows: nextRows });
+  };
+
+  const removeRow = (rowIdx) => {
+    onChange({
+      ...table,
+      rows: rows.filter((_, i) => i !== rowIdx),
+    });
+  };
+
+  return (
+    <CollapsibleSection
+      title={title}
+      defaultOpen={defaultOpen}
+      t={t}
+      s={s}
+      summary={`${rows.length} row(s) · ${columns.length} column(s)`}
+      headerExtra={(
+        <button type="button" onClick={addRow} style={s.btnSecondary}>+ Add Row</button>
+      )}
+    >
+      <div style={{
+        marginBottom: 10, padding: 10, borderRadius: 8,
+        border: `1px solid ${t.border}`, background: t.surface,
+      }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+          <span style={{ fontSize: 12, fontWeight: 600, color: t.text }}>
+            Columns (rename or add — shared by all rows)
+          </span>
+          <button type="button" onClick={addColumn} style={s.btnSecondary}>+ Add Column</button>
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          {columns.map((col) => (
+            <div
+              key={col.key}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 4,
+                padding: '4px 8px', borderRadius: 6, border: `1px solid ${t.border}`,
+                background: t.surface2,
+              }}
+            >
+              <input
+                value={col.label || ''}
+                onChange={(e) => updateColumnLabel(col.key, e.target.value)}
+                placeholder="Column name"
+                style={{ ...inp, width: 140, fontSize: 11 }}
+              />
+              {columns.length > 1 && (
+                <button
+                  type="button"
+                  onClick={() => removeColumn(col.key)}
+                  style={{ cursor: 'pointer', border: 'none', background: 'transparent', color: t.textDim }}
+                  title="Remove column"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+          <thead>
+            <tr>
+              <th className="wi-qc-th" style={{ ...s.thYellow, padding: 6 }}>#</th>
+              {columns.map((col) => (
+                <th key={col.key} className="wi-qc-th" style={{ ...s.thYellow, padding: 6 }}>
+                  {col.label || col.key}
+                </th>
+              ))}
+              <th className="wi-qc-th" style={{ ...s.thYellow, padding: 6 }} />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length === 0 && (
+              <tr>
+                <td colSpan={columns.length + 2} style={{ padding: 8, color: t.textDim, fontSize: 12 }}>
+                  No rows yet — click + Add Row
+                </td>
+              </tr>
+            )}
+            {rows.map((row, i) => (
+              <tr key={i}>
+                <td style={{ padding: 4 }}>{i + 1}</td>
+                {columns.map((col) => (
+                  <td key={col.key} style={{ padding: 4, minWidth: isSpecColumn(col) || col.key === 'tools_detail' ? 160 : undefined }}>
+                    {isSpecColumn(col) || col.key === 'tools_detail' ? (
+                      <SymbolInput
+                        value={row[col.key] ?? ''}
+                        onChange={(val) => updateCell(i, col.key, val)}
+                        style={inp}
+                        placeholder={col.label || col.key}
+                        t={t}
+                        title="Insert ± / GD&T symbols"
+                      />
+                    ) : (
+                      <input
+                        value={row[col.key] ?? ''}
+                        onChange={(e) => updateCell(i, col.key, e.target.value)}
+                        style={inp}
+                        placeholder={col.label || col.key}
+                      />
+                    )}
+                  </td>
+                ))}
+                <td style={{ padding: 4 }}>
+                  <button type="button" onClick={() => removeRow(i)} style={{ cursor: 'pointer' }}>✕</button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </CollapsibleSection>
+  );
+}
+
 export default function PartManagement() {
   const { theme: t } = useTheme();
   const [parts, setParts] = useState([]);
@@ -88,6 +420,8 @@ export default function PartManagement() {
   const [listLoading, setListLoading] = useState(false);
   const [selectedId, setSelectedId] = useState(null);
   const [partDocuments, setPartDocuments] = useState([]);
+  const [docTypeOptions, setDocTypeOptions] = useState([]);
+  const [docUploadOpen, setDocUploadOpen] = useState(false);
   const [form, setForm] = useState({ ...EMPTY_PART });
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState('');
@@ -119,6 +453,15 @@ export default function PartManagement() {
     }
   }, []);
 
+  const loadDocTypes = useCallback(async () => {
+    try {
+      const { data } = await api.get('/api/parts/document-types');
+      setDocTypeOptions(mergeDocTypes(data, partDocuments));
+    } catch {
+      setDocTypeOptions(mergeDocTypes([], partDocuments));
+    }
+  }, [partDocuments]);
+
   useEffect(() => {
     const timer = setTimeout(() => {
       loadParts(1, searchQuery);
@@ -126,42 +469,31 @@ export default function PartManagement() {
     return () => clearTimeout(timer);
   }, [searchQuery, loadParts]);
 
+  useEffect(() => {
+    loadDocTypes();
+  }, [loadDocTypes]);
+
   const applyFullPart = (p) => {
     setSelectedId(p.id);
     setCopySourceLabel(null);
     setPartDocuments(p.documents || []);
-    setForm({
-      part_no: p.part_no,
-      model_variant: p.model_variant || p.part_no,
-      description: p.description || '',
-      tool_no: p.tool_no || '',
-      production_section: p.production_section || '',
-      operation_code: p.operation_code || '',
-      process_time: toNumberInputValue(p.process_time),
-      loading_unloading: toNumberInputValue(p.loading_unloading, '10'),
-      image_url: p.image_url || '',
-      qc_column_schema: normalizeQcColumnSchema(p.qc_column_schema, p.qc_parameters),
-      qc_parameters: (p.qc_parameters || []).map((q, i) => normalizeQcParamRow(q, i + 1)),
-      active: p.active ?? 1,
-    });
+    setDocUploadOpen(false);
+    setForm(partFormFromApi(p, { includeImages: true }));
     setMsg('');
   };
 
   const applyCopyAsNew = (p, sourceLabel) => {
     setSelectedId(null);
     setPartDocuments([]);
+    setDocUploadOpen(false);
     setCopySourceLabel(sourceLabel || p.part_no || 'part');
+    const copied = partFormFromApi(p, { includeImages: false });
     setForm({
+      ...copied,
       part_no: '',
       model_variant: '',
-      description: p.description || '',
-      tool_no: p.tool_no || '',
-      production_section: p.production_section || '',
-      operation_code: p.operation_code || '',
-      process_time: toNumberInputValue(p.process_time),
-      loading_unloading: toNumberInputValue(p.loading_unloading, '10'),
-      qc_column_schema: normalizeQcColumnSchema(p.qc_column_schema, p.qc_parameters),
-      qc_parameters: (p.qc_parameters || []).map((q, i) => normalizeQcParamRow(q, i + 1)),
+      image_url: '',
+      sketch_image_url: '',
       active: 1,
     });
     setMsg(`Copied from ${sourceLabel || p.part_no} — enter a new Part No, adjust fields, then Save Part`);
@@ -198,7 +530,15 @@ export default function PartManagement() {
     setSelectedId(null);
     setCopySourceLabel(null);
     setPartDocuments([]);
-    setForm({ ...EMPTY_PART, qc_column_schema: [...DEFAULT_QC_COLUMNS], qc_parameters: [] });
+    setDocUploadOpen(false);
+    setForm({
+      ...EMPTY_PART,
+      qc_column_schema: [...DEFAULT_QC_COLUMNS],
+      qc_parameters: [],
+      tools_parameters: emptyParamTable(DEFAULT_TOOLS_COLUMNS),
+      machine_parameters: emptyParamTable(DEFAULT_MACHINE_PARAM_COLUMNS),
+      jigs_fixtures: emptyParamTable(DEFAULT_JIGS_COLUMNS),
+    });
     setMsg('');
   };
 
@@ -282,9 +622,22 @@ export default function PartManagement() {
     }));
   };
 
+  const validateParamTableColumns = (table, title) => {
+    for (const col of table?.columns || []) {
+      if (!col.label?.trim()) {
+        return `All ${title} column names must be filled in`;
+      }
+    }
+    return null;
+  };
+
   const savePart = async () => {
     if (!form.part_no.trim()) {
       setMsg('Part number is required');
+      return;
+    }
+    if (form.manufacturing_status === 'other' && !form.manufacturing_status_other?.trim()) {
+      setMsg('Enter manufacturing status type when Other is selected');
       return;
     }
     for (const q of form.qc_parameters) {
@@ -299,13 +652,42 @@ export default function PartManagement() {
         return;
       }
     }
+    for (const [table, title] of [
+      [form.tools_parameters, 'Tools Parameters'],
+      [form.machine_parameters, 'Machine Parameters'],
+      [form.jigs_fixtures, 'Jigs, Fixtures & Gauges'],
+    ]) {
+      const err = validateParamTableColumns(table, title);
+      if (err) {
+        setMsg(err);
+        return;
+      }
+    }
     setSaving(true);
     setMsg('');
     try {
       const payload = {
-        ...form,
+        part_no: form.part_no,
+        part_name: form.part_name,
+        model_variant: form.part_no,
+        description: form.description || null,
+        tool_no: form.tool_no || null,
+        production_section: form.production_section || null,
+        input_material: form.input_material,
+        previous_operation: form.previous_operation,
+        next_operation: form.next_operation,
+        machine_type: form.machine_type,
+        operation_code: form.operation_code,
+        operation_name: form.operation_name,
+        operation_sequence: joinOperationSequence(form.operation_sequence_steps) || null,
         process_time: form.process_time === '' ? null : Number(form.process_time),
         loading_unloading: Number(form.loading_unloading) || 10,
+        drawing_revision: form.drawing_revision,
+        manufacturing_status: form.manufacturing_status || 'production',
+        manufacturing_status_other: form.manufacturing_status === 'other'
+          ? form.manufacturing_status_other
+          : null,
+        active: form.active ?? 1,
         qc_column_schema: form.qc_column_schema || DEFAULT_QC_COLUMNS,
         qc_parameters: form.qc_parameters.map((q, i) => {
           const cols = serializeParamColumns(q, form.qc_column_schema);
@@ -321,8 +703,10 @@ export default function PartManagement() {
             extra_columns: cols.extra_columns,
           };
         }),
+        tools_parameters: serializeParamTable(form.tools_parameters),
+        machine_parameters: serializeParamTable(form.machine_parameters),
+        jigs_fixtures: serializeParamTable(form.jigs_fixtures),
       };
-      delete payload.image_url;
       if (selectedId) {
         await api.put(`/api/parts/${selectedId}`, payload);
         setMsg('Part updated');
@@ -362,7 +746,28 @@ export default function PartManagement() {
     }
   };
 
-  const uploadDoc = async (docType, file, revision, revDate) => {
+  const uploadSketch = async (file) => {
+    if (!selectedId || !file) return;
+    const sizeErr = validateFileSize(file, MAX_IMAGE_BYTES, 'Sketch image');
+    if (sizeErr) {
+      setMsg(sizeErr);
+      return;
+    }
+    setMsg('');
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      await api.post(`/api/parts/${selectedId}/sketch`, fd);
+      setMsg('File uploaded successfully — part sketch');
+      await loadParts(partsPage, searchQuery);
+      const updated = (await api.get(`/api/parts/${selectedId}`)).data;
+      applyFullPart(updated);
+    } catch (e) {
+      setMsg(e.response?.data?.detail || 'Sketch upload failed');
+    }
+  };
+
+  const uploadDoc = async (docType, file, revision, revDate, docLabel) => {
     if (!selectedId || !file) return { ok: false };
     const sizeErr = validateWiDocFile(file);
     if (sizeErr) {
@@ -370,11 +775,11 @@ export default function PartManagement() {
       return { ok: false, message: sizeErr };
     }
     setMsg('');
-    const label = DOC_LABEL_BY_KEY[docType] || docType;
+    const label = docLabel || DOC_LABEL_BY_KEY[docType] || docTypeLabel(docType);
     try {
       const fd = new FormData();
       fd.append('file', file);
-      const params = { revision: revision || '0' };
+      const params = { revision: revision || '0', doc_label: label };
       if (revDate) params.rev_date = revDate;
       await api.post(`/api/parts/${selectedId}/documents/${docType}/upload`, fd, { params });
       const success = `File uploaded successfully — ${label} (Rev ${revision || '0'})`;
@@ -382,6 +787,7 @@ export default function PartManagement() {
       await loadParts(partsPage, searchQuery);
       const updated = (await api.get(`/api/parts/${selectedId}`)).data;
       applyFullPart(updated);
+      await loadDocTypes();
       return { ok: true, message: success };
     } catch (e) {
       const err = e.response?.data?.detail || 'Document upload failed';
@@ -391,6 +797,20 @@ export default function PartManagement() {
   };
 
   const inp = { ...s.inp };
+
+  const textFields = [
+    ['part_name', 'Part Name'],
+    ['part_no', 'Part No / Article No'],
+    ['input_material', 'Input Material'],
+    ['operation_name', 'Operation Name'],
+    ['previous_operation', 'Previous Operation'],
+    ['next_operation', 'Next Operation'],
+    ['machine_type', 'Machine Type'],
+    ['operation_code', 'Operation Number / Code'],
+    ['process_time', 'Process Time (s)', 'number'],
+    ['loading_unloading', 'Loading/Unloading (s)', 'number'],
+    ['drawing_revision', 'Part / Drawing Revision'],
+  ];
 
   return (
     <div className={pageClass(t)} style={s.page}>
@@ -407,7 +827,7 @@ export default function PartManagement() {
           <div style={{ fontWeight: 700, marginBottom: 8, fontSize: 13, color: t.accent }}>Parts Knowledge Base</div>
           <input
             type="search"
-            placeholder="Search part no, variant, tool…"
+            placeholder="Search part no, name…"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             style={{ ...inp, marginBottom: 8, fontSize: 12 }}
@@ -455,9 +875,6 @@ export default function PartManagement() {
               </div>
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontWeight: 600 }}>{p.part_no}</div>
-                {p.model_variant && p.model_variant !== p.part_no && (
-                  <div style={{ fontSize: 11, color: t.textDim }}>Variant: {p.model_variant}</div>
-                )}
                 {(p.qc_parameter_preview || p.qc_parameters || []).length > 0 && (
                   <div style={{ fontSize: 10, color: t.textFaint, marginTop: 2 }}>
                     QC: {(p.qc_parameter_preview || (p.qc_parameters || []).map((q) => q.parameter))
@@ -506,29 +923,31 @@ export default function PartManagement() {
             </button>
           </div>
           <p style={{ margin: '8px 0 0', fontSize: 10, color: t.textFaint }}>
-            WI docs: PDF max 5 MB · JPEG/PNG/SVG max 2 MB · part image max 2 MB
+            WI docs: PDF max 5 MB · JPEG/PNG/SVG max 2 MB · part/sketch image max 2 MB
           </p>
         </div>
 
         <div style={{ ...s.card, padding: 16 }}>
           <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start', marginBottom: 16 }}>
-            <div style={{
-              width: 120, height: 120, flexShrink: 0, borderRadius: 10,
-              border: `2px dashed ${form.image_url ? t.brand : t.border}`,
-              background: t.surface2, display: 'flex', alignItems: 'center', justifyContent: 'center',
-              overflow: 'hidden',
-            }}>
-              {form.image_url ? (
-                <PartThumbImage
-                  url={form.image_url}
-                  alt={form.part_no || 'Part'}
-                  style={{ width: '100%', height: '100%', objectFit: 'contain' }}
-                  placeholder={<span style={{ fontSize: 32, opacity: 0.3, color: t.textDim }}>📷</span>}
-                />
-              ) : (
-                <span style={{ fontSize: 32, opacity: 0.3, color: t.textDim }}>📷</span>
-              )}
-            </div>
+            <ImageUploadBox
+              label="Part Image"
+              url={form.image_url}
+              alt={form.part_no || 'Part'}
+              t={t}
+              s={s}
+              selectedId={selectedId}
+              onUpload={uploadImage}
+            />
+            <ImageUploadBox
+              label="Part Sketch"
+              url={form.sketch_image_url}
+              alt={`${form.part_no || 'Part'} sketch`}
+              t={t}
+              s={s}
+              selectedId={selectedId}
+              onUpload={uploadSketch}
+              placeholderIcon="📐"
+            />
             <div style={{ flex: 1 }}>
               <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8, marginBottom: 4 }}>
                 <h3 style={{ margin: 0, fontSize: 16, color: t.text }}>
@@ -551,33 +970,18 @@ export default function PartManagement() {
               </div>
               {copySourceLabel && !selectedId && (
                 <p style={{ margin: '0 0 8px', fontSize: 12, color: t.warning || '#ed6c02' }}>
-                  QC parameters and spec columns were copied. Enter a unique Part No, then save.
-                  Image and PDFs are not copied — upload after saving.
+                  Process sheet fields and parameter tables were copied. Enter a unique Part No, then save.
+                  Images and PDFs are not copied — upload after saving.
                 </p>
               )}
-              {selectedId ? (
-                <div style={{ marginBottom: 8 }}>
-                  <label style={{ fontSize: 12, color: t.textDim, display: 'block', marginBottom: 4 }}>Part Image</label>
-                  <input type="file" accept="image/*" onChange={(e) => { uploadImage(e.target.files?.[0]); e.target.value = ''; }} style={{ fontSize: 12 }} />
-                  <span style={{ fontSize: 10, color: t.textFaint }}>Max 2 MB (jpg, png, webp, gif)</span>
-                </div>
-              ) : (
-                <p style={{ margin: 0, fontSize: 12, color: t.textDim }}>Save the part first, then upload an image.</p>
-              )}
+              <p style={{ margin: 0, fontSize: 12, color: t.textDim }}>
+                Machine Name is assigned on the Planning dashboard. Enter Machine Type here (e.g. VMC, CNC).
+              </p>
             </div>
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 12 }}>
-            {[
-              ['part_no', 'Part No / Article No'],
-              ['model_variant', 'Planning Sheet Variant Name'],
-              ['description', 'Description'],
-              ['tool_no', 'Tool No'],
-              ['production_section', 'Production Section'],
-              ['operation_code', 'Operation Code'],
-              ['process_time', 'Process Time (s)', 'number'],
-              ['loading_unloading', 'Loading/Unloading (s)', 'number'],
-            ].map(([key, label, type]) => (
+            {textFields.map(([key, label, type]) => (
               <label key={key} style={{ fontSize: 12, color: t.textDim }}>
                 {label}
                 <input
@@ -585,19 +989,102 @@ export default function PartManagement() {
                   value={type === 'number' ? toNumberInputValue(form[key], key === 'loading_unloading' ? '10' : '') : (form[key] ?? '')}
                   onChange={(e) => setForm({ ...form, [key]: e.target.value })}
                   style={{ ...inp, marginTop: 4 }}
+                  placeholder={
+                    key === 'operation_code' ? 'e.g. OP20, OP30, OP40'
+                      : key === 'machine_type' ? 'e.g. VMC(Rotary), CNC'
+                        : key === 'part_name' ? 'e.g. BIT ROD'
+                          : undefined
+                  }
                 />
               </label>
             ))}
+            <label style={{ fontSize: 12, color: t.textDim }}>
+              Manufacturing Status
+              <select
+                value={form.manufacturing_status || 'production'}
+                onChange={(e) => setForm({
+                  ...form,
+                  manufacturing_status: e.target.value,
+                  manufacturing_status_other: e.target.value === 'other' ? form.manufacturing_status_other : '',
+                })}
+                style={{ ...inp, marginTop: 4 }}
+              >
+                {MANUFACTURING_STATUS_OPTIONS.map((o) => (
+                  <option key={o.value} value={o.value}>{o.label}</option>
+                ))}
+              </select>
+            </label>
+            {form.manufacturing_status === 'other' && (
+              <label style={{ fontSize: 12, color: t.textDim }}>
+                Manufacturing Status (Other)
+                <input
+                  type="text"
+                  value={form.manufacturing_status_other || ''}
+                  onChange={(e) => setForm({ ...form, manufacturing_status_other: e.target.value })}
+                  style={{ ...inp, marginTop: 4 }}
+                  placeholder="Enter status type"
+                />
+              </label>
+            )}
           </div>
 
           <div style={{ marginBottom: 16 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-              <strong style={{ fontSize: 13 }}>QC Parameters (shown on WI / QC sheet)</strong>
-              <button type="button" onClick={addQcRow} style={s.btnSecondary}>+ Add Row</button>
+            <div style={{ fontSize: 12, color: t.textDim, marginBottom: 6 }}>Operation Sequence</div>
+            <OperationSequenceEditor
+              steps={form.operation_sequence_steps || ['']}
+              onChange={(operation_sequence_steps) => setForm({ ...form, operation_sequence_steps })}
+              t={t}
+              s={s}
+              inp={inp}
+            />
+            <div style={{ fontSize: 11, color: t.textFaint, marginTop: 6 }}>
+              Preview: {joinOperationSequence(form.operation_sequence_steps) || '—'}
             </div>
+          </div>
+
+          <DynamicParamTable
+            title="TOOLS PARAMETERS"
+            table={form.tools_parameters}
+            onChange={(tools_parameters) => setForm({ ...form, tools_parameters })}
+            t={t}
+            s={s}
+            inp={inp}
+            defaultOpen={false}
+          />
+
+          <DynamicParamTable
+            title="MACHINE PARAMETERS"
+            table={form.machine_parameters}
+            onChange={(machine_parameters) => setForm({ ...form, machine_parameters })}
+            t={t}
+            s={s}
+            inp={inp}
+            defaultOpen={false}
+          />
+
+          <DynamicParamTable
+            title="JIGS, FIXTURES & GAUGES"
+            table={form.jigs_fixtures}
+            onChange={(jigs_fixtures) => setForm({ ...form, jigs_fixtures })}
+            t={t}
+            s={s}
+            inp={inp}
+            defaultOpen={false}
+          />
+
+          <CollapsibleSection
+            title="QC PARAMETERS / INSPECTION PARAMETERS (shown on WI / QC sheet)"
+            defaultOpen={false}
+            t={t}
+            s={s}
+            summary={`${form.qc_parameters.length} parameter(s)`}
+            headerExtra={(
+              <button type="button" onClick={addQcRow} style={s.btnSecondary}>+ Add Row</button>
+            )}
+          >
             <div style={{
               marginBottom: 10, padding: 10, borderRadius: 8,
-              border: `1px solid ${t.border}`, background: t.surface2,
+              border: `1px solid ${t.border}`, background: t.surface,
             }}
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
@@ -613,14 +1100,14 @@ export default function PartManagement() {
                     style={{
                       display: 'flex', alignItems: 'center', gap: 4,
                       padding: '4px 8px', borderRadius: 6, border: `1px solid ${t.border}`,
-                      background: t.surface,
+                      background: t.surface2,
                     }}
                   >
                     <input
                       value={col.label || ''}
                       onChange={(e) => updateQcColumnLabel(col.key, e.target.value)}
                       placeholder="Column name"
-                      style={{ ...inp, width: 120, fontSize: 11 }}
+                      style={{ ...inp, width: 160, fontSize: 11 }}
                     />
                     {col.key !== 'method' && col.key !== 'frequency' && (
                       <button
@@ -636,14 +1123,15 @@ export default function PartManagement() {
                 ))}
               </div>
               <p style={{ margin: '8px 0 0', fontSize: 11, color: t.textDim }}>
-                Method and Freq are default columns; rename their labels or add more columns — every parameter row uses the same set.
+                Defaults match Process Control Sheet: Inspection Method, Operator/Inspector frequency, Control Method.
+                Check Points map to Parameter; Specifications map to STD.
               </p>
             </div>
             <div style={{ overflowX: 'auto' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                 <thead>
                   <tr>
-                    {['#', 'Parameter (select or type)', 'STD', 'Num', 'LSL', 'USL'].map((h) => (
+                    {['#', 'Check Points (Parameter)', 'Specifications (STD)', 'Num', 'LSL', 'USL'].map((h) => (
                       <th key={h} className="wi-qc-th" style={{ ...s.thYellow, padding: 6 }}>{h}</th>
                     ))}
                     {(form.qc_column_schema || DEFAULT_QC_COLUMNS).map((col) => (
@@ -661,10 +1149,17 @@ export default function PartManagement() {
                       <td style={{ padding: 4 }}>
                         <input list="param-presets" value={q.parameter || ''}
                           onChange={(e) => updateQc(i, 'parameter', e.target.value)} style={inp}
-                          placeholder="Select or enter name" />
+                          placeholder="e.g. Dimension, Chamfer" />
                       </td>
-                      <td style={{ padding: 4 }}>
-                        <input value={q.std_value || ''} onChange={(e) => updateQc(i, 'std_value', e.target.value)} style={inp} />
+                      <td style={{ padding: 4, minWidth: 180 }}>
+                        <SymbolInput
+                          value={q.std_value || ''}
+                          onChange={(val) => updateQc(i, 'std_value', val)}
+                          style={inp}
+                          placeholder="e.g. 30.3 ± 0.05 or ⌀4.0"
+                          t={t}
+                          title="Insert ± / GD&T symbols"
+                        />
                       </td>
                       <td style={{ padding: 4, textAlign: 'center' }}>
                         <input
@@ -714,22 +1209,63 @@ export default function PartManagement() {
                 </tbody>
               </table>
             </div>
-          </div>
+          </CollapsibleSection>
 
           {selectedId && (
             <div style={{ marginBottom: 16 }}>
-              <strong style={{ fontSize: 13 }}>Upload Work Instructions</strong>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 8 }}>
-                {DOC_TYPES.map(({ key, label }) => (
-                  <DocUploadRow
-                    key={key}
-                    label={label}
-                    t={t}
-                    current={partDocuments.find((d) => d.doc_type === key)}
-                    onUpload={(file, rev, date) => uploadDoc(key, file, rev, date)}
-                  />
-                ))}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, gap: 8, flexWrap: 'wrap' }}>
+                <strong style={{ fontSize: 13 }}>Work Instruction Documents</strong>
+                <button
+                  type="button"
+                  onClick={() => setDocUploadOpen((v) => !v)}
+                  style={s.btnSecondary}
+                >
+                  {docUploadOpen ? 'Cancel' : '+ Upload Document'}
+                </button>
               </div>
+              {docUploadOpen && (
+                <DocUploadPanel
+                  t={t}
+                  s={s}
+                  docTypeOptions={docTypeOptions.length ? docTypeOptions : DOC_TYPES}
+                  partDocuments={partDocuments}
+                  onUpload={(key, label, file, rev, date) => uploadDoc(key, file, rev, date, label)}
+                  onClose={() => setDocUploadOpen(false)}
+                />
+              )}
+              {partDocuments.length === 0 ? (
+                <p style={{ margin: docUploadOpen ? '10px 0 0' : 0, fontSize: 12, color: t.textDim }}>
+                  No documents uploaded yet. Click Upload Document to add one.
+                </p>
+              ) : (
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: '1fr 1fr',
+                  gap: 10,
+                  marginTop: docUploadOpen ? 10 : 0,
+                }}
+                >
+                  {partDocuments.map((d) => (
+                    <div
+                      key={d.id || d.doc_type}
+                      style={{
+                        border: `1px solid ${t.border}`, borderRadius: 8, padding: 10,
+                        fontSize: 12, background: t.surface2,
+                      }}
+                    >
+                      <div style={{ fontWeight: 600, color: t.text }}>
+                        {docTypeLabel(d.doc_type, d.doc_label || DOC_LABEL_BY_KEY[d.doc_type], docTypeOptions)}
+                      </div>
+                      <div style={{ color: t.textDim, marginTop: 4 }}>
+                        Rev {d.revision} · {d.rev_date || '—'}
+                      </div>
+                      <div style={{ marginTop: 6, fontWeight: 600, color: '#16a34a' }}>
+                        ✓ Document uploaded
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -741,7 +1277,7 @@ export default function PartManagement() {
               <span style={{
                 fontSize: 13,
                 fontWeight: 600,
-                color: msg.toLowerCase().includes('fail') || msg.includes('required') ? '#dc2626' : '#16a34a',
+                color: msg.toLowerCase().includes('fail') || msg.includes('required') || msg.includes('must') || msg.includes('Enter ') ? '#dc2626' : '#16a34a',
               }}
               >
                 {msg.toLowerCase().includes('success') || msg.includes('uploaded') ? '✓ ' : ''}{msg}
@@ -754,72 +1290,229 @@ export default function PartManagement() {
   );
 }
 
-function DocUploadRow({ label, current, onUpload, t }) {
+function OperationSequenceEditor({ steps, onChange, t, s, inp }) {
+  const list = steps?.length ? steps : [''];
+
+  const updateStep = (idx, val) => {
+    const next = [...list];
+    next[idx] = val;
+    onChange(next);
+  };
+
+  const addStep = () => {
+    onChange([...list, '']);
+  };
+
+  const removeStep = (idx) => {
+    if (list.length <= 1) {
+      onChange(['']);
+      return;
+    }
+    onChange(list.filter((_, i) => i !== idx));
+  };
+
+  return (
+    <div style={{
+      display: 'flex',
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      gap: 8,
+      padding: 10,
+      borderRadius: 8,
+      border: `1px solid ${t.border}`,
+      background: t.surface2,
+    }}
+    >
+      {list.map((step, idx) => (
+        <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {idx > 0 && (
+            <span style={{
+              color: t.accent,
+              fontWeight: 800,
+              fontSize: 18,
+              lineHeight: 1,
+              userSelect: 'none',
+            }}
+            >
+              {SEQ_ARROW}
+            </span>
+          )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+            <input
+              type="text"
+              value={step}
+              onChange={(e) => updateStep(idx, e.target.value)}
+              placeholder={idx === 0 ? 'e.g. Turning' : 'Next process'}
+              style={{ ...inp, width: 140, marginTop: 0 }}
+            />
+            {list.length > 1 && (
+              <button
+                type="button"
+                title="Remove step"
+                onClick={() => removeStep(idx)}
+                style={{
+                  border: 'none',
+                  background: 'transparent',
+                  color: t.textDim,
+                  cursor: 'pointer',
+                  fontSize: 14,
+                  padding: 2,
+                }}
+              >
+                ✕
+              </button>
+            )}
+          </div>
+        </div>
+      ))}
+      <button type="button" onClick={addStep} style={s.btnSecondary}>
+        + Add
+      </button>
+    </div>
+  );
+}
+
+function DocUploadPanel({ t, s, docTypeOptions, partDocuments, onUpload, onClose }) {
+  const [docTypeKey, setDocTypeKey] = useState('');
+  const [customLabel, setCustomLabel] = useState('');
   const [rev, setRev] = useState('0');
   const [revDate, setRevDate] = useState(new Date().toISOString().slice(0, 10));
   const [uploading, setUploading] = useState(false);
   const [rowMsg, setRowMsg] = useState('');
-  const s = getWorkInstructionStyles(t);
+  const [file, setFile] = useState(null);
+  const fileInputRef = useRef(null);
 
-  const handleFile = async (file) => {
-    if (!file) return;
+  const resolvedKey = docTypeKey === OTHER_DOC_TYPE ? null : docTypeKey;
+  const current = resolvedKey
+    ? partDocuments.find((d) => d.doc_type === resolvedKey)
+    : null;
+
+  const handleUpload = async () => {
+    const resolved = resolveDocTypeSelection(docTypeKey, customLabel);
+    if (resolved.error) {
+      setRowMsg(resolved.error);
+      return;
+    }
+    if (!file) {
+      setRowMsg('Choose a file (PDF, JPEG, PNG, or SVG)');
+      return;
+    }
+    const sizeErr = validateWiDocFile(file);
+    if (sizeErr) {
+      setRowMsg(sizeErr);
+      return;
+    }
     setUploading(true);
     setRowMsg('');
-    const result = await onUpload(file, rev, revDate);
+    const result = await onUpload(resolved.key, resolved.label, file, rev, revDate);
     setUploading(false);
     if (result?.ok) {
-      setRowMsg(result.message || 'File uploaded successfully');
+      setRowMsg('Document uploaded');
+      setFile(null);
+      setCustomLabel('');
+      setDocTypeKey('');
+      setRev('0');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      setTimeout(() => {
+        onClose?.();
+      }, 900);
     } else if (result?.message) {
       setRowMsg(result.message);
     }
   };
 
-  const rowOk = rowMsg && !rowMsg.toLowerCase().includes('fail');
+  const rowOk = rowMsg && (
+    rowMsg === 'Document uploaded'
+    || rowMsg.toLowerCase().includes('success')
+    || rowMsg.toLowerCase().includes('uploaded')
+  ) && !rowMsg.toLowerCase().includes('fail');
 
   return (
-    <div style={{ border: `1px solid ${t.border}`, borderRadius: 8, padding: 10, fontSize: 12, background: t.surface2 }}>
-      <div style={{ fontWeight: 600, marginBottom: 6, color: t.text }}>{label}</div>
+    <div style={{
+      width: '100%',
+      boxSizing: 'border-box',
+      border: `1px solid ${t.border}`,
+      borderRadius: 8,
+      padding: 14,
+      fontSize: 12,
+      background: t.surface2,
+    }}
+    >
+      <div style={{ fontWeight: 600, marginBottom: 10, color: t.text }}>Upload Document</div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 10 }}>
+        <label style={{ fontSize: 12, color: t.textDim, gridColumn: '1 / -1' }}>
+          Document Type *
+          <select
+            value={docTypeKey}
+            onChange={(e) => setDocTypeKey(e.target.value)}
+            style={{ ...s.inp, marginTop: 4 }}
+          >
+            <option value="">Select type…</option>
+            {docTypeOptions.map(({ key, label }) => (
+              <option key={key} value={key}>{label}</option>
+            ))}
+            <option value={OTHER_DOC_TYPE}>Other (new type)…</option>
+          </select>
+        </label>
+        {docTypeKey === OTHER_DOC_TYPE && (
+          <label style={{ fontSize: 12, color: t.textDim, gridColumn: '1 / -1' }}>
+            New Document Type Name *
+            <input
+              type="text"
+              value={customLabel}
+              onChange={(e) => setCustomLabel(e.target.value)}
+              placeholder="e.g. Process Sheet Revision"
+              style={{ ...s.inp, marginTop: 4 }}
+            />
+          </label>
+        )}
+        <label style={{ fontSize: 12, color: t.textDim }}>
+          Revision
+          <input type="text" value={rev} onChange={(e) => setRev(e.target.value)} style={{ ...s.inp, marginTop: 4 }} />
+        </label>
+        <label style={{ fontSize: 12, color: t.textDim }}>
+          Revision Date
+          <input type="date" value={revDate} onChange={(e) => setRevDate(e.target.value)} style={{ ...s.inp, marginTop: 4 }} />
+        </label>
+      </div>
       {current && (
-        <div style={{ color: t.textDim, marginBottom: 6 }}>
-          Current: Rev {current.revision} · {current.rev_date || '—'}
-          {current.file_url && (
-            <span style={{ marginLeft: 6, color: '#16a34a', fontWeight: 600 }}>✓ On file</span>
-          )}
+        <div style={{ color: t.textDim, marginBottom: 8 }}>
+          Current: Rev {current.revision} · {current.rev_date || '—'} — will be archived on upload
         </div>
       )}
-      <input type="text" placeholder="Revision" value={rev} onChange={(e) => setRev(e.target.value)} style={{ ...s.inp, marginBottom: 4 }} />
-      <input type="date" value={revDate} onChange={(e) => setRevDate(e.target.value)} style={{ ...s.inp, marginBottom: 4 }} />
       <input
+        ref={fileInputRef}
         type="file"
         accept={WI_DOC_ACCEPT}
-        disabled={uploading}
-        onChange={(e) => {
-          const f = e.target.files?.[0];
-          if (f) {
-            const err = validateWiDocFile(f);
-            if (err) {
-              setRowMsg(err);
-              e.target.value = '';
-              return;
-            }
-            handleFile(f);
-          }
-          e.target.value = '';
-        }}
-        style={{ width: '100%', fontSize: 11 }}
+        disabled={uploading || !docTypeKey}
+        onChange={(e) => setFile(e.target.files?.[0] || null)}
+        style={{ width: '100%', fontSize: 11, marginBottom: 6 }}
       />
-      <div style={{ fontSize: 10, color: t.textDim, marginTop: 4 }}>PDF, JPEG, PNG, or SVG (PDF max 5 MB, images max 2 MB)</div>
-      {uploading && <div style={{ marginTop: 6, color: t.textDim }}>Uploading…</div>}
-      {rowMsg && (
-        <div style={{
-          marginTop: 6,
-          fontWeight: 600,
-          color: rowOk ? '#16a34a' : '#dc2626',
-        }}
+      <div style={{ fontSize: 10, color: t.textDim, marginBottom: 10 }}>
+        PDF, JPEG, PNG, or SVG (PDF max 5 MB, images max 2 MB)
+      </div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <button
+          type="button"
+          onClick={handleUpload}
+          disabled={uploading || !docTypeKey || !file}
+          style={s.btnAccent}
         >
-          {rowOk ? '✓ ' : ''}{rowMsg}
-        </div>
-      )}
+          {uploading ? 'Uploading…' : 'Upload Document'}
+        </button>
+        <button type="button" onClick={onClose} style={s.btnSecondary} disabled={uploading}>
+          Cancel
+        </button>
+        {rowMsg && (
+          <span style={{
+            fontWeight: 600,
+            color: rowOk ? '#16a34a' : '#dc2626',
+          }}
+          >
+            {rowOk ? '✓ ' : ''}{rowMsg}
+          </span>
+        )}
+      </div>
     </div>
   );
 }

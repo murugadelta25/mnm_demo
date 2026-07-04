@@ -36,12 +36,82 @@ PART_IMAGE_DIR = Path(__file__).parent.parent.parent / "static" / "parts"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 PART_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
-DOC_TYPES = ("control_plan", "wi_visual", "wi_tray", "breakdown_sheet")
+BUILTIN_DOC_TYPES = [
+    {"key": "control_plan", "label": "Control Plan"},
+    {"key": "wi_visual", "label": "WI-Visual"},
+    {"key": "breakdown_sheet", "label": "Breakdown Sheet"},
+    {"key": "drawing_revision", "label": "Part / Drawing Revision"},
+    {"key": "process_sheet_revision", "label": "Process Sheet Revision"},
+    {"key": "wi_tray", "label": "WI-Tray"},
+]
+BUILTIN_DOC_LABELS = {d["key"]: d["label"] for d in BUILTIN_DOC_TYPES}
+
+
+def _slugify_doc_type(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", (value or "").strip().lower())
+    slug = re.sub(r"_+", "_", slug).strip("_")
+    return slug or "custom_doc"
+
+
+def _normalize_doc_type(doc_type: str) -> str:
+    key = _slugify_doc_type(doc_type)
+    if len(key) > 100:
+        raise HTTPException(400, "Document type key is too long")
+    return key
+
+
+def _resolve_doc_label(doc_type: str, doc_label: Optional[str] = None) -> str:
+    label = (doc_label or "").strip()
+    if label:
+        return label[:150]
+    return BUILTIN_DOC_LABELS.get(doc_type) or doc_type.replace("_", " ").title()
+
+
+def _doc_out(d) -> dict:
+    return {
+        "id": getattr(d, "id", None),
+        "doc_type": d.doc_type,
+        "doc_label": getattr(d, "doc_label", None) or _resolve_doc_label(d.doc_type),
+        "revision": d.revision,
+        "rev_date": d.rev_date.isoformat() if getattr(d, "rev_date", None) else None,
+        "file_url": d.file_url,
+        "notes": getattr(d, "notes", None),
+        "is_current": getattr(d, "is_current", None),
+        "uploaded_at": d.uploaded_at.isoformat() if getattr(d, "uploaded_at", None) else None,
+        "archived_at": d.archived_at.isoformat() if getattr(d, "archived_at", None) else None,
+        "part_id": getattr(d, "part_id", None),
+    }
 
 DEFAULT_QC_COLUMN_SCHEMA = [
-    {"key": "method", "label": "Method"},
-    {"key": "frequency", "label": "Freq"},
+    {"key": "method", "label": "Inspection Method"},
+    {"key": "frequency", "label": "Inspection Frequency (Operator)"},
+    {"key": "freq_inspector", "label": "Inspection Frequency (Inspector)"},
+    {"key": "control_method", "label": "Control Method"},
 ]
+
+DEFAULT_TOOLS_COLUMNS = [
+    {"key": "tools_detail", "label": "Tools Detail"},
+    {"key": "tool_no", "label": "Tool No"},
+    {"key": "approx_tool_life", "label": "Approx Tool life"},
+    {"key": "rpm", "label": "RPM"},
+    {"key": "feed_mm_rev", "label": "Feed mm/rev"},
+    {"key": "depth_of_cut", "label": "Depth of Cut"},
+    {"key": "cutting_speed", "label": "Cutting speed m/min"},
+]
+
+DEFAULT_MACHINE_PARAM_COLUMNS = [
+    {"key": "parameter", "label": "Parameter"},
+    {"key": "specifications", "label": "Specifications"},
+    {"key": "inspection_method", "label": "Inspection Method"},
+    {"key": "inspection_frequency", "label": "Inspection Frequency"},
+]
+
+DEFAULT_JIGS_COLUMNS = [
+    {"key": "drawing_number", "label": "Drawing Number"},
+    {"key": "description", "label": "Description"},
+]
+
+MANUFACTURING_STATUSES = ("prototype", "pre-launch", "production", "other")
 
 
 def _qc_column_schema(part: Part) -> list:
@@ -54,6 +124,58 @@ def _qc_column_schema(part: Part) -> list:
         except json.JSONDecodeError:
             pass
     return list(DEFAULT_QC_COLUMN_SCHEMA)
+
+
+def _empty_param_table(default_columns: list) -> dict:
+    return {"columns": list(default_columns), "rows": []}
+
+
+def _parse_param_table(raw, default_columns: list) -> dict:
+    if not raw:
+        return _empty_param_table(default_columns)
+    try:
+        parsed = json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, TypeError):
+        return _empty_param_table(default_columns)
+    if not isinstance(parsed, dict):
+        return _empty_param_table(default_columns)
+    columns = parsed.get("columns")
+    if not isinstance(columns, list) or not columns:
+        columns = list(default_columns)
+    else:
+        columns = [
+            {"key": c.get("key") or f"col_{i}", "label": c.get("label") or c.get("key") or ""}
+            for i, c in enumerate(columns)
+            if isinstance(c, dict)
+        ] or list(default_columns)
+    rows_in = parsed.get("rows") if isinstance(parsed.get("rows"), list) else []
+    rows = []
+    for row in rows_in:
+        if not isinstance(row, dict):
+            continue
+        rows.append({col["key"]: row.get(col["key"], "") for col in columns})
+    return {"columns": columns, "rows": rows}
+
+
+def _serialize_param_table(data, default_columns: list) -> str:
+    if not data or not isinstance(data, dict):
+        return json.dumps(_empty_param_table(default_columns))
+    columns = data.get("columns")
+    if not isinstance(columns, list) or not columns:
+        columns = list(default_columns)
+    else:
+        columns = [
+            {"key": str(c.get("key") or f"col_{i}"), "label": str(c.get("label") or c.get("key") or "").strip()}
+            for i, c in enumerate(columns)
+            if isinstance(c, dict)
+        ] or list(default_columns)
+    rows_in = data.get("rows") if isinstance(data.get("rows"), list) else []
+    rows = []
+    for row in rows_in:
+        if not isinstance(row, dict):
+            continue
+        rows.append({col["key"]: row.get(col["key"], "") for col in columns})
+    return json.dumps({"columns": columns, "rows": rows})
 
 
 def _safe_part_slug(part_no: str) -> str:
@@ -105,6 +227,7 @@ def _apply_part_search(q, search: Optional[str]):
     return q.filter(
         or_(
             func.lower(Part.part_no).like(term),
+            func.lower(func.coalesce(Part.part_name, "")).like(term),
             func.lower(func.coalesce(Part.model_variant, "")).like(term),
             func.lower(func.coalesce(Part.description, "")).like(term),
             func.lower(func.coalesce(Part.tool_no, "")).like(term),
@@ -138,19 +261,36 @@ class QcParamIn(BaseModel):
     active: int = 1
 
 
+class ParamTableIn(BaseModel):
+    columns: List[dict] = []
+    rows: List[dict] = []
+
+
 class PartCreate(BaseModel):
     part_no: str
+    part_name: Optional[str] = None
     model_variant: Optional[str] = None
     description: Optional[str] = None
     tool_no: Optional[str] = None
     no_of_cavity: int = 1
     production_section: Optional[str] = None
+    input_material: Optional[str] = None
+    previous_operation: Optional[str] = None
+    next_operation: Optional[str] = None
+    machine_type: Optional[str] = None
     operation_code: Optional[str] = None
     operation_name: Optional[str] = None
+    operation_sequence: Optional[str] = None
     process_time: Optional[float] = None
     loading_unloading: float = 10
+    drawing_revision: Optional[str] = None
+    manufacturing_status: Optional[str] = "production"
+    manufacturing_status_other: Optional[str] = None
     qc_column_schema: List[dict] = []
     qc_parameters: List[QcParamIn] = []
+    tools_parameters: Optional[ParamTableIn] = None
+    machine_parameters: Optional[ParamTableIn] = None
+    jigs_fixtures: Optional[ParamTableIn] = None
 
 
 class PartUpdate(PartCreate):
@@ -181,6 +321,51 @@ def _cycle_time(part: Part) -> float:
     return float(part.process_time or 0) + float(part.loading_unloading or 0)
 
 
+def _normalize_manufacturing_status(status: Optional[str], other: Optional[str]) -> tuple:
+    s = (status or "production").strip().lower()
+    if s not in MANUFACTURING_STATUSES:
+        s = "production"
+    other_val = (other or "").strip() if s == "other" else None
+    return s, other_val
+
+
+def _apply_part_fields(part: Part, data: PartCreate) -> None:
+    part.part_name = (data.part_name or "").strip() or None
+    part.model_variant = _normalize_model_variant(data.part_no, data.model_variant)
+    part.description = data.description
+    part.tool_no = data.tool_no
+    part.no_of_cavity = data.no_of_cavity
+    part.production_section = data.production_section
+    part.input_material = (data.input_material or "").strip() or None
+    part.previous_operation = (data.previous_operation or "").strip() or None
+    part.next_operation = (data.next_operation or "").strip() or None
+    part.machine_type = (data.machine_type or "").strip() or None
+    part.operation_code = data.operation_code
+    part.operation_name = data.operation_name
+    part.operation_sequence = (data.operation_sequence or "").strip() or None
+    part.process_time = data.process_time
+    part.loading_unloading = data.loading_unloading
+    part.drawing_revision = (data.drawing_revision or "").strip() or None
+    status, status_other = _normalize_manufacturing_status(
+        data.manufacturing_status, data.manufacturing_status_other,
+    )
+    part.manufacturing_status = status
+    part.manufacturing_status_other = status_other
+    part.qc_columns_json = json.dumps(data.qc_column_schema or DEFAULT_QC_COLUMN_SCHEMA)
+    part.tools_params_json = _serialize_param_table(
+        data.tools_parameters.model_dump() if data.tools_parameters else None,
+        DEFAULT_TOOLS_COLUMNS,
+    )
+    part.machine_params_json = _serialize_param_table(
+        data.machine_parameters.model_dump() if data.machine_parameters else None,
+        DEFAULT_MACHINE_PARAM_COLUMNS,
+    )
+    part.jigs_fixtures_json = _serialize_param_table(
+        data.jigs_fixtures.model_dump() if data.jigs_fixtures else None,
+        DEFAULT_JIGS_COLUMNS,
+    )
+
+
 def _part_out(part: Part, db: Session) -> dict:
     docs = db.query(PartDocument).filter(
         PartDocument.part_id == part.id,
@@ -193,23 +378,43 @@ def _part_out(part: Part, db: Session) -> dict:
     return {
         "id": part.id,
         "part_no": part.part_no,
+        "part_name": getattr(part, "part_name", None),
         "model_variant": part.model_variant,
         "description": part.description,
         "tool_no": part.tool_no,
         "no_of_cavity": part.no_of_cavity,
         "production_section": part.production_section,
+        "input_material": getattr(part, "input_material", None),
+        "previous_operation": getattr(part, "previous_operation", None),
+        "next_operation": getattr(part, "next_operation", None),
+        "machine_type": getattr(part, "machine_type", None),
         "operation_code": part.operation_code,
         "operation_name": part.operation_name,
+        "operation_sequence": getattr(part, "operation_sequence", None),
         "process_time": float(part.process_time) if part.process_time else None,
         "loading_unloading": float(part.loading_unloading) if part.loading_unloading else 10,
+        "drawing_revision": getattr(part, "drawing_revision", None),
+        "manufacturing_status": getattr(part, "manufacturing_status", None) or "production",
+        "manufacturing_status_other": getattr(part, "manufacturing_status_other", None),
         "cycle_time": _cycle_time(part),
         "active": part.active,
         "image_url": part.image_url,
+        "sketch_image_url": getattr(part, "sketch_image_url", None),
         "qc_column_schema": _qc_column_schema(part),
+        "tools_parameters": _parse_param_table(
+            getattr(part, "tools_params_json", None), DEFAULT_TOOLS_COLUMNS,
+        ),
+        "machine_parameters": _parse_param_table(
+            getattr(part, "machine_params_json", None), DEFAULT_MACHINE_PARAM_COLUMNS,
+        ),
+        "jigs_fixtures": _parse_param_table(
+            getattr(part, "jigs_fixtures_json", None), DEFAULT_JIGS_COLUMNS,
+        ),
         "documents": [
             {
                 "id": d.id,
                 "doc_type": d.doc_type,
+                "doc_label": getattr(d, "doc_label", None) or _resolve_doc_label(d.doc_type),
                 "revision": d.revision,
                 "rev_date": d.rev_date.isoformat() if d.rev_date else None,
                 "file_url": d.file_url,
@@ -263,9 +468,14 @@ def list_part_options(
         {
             "id": p.id,
             "part_no": p.part_no,
+            "part_name": getattr(p, "part_name", None),
             "model_variant": p.model_variant,
             "description": p.description,
             "tool_no": p.tool_no,
+            "operation_name": p.operation_name,
+            "operation_code": p.operation_code,
+            "previous_operation": getattr(p, "previous_operation", None),
+            "next_operation": getattr(p, "next_operation", None),
             "process_time": float(p.process_time) if p.process_time else None,
             "loading_unloading": float(p.loading_unloading) if p.loading_unloading else 10,
             "cycle_time": _cycle_time(p),
@@ -314,6 +524,39 @@ def get_by_variant(model_variant: str, db: Session = Depends(get_db), _=Depends(
     return _part_out(part, db)
 
 
+@router.get("/document-types")
+def list_document_types(
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Built-in document types plus any custom types already uploaded."""
+    types = {d["key"]: d["label"] for d in BUILTIN_DOC_TYPES}
+    rows = (
+        db.query(PartDocument.doc_type, PartDocument.doc_label)
+        .filter(PartDocument.doc_type.isnot(None))
+        .distinct()
+        .all()
+    )
+    for doc_type, doc_label in rows:
+        if not doc_type:
+            continue
+        types[doc_type] = doc_label or types.get(doc_type) or _resolve_doc_label(doc_type)
+    hist_rows = (
+        db.query(PartDocumentHistory.doc_type, PartDocumentHistory.doc_label)
+        .filter(PartDocumentHistory.doc_type.isnot(None))
+        .distinct()
+        .all()
+    )
+    for doc_type, doc_label in hist_rows:
+        if not doc_type or doc_type in types:
+            continue
+        types[doc_type] = doc_label or _resolve_doc_label(doc_type)
+    return [
+        {"key": key, "label": label}
+        for key, label in sorted(types.items(), key=lambda x: x[1].lower())
+    ]
+
+
 @router.get("/documents/revisions")
 def list_all_revisions(
     part_id: Optional[int] = None,
@@ -350,6 +593,7 @@ def list_all_revisions(
             "part_id": d.part_id,
             "part_no": part_map.get(d.part_id),
             "doc_type": d.doc_type,
+            "doc_label": getattr(d, "doc_label", None) or _resolve_doc_label(d.doc_type),
             "revision": d.revision,
             "rev_date": d.rev_date.isoformat() if d.rev_date else None,
             "file_url": d.file_url,
@@ -382,6 +626,7 @@ def list_all_revisions(
             "part_id": h.part_id,
             "part_no": hist_part_map.get(h.part_id),
             "doc_type": h.doc_type,
+            "doc_label": getattr(h, "doc_label", None) or _resolve_doc_label(h.doc_type),
             "revision": h.revision,
             "rev_date": h.rev_date.isoformat() if h.rev_date else None,
             "file_url": h.file_url,
@@ -420,20 +665,11 @@ def create_part(
         raise HTTPException(400, "Part number already exists")
     part = Part(
         part_no=data.part_no.strip(),
-        model_variant=_normalize_model_variant(data.part_no, data.model_variant),
-        description=data.description,
-        tool_no=data.tool_no,
-        no_of_cavity=data.no_of_cavity,
-        production_section=data.production_section,
-        operation_code=data.operation_code,
-        operation_name=data.operation_name,
-        process_time=data.process_time,
-        loading_unloading=data.loading_unloading,
-        qc_columns_json=json.dumps(data.qc_column_schema or DEFAULT_QC_COLUMN_SCHEMA),
         created_by=user.id,
         created_at=now_ist(),
         updated_at=now_ist(),
     )
+    _apply_part_fields(part, data)
     db.add(part)
     db.flush()
     for row in _qc_param_rows(part.id, data.qc_parameters):
@@ -457,17 +693,8 @@ def update_part(
     if dup:
         raise HTTPException(400, "Part number already exists")
     part.part_no = data.part_no.strip()
-    part.model_variant = _normalize_model_variant(data.part_no, data.model_variant)
-    part.description = data.description
-    part.tool_no = data.tool_no
-    part.no_of_cavity = data.no_of_cavity
-    part.production_section = data.production_section
-    part.operation_code = data.operation_code
-    part.operation_name = data.operation_name
-    part.process_time = data.process_time
-    part.loading_unloading = data.loading_unloading
     part.active = data.active
-    part.qc_columns_json = json.dumps(data.qc_column_schema or DEFAULT_QC_COLUMN_SCHEMA)
+    _apply_part_fields(part, data)
     part.updated_at = now_ist()
     db.query(PartQcParameter).filter(PartQcParameter.part_id == part_id).delete()
     for row in _qc_param_rows(part.id, data.qc_parameters):
@@ -492,13 +719,7 @@ def delete_part(
     return {"ok": True}
 
 
-@router.post("/{part_id}/image")
-async def upload_part_image(
-    part_id: int,
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    user=Depends(require_role("supervisor", "admin")),
-):
+async def _upload_part_image_field(part_id: int, file: UploadFile, field: str, db: Session):
     part = db.query(Part).filter(Part.id == part_id).first()
     if not part:
         raise HTTPException(404, "Part not found")
@@ -506,13 +727,35 @@ async def upload_part_image(
     if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
         raise HTTPException(400, "Only image files are allowed")
     slug = _safe_part_slug(part.part_no)
-    fname = f"{slug}_{uuid.uuid4().hex[:8]}{ext}"
+    prefix = "sketch" if field == "sketch_image_url" else "part"
+    fname = f"{slug}_{prefix}_{uuid.uuid4().hex[:8]}{ext}"
     dest = PART_IMAGE_DIR / fname
     await save_upload_limited(file, dest, MAX_IMAGE_BYTES)
-    part.image_url = f"/static/parts/{fname}"
+    url = f"/static/parts/{fname}"
+    setattr(part, field, url)
     part.updated_at = now_ist()
     db.commit()
-    return {"image_url": part.image_url}
+    return {field: url}
+
+
+@router.post("/{part_id}/image")
+async def upload_part_image(
+    part_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    user=Depends(require_role("supervisor", "admin")),
+):
+    return await _upload_part_image_field(part_id, file, "image_url", db)
+
+
+@router.post("/{part_id}/sketch")
+async def upload_part_sketch(
+    part_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    user=Depends(require_role("supervisor", "admin")),
+):
+    return await _upload_part_image_field(part_id, file, "sketch_image_url", db)
 
 
 @router.post("/{part_id}/documents/{doc_type}/upload")
@@ -522,12 +765,13 @@ async def upload_document(
     revision: str = Query("0"),
     rev_date: Optional[date] = None,
     notes: Optional[str] = None,
+    doc_label: Optional[str] = Query(None),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     user=Depends(require_role("supervisor", "admin")),
 ):
-    if doc_type not in DOC_TYPES:
-        raise HTTPException(400, f"Invalid doc_type. Use one of: {DOC_TYPES}")
+    key = _normalize_doc_type(doc_type)
+    label = _resolve_doc_label(key, doc_label)
     part = db.query(Part).filter(Part.id == part_id).first()
     if not part:
         raise HTTPException(404, "Part not found")
@@ -535,20 +779,22 @@ async def upload_document(
     assert_wi_doc_extension(ext)
     slug = _safe_part_slug(part.part_no)
     safe_rev = re.sub(r"[^\w.\-]+", "_", (revision or "0").strip()) or "0"
-    fname = f"{slug}_{doc_type}_{safe_rev}_{uuid.uuid4().hex[:8]}{ext}"
+    safe_type = re.sub(r"[^\w.\-]+", "_", key)[:40]
+    fname = f"{slug}_{safe_type}_{safe_rev}_{uuid.uuid4().hex[:8]}{ext}"
     dest = UPLOAD_DIR / fname
     await save_upload_limited(file, dest, wi_doc_max_bytes(ext))
     file_url = f"/static/work-instructions/{fname}"
 
     current = db.query(PartDocument).filter(
         PartDocument.part_id == part_id,
-        PartDocument.doc_type == doc_type,
+        PartDocument.doc_type == key,
         PartDocument.is_current == 1,
     ).first()
     if current and current.file_url:
         db.add(PartDocumentHistory(
             part_id=part_id,
-            doc_type=doc_type,
+            doc_type=current.doc_type,
+            doc_label=getattr(current, "doc_label", None) or _resolve_doc_label(current.doc_type),
             revision=current.revision,
             rev_date=current.rev_date,
             file_url=current.file_url,
@@ -561,7 +807,8 @@ async def upload_document(
 
     doc = PartDocument(
         part_id=part_id,
-        doc_type=doc_type,
+        doc_type=key,
+        doc_label=label,
         revision=revision,
         rev_date=rev_date or date.today(),
         file_url=file_url,
@@ -576,6 +823,7 @@ async def upload_document(
     return {
         "id": doc.id,
         "doc_type": doc.doc_type,
+        "doc_label": doc.doc_label,
         "revision": doc.revision,
         "rev_date": doc.rev_date.isoformat() if doc.rev_date else None,
         "file_url": doc.file_url,
@@ -600,6 +848,7 @@ def document_history(part_id: int, db: Session = Depends(get_db), _=Depends(get_
             {
                 "id": d.id,
                 "doc_type": d.doc_type,
+                "doc_label": getattr(d, "doc_label", None) or _resolve_doc_label(d.doc_type),
                 "revision": d.revision,
                 "rev_date": d.rev_date.isoformat() if d.rev_date else None,
                 "file_url": d.file_url,
@@ -612,6 +861,7 @@ def document_history(part_id: int, db: Session = Depends(get_db), _=Depends(get_
             {
                 "id": h.id,
                 "doc_type": h.doc_type,
+                "doc_label": getattr(h, "doc_label", None) or _resolve_doc_label(h.doc_type),
                 "revision": h.revision,
                 "rev_date": h.rev_date.isoformat() if h.rev_date else None,
                 "file_url": h.file_url,

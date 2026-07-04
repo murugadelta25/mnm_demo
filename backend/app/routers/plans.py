@@ -214,7 +214,8 @@ def get_plans(
     if date_from:  q = q.filter(ProductionPlan.plan_date >= date_from)
     if date_to:    q = q.filter(ProductionPlan.plan_date <= date_to)
     if status:     q = q.filter(ProductionPlan.status == status)
-    return q.order_by(ProductionPlan.plan_date, ProductionPlan.shift, ProductionPlan.priority).all()
+    plans = q.order_by(ProductionPlan.plan_date, ProductionPlan.shift, ProductionPlan.priority).all()
+    return [_plan_dict(p, db) for p in plans]
 
 @router.get("/summary")
 def get_summary(
@@ -255,38 +256,193 @@ def get_summary(
                      for sh in ["A","B"]}
     }
 
+def _plan_dict(plan: ProductionPlan, db: Session) -> dict:
+    """Serialize plan with linked model-change interlock state."""
+    d = {c.name: getattr(plan, c.name) for c in plan.__table__.columns}
+    for key in ("plan_date", "created_at", "updated_at"):
+        val = d.get(key)
+        if val is not None and hasattr(val, "isoformat"):
+            d[key] = val.isoformat()
+    for key in ("process_time", "loading_unloading"):
+        if d.get(key) is not None:
+            d[key] = float(d[key])
+    pending = (
+        db.query(ModelChangeRequest)
+        .filter(
+            ModelChangeRequest.plan_id == plan.id,
+            ModelChangeRequest.status == "pending",
+        )
+        .order_by(ModelChangeRequest.id.desc())
+        .first()
+    )
+    active = (
+        db.query(ModelChangeRequest)
+        .filter(
+            ModelChangeRequest.plan_id == plan.id,
+            ModelChangeRequest.status.in_(["approved", "in_progress"]),
+        )
+        .order_by(ModelChangeRequest.id.desc())
+        .first()
+    )
+    mcr = pending or active
+    d["model_change_request_id"] = mcr.id if mcr else None
+    d["model_change_status"] = mcr.status if mcr else None
+    d["awaiting_model_change"] = bool(pending)
+    return d
+
+
+def _previous_model_on_machine(db: Session, machine_id: int, exclude_plan_id: int) -> str:
+    prev = (
+        db.query(ProductionPlan)
+        .filter(
+            ProductionPlan.machine_id == machine_id,
+            ProductionPlan.id != exclude_plan_id,
+            ProductionPlan.status.in_(["running", "completed", "paused"]),
+        )
+        .order_by(ProductionPlan.updated_at.desc(), ProductionPlan.id.desc())
+        .first()
+    )
+    if prev and prev.model_variant:
+        return prev.model_variant
+    return "—"
+
+
 @router.patch("/{plan_id}/status")
 async def update_status(plan_id: int, data: PlanUpdate, db: Session = Depends(get_db),
                         user=Depends(get_current_user)):
     plan = db.query(ProductionPlan).filter(ProductionPlan.id == plan_id).first()
-    if not plan: raise HTTPException(404, "Plan not found")
+    if not plan:
+        raise HTTPException(404, "Plan not found")
     if data.status == "completed":
         _validate_may_complete_plan(plan)
     if data.status == "running" and plan.status != "running":
         _validate_may_start_plan(plan)
-    if data.status: plan.status = data.status
-    if data.planned_qty is not None: plan.planned_qty = data.planned_qty
-    if data.priority is not None: plan.priority = data.priority
-    if data.plan_type: plan.plan_type = data.plan_type
-    if data.notes is not None: plan.notes = data.notes
+
+    # ── Interlock: pending → running requires model-change approval ──
+    if data.status == "running" and plan.status == "pending":
+        # Auto-assign a machine from the station when plan was created as "any machine"
+        if not plan.machine_id:
+            machine = (
+                db.query(Machine)
+                .filter(Machine.station_id == plan.station_no)
+                .order_by(Machine.id)
+                .first()
+            )
+            if not machine:
+                raise HTTPException(
+                    400,
+                    "No machine found for this station — assign a machine on the plan before starting",
+                )
+            plan.machine_id = machine.id
+
+        existing_pending = (
+            db.query(ModelChangeRequest)
+            .filter(
+                ModelChangeRequest.plan_id == plan.id,
+                ModelChangeRequest.status == "pending",
+            )
+            .first()
+        )
+        if existing_pending:
+            # Idempotent: Start already raised a request — do not error on repeat clicks
+            return {
+                **_plan_dict(plan, db),
+                "model_change_pending": True,
+                "model_change_request_id": existing_pending.id,
+                "message": (
+                    f"Model change request #{existing_pending.id} is awaiting approval "
+                    "on the Model Change page"
+                ),
+            }
+
+        existing_active = (
+            db.query(ModelChangeRequest)
+            .filter(
+                ModelChangeRequest.plan_id == plan.id,
+                ModelChangeRequest.status.in_(["approved", "in_progress"]),
+            )
+            .first()
+        )
+        if existing_active:
+            # Approval already applied plan start — treat as already running
+            plan.status = "running"
+            plan.updated_at = now_ist()
+            db.commit()
+            return {
+                **_plan_dict(plan, db),
+                "message": "Plan is running (model change already approved)",
+            }
+
+        from_model = _previous_model_on_machine(db, plan.machine_id, plan.id)
+        to_model = (plan.model_variant or plan.current_operation or "—").strip() or "—"
+        mcr = ModelChangeRequest(
+            machine_id=plan.machine_id,
+            plan_id=plan.id,
+            requested_by=user.id,
+            from_model=from_model,
+            to_model=to_model,
+            ideal_minutes=60,
+            shift=plan.shift or "A",
+            entry_date=plan.plan_date or now_ist().date(),
+            reason="setting_change",
+            status="pending",
+            created_at=now_ist(),
+        )
+        db.add(mcr)
+        # Keep plan pending until supervisor approves on Model Change page
+        plan.updated_at = now_ist()
+        db.commit()
+        db.refresh(mcr)
+        await manager.broadcast({
+            "type": "model_change_request",
+            "id": mcr.id,
+            "machine_id": plan.machine_id,
+            "plan_id": plan.id,
+            "from_model": from_model,
+            "to_model": to_model,
+            "status": "pending",
+        })
+        await manager.broadcast({"type": "plan_updated", "plan_id": plan_id, "status": plan.status})
+        return {
+            **_plan_dict(plan, db),
+            "message": (
+                f"Model change request #{mcr.id} raised ({from_model} → {to_model}). "
+                "Approve on Model Change page to start the plan and apply the part on WI."
+            ),
+            "model_change_pending": True,
+        }
+
+    if data.status:
+        plan.status = data.status
+    if data.planned_qty is not None:
+        plan.planned_qty = data.planned_qty
+    if data.priority is not None:
+        plan.priority = data.priority
+    if data.plan_type:
+        plan.plan_type = data.plan_type
+    if data.notes is not None:
+        plan.notes = data.notes
     plan.updated_at = now_ist()
 
-    # When plan goes running — auto-trigger model change check and update machine
+    # Resume from paused (no new model-change gate)
     if data.status == "running":
         machine = db.query(Machine).filter(Machine.id == plan.machine_id).first()
-        if machine and machine.status not in ("breakdown",):
+        if machine and machine.status not in ("breakdown", "offline", "setting_change"):
             machine.status = "running"
         db.commit()
         await manager.broadcast({
             "type": "plan_started", "plan_id": plan_id,
             "machine_id": plan.machine_id, "station_no": plan.station_no,
             "current_operation": plan.current_operation, "next_operation": plan.next_operation,
-            "process_time": plan.process_time, "loading_unloading": plan.loading_unloading,
-            "shift": plan.shift, "plan_date": str(plan.plan_date)
+            "model_variant": plan.model_variant,
+            "process_time": float(plan.process_time) if plan.process_time is not None else None,
+            "loading_unloading": float(plan.loading_unloading) if plan.loading_unloading is not None else None,
+            "shift": plan.shift, "plan_date": str(plan.plan_date),
         })
     elif data.status == "completed":
         machine = db.query(Machine).filter(Machine.id == plan.machine_id).first()
-        if machine: machine.status = "idle"
+        if machine:
+            machine.status = "idle"
         sync_work_order_after_plan_change(db, plan.work_order_id)
         db.commit()
         await manager.broadcast({"type": "plan_completed", "plan_id": plan_id,
@@ -294,7 +450,7 @@ async def update_status(plan_id: int, data: PlanUpdate, db: Session = Depends(ge
     else:
         db.commit()
         await manager.broadcast({"type": "plan_updated", "plan_id": plan_id, "status": data.status})
-    return plan
+    return _plan_dict(plan, db)
 
 @router.patch("/{plan_id}/actual")
 async def update_actual_qty(plan_id: int, data: ActualQtyUpdate, db: Session = Depends(get_db),
@@ -510,7 +666,7 @@ def get_pipeline(station_no: int, db: Session = Depends(get_db), _=Depends(get_c
         ProductionPlan.station_no == station_no,
         ProductionPlan.status.in_(["pending", "running"])
     ).order_by(ProductionPlan.plan_date, ProductionPlan.shift, ProductionPlan.priority).all()
-    return plans
+    return [_plan_dict(p, db) for p in plans]
 
 
 def _style_header_row(ws, ncols):

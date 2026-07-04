@@ -6,6 +6,7 @@ import PageHeader from '../components/PageHeader';
 import QcInspectionSheet from '../components/QcInspectionSheet';
 import LiveStatusButton from '../components/LiveStatusButton';
 import TitanModal from '../components/basic/TitanModal';
+import ProcessControlSheet, { printProcessControlSheet } from '../components/ProcessControlSheet';
 import { useTheme } from '../context/ThemeContext';
 import { pageClass, surfaceClass, withSurfaceClass } from '../themes/tileHelpers';
 import {
@@ -20,13 +21,7 @@ import { formatCtSeconds } from '../utils/cycleTime';
 import { DRAFT_KEYS, loadDraft, saveDraft } from '../utils/formPersistence';
 import SpcWarningBanner from '../components/SpcWarningBanner';
 import { isImageDocUrl } from '../utils/uploadLimits';
-
-const DOC_LABELS = {
-  control_plan: 'Control Plan',
-  wi_visual: 'WI-Visual',
-  wi_tray: 'WI-Tray',
-  breakdown_sheet: 'Breakdown Sheet',
-};
+import { docTypeLabel } from '../utils/docTypes';
 
 function PdfThumb({ url, label, revision, revDate, onOpen, s, t }) {
   if (!url) {
@@ -70,6 +65,7 @@ export default function OperatorWorkInstructionDashboard() {
   const [context, setContext] = useState(null);
   const [loading, setLoading] = useState(true);
   const [showQc, setShowQc] = useState(false);
+  const [showProcessSheet, setShowProcessSheet] = useState(false);
   const [pdfModal, setPdfModal] = useState(null);
   const [qcInstances, setQcInstances] = useState({});
   const [spcWarnings, setSpcWarnings] = useState([]);
@@ -130,8 +126,33 @@ export default function OperatorWorkInstructionDashboard() {
   }, [machineId]);
 
   useWebSocket((msg) => {
-    if (['plan_started', 'plan_updated', 'plan_deleted', 'machine_status'].includes(msg?.type)) {
-      loadContext();
+    const type = msg?.type;
+    if ([
+      'plan_started',
+      'plan_updated',
+      'plan_deleted',
+      'machine_status',
+      'machine_status_updated',
+      'machine_updated',
+      'breakdown_raised',
+      'breakdown_acknowledged',
+      'breakdown_in_progress',
+      'breakdown_resolved',
+      'model_change_request',
+      'model_change_approved',
+      'model_change_completed',
+      'model_change_rejected',
+    ].includes(type)) {
+      // Refresh when status changes for the selected machine (or any plan/breakdown event)
+      const eventMachineId = msg?.id ?? msg?.machine_id;
+      if (
+        eventMachineId == null
+        || !machineId
+        || Number(eventMachineId) === Number(machineId)
+      ) {
+        loadContext();
+        loadMachines();
+      }
     }
   });
 
@@ -151,11 +172,15 @@ export default function OperatorWorkInstructionDashboard() {
     return [...map.values()];
   }, [machines]);
 
-  const docsByType = useMemo(() => {
-    const m = {};
-    (context?.documents || []).forEach((d) => { m[d.doc_type] = d; });
-    return m;
-  }, [context]);
+  const documents = useMemo(
+    () => (context?.documents || []).filter((d) => d.file_url),
+    [context],
+  );
+
+  const breakdownDoc = useMemo(
+    () => documents.find((d) => d.doc_type === 'breakdown_sheet'),
+    [documents],
+  );
 
   const status = context?.machine?.status || 'idle';
   const statusColor = MACHINE_STATUS_COLORS[status] || '#6b7280';
@@ -164,6 +189,8 @@ export default function OperatorWorkInstructionDashboard() {
   const openBreakdown = () => {
     if (context?.breakdown?.sheet_url) {
       openPdf(context.breakdown.sheet_url);
+    } else if (breakdownDoc?.file_url) {
+      openPdf(breakdownDoc.file_url);
     } else {
       navigate('/breakdown');
     }
@@ -268,13 +295,24 @@ export default function OperatorWorkInstructionDashboard() {
 
           <div className={surfaceClass(t)} style={s.card}>
             <div style={s.cardHdr}>Work Instructions &amp; Documents</div>
-            <div style={{
-              padding: '12px 12px 0',
-              display: 'flex',
-              gap: 12,
-              alignItems: 'center',
-              borderBottom: context?.part ? `1px solid ${t.border}` : 'none',
-            }}>
+            <button
+              type="button"
+              onClick={() => context?.part?.id && setShowProcessSheet(true)}
+              disabled={!context?.part?.id}
+              title={context?.part?.id ? 'Open Process Control Sheet' : 'No part linked'}
+              style={{
+                padding: '12px 12px 0',
+                display: 'flex',
+                gap: 12,
+                alignItems: 'center',
+                width: '100%',
+                textAlign: 'left',
+                border: 'none',
+                borderBottom: context?.part ? `1px solid ${t.border}` : 'none',
+                background: 'transparent',
+                cursor: context?.part?.id ? 'pointer' : 'default',
+              }}
+            >
               <div style={{
                 width: 100, height: 100, flexShrink: 0, borderRadius: 8,
                 border: `1px solid ${t.border}`, background: t.surface2,
@@ -291,46 +329,37 @@ export default function OperatorWorkInstructionDashboard() {
                   <span style={{ fontSize: 28, opacity: 0.35 }}>📷</span>
                 )}
               </div>
-              <div>
-                <div style={{ fontWeight: 700, fontSize: 14, color: t.text }}>
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <div style={{ fontWeight: 700, fontSize: 14, color: t.text, wordBreak: 'break-word' }}>
                   {context?.part?.part_no || context?.part?.model_variant || 'No part linked'}
                 </div>
-                {context?.part?.description && (
-                  <div style={{ fontSize: 12, color: t.textDim, marginTop: 2 }}>{context.part.description}</div>
+                {context?.part?.part_name && (
+                  <div style={{ fontSize: 12, color: t.textDim, marginTop: 2 }}>{context.part.part_name}</div>
                 )}
                 <div style={{ fontSize: 11, color: t.textFaint, marginTop: 4 }}>Part Image</div>
+                {context?.part?.id && (
+                  <div style={{ fontSize: 11, color: t.accent, marginTop: 6, fontWeight: 600 }}>
+                    Click to open Process Control Sheet →
+                  </div>
+                )}
               </div>
-            </div>
+            </button>
             <div style={{ ...s.cardBody, ...s.docGrid }}>
-              <PdfThumb
-                label={DOC_LABELS.control_plan}
-                url={docsByType.control_plan?.file_url}
-                revision={docsByType.control_plan?.revision}
-                revDate={docsByType.control_plan?.rev_date}
-                onOpen={() => docsByType.control_plan?.file_url && openPdf(docsByType.control_plan.file_url)}
-                s={s}
-                t={t}
-              />
-              <PdfThumb
-                label={DOC_LABELS.wi_visual}
-                url={docsByType.wi_visual?.file_url}
-                revision={docsByType.wi_visual?.revision}
-                revDate={docsByType.wi_visual?.rev_date}
-                onOpen={() => docsByType.wi_visual?.file_url && openPdf(docsByType.wi_visual.file_url)}
-                s={s}
-                t={t}
-              />
-              {docsByType.wi_tray?.file_url && (
+              {documents.length === 0 && (
+                <div style={s.docTileEmpty}>No work instruction documents uploaded for this part</div>
+              )}
+              {documents.map((d) => (
                 <PdfThumb
-                  label={DOC_LABELS.wi_tray}
-                  url={docsByType.wi_tray.file_url}
-                  revision={docsByType.wi_tray.revision}
-                  revDate={docsByType.wi_tray.rev_date}
-                  onOpen={() => openPdf(docsByType.wi_tray.file_url)}
+                  key={d.doc_type}
+                  label={docTypeLabel(d.doc_type, d.doc_label)}
+                  url={d.file_url}
+                  revision={d.revision}
+                  revDate={d.rev_date}
+                  onOpen={() => openPdf(d.file_url)}
                   s={s}
                   t={t}
                 />
-              )}
+              ))}
             </div>
             <div style={s.footer}>
               <div style={s.statusRow}>
@@ -355,6 +384,45 @@ export default function OperatorWorkInstructionDashboard() {
           onClose={() => setShowQc(false)}
           onSubmitted={loadContext}
         />
+      )}
+
+      {showProcessSheet && context?.part && (
+        <TitanModal
+          title="Process Control Sheet"
+          subtitle={context.part.part_no || context.part.model_variant}
+          maxWidth={1200}
+          onClose={() => setShowProcessSheet(false)}
+          footer={(
+            <button
+              type="button"
+              onClick={() => {
+                const el = document.getElementById('process-control-sheet-print');
+                if (el) {
+                  printProcessControlSheet(
+                    el,
+                    `Process Control Sheet — ${context.part.part_no || context.part.model_variant || 'Part'}`,
+                  );
+                }
+              }}
+              style={{
+                ...s.btnPrimary,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+              }}
+            >
+              🖨 Print Sheet
+            </button>
+          )}
+        >
+          <ProcessControlSheet
+            part={context.part}
+            qcParameters={context.qc_parameters || []}
+            qcColumnSchema={context.qc_column_schema || []}
+            machineName={context.machine?.name}
+            plan={context.running_plan}
+          />
+        </TitanModal>
       )}
 
       {pdfModal && (

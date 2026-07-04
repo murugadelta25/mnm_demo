@@ -6,17 +6,14 @@ import { useTheme } from '../context/ThemeContext';
 import { pageClass } from '../themes/tileHelpers';
 import { getWorkInstructionStyles } from '../themes/workInstructionStyles';
 import { validateWiDocFile, WI_DOC_ACCEPT, isImageDocUrl } from '../utils/uploadLimits';
+import {
+  OTHER_DOC_TYPE,
+  mergeDocTypes,
+  resolveDocTypeSelection,
+  docTypeLabel,
+} from '../utils/docTypes';
 
 const REV_PAGE_SIZE = 50;
-
-const DOC_TYPES = [
-  { key: 'control_plan', label: 'Control Plan' },
-  { key: 'wi_visual', label: 'WI-Visual' },
-  { key: 'wi_tray', label: 'WI-Tray' },
-  { key: 'breakdown_sheet', label: 'Breakdown Sheet' },
-];
-
-const DOC_LABELS = Object.fromEntries(DOC_TYPES.map((d) => [d.key, d.label]));
 
 function suggestNextRevision(currentRev) {
   if (!currentRev) return '1';
@@ -31,6 +28,7 @@ function suggestNextRevision(currentRev) {
 export default function WorkInstructionRevision() {
   const { theme: t } = useTheme();
   const [parts, setParts] = useState([]);
+  const [docTypeOptions, setDocTypeOptions] = useState([]);
   const [partId, setPartId] = useState('');
   const [docType, setDocType] = useState('');
   const [data, setData] = useState({
@@ -42,6 +40,7 @@ export default function WorkInstructionRevision() {
 
   const [uploadPartId, setUploadPartId] = useState('');
   const [uploadDocType, setUploadDocType] = useState('');
+  const [uploadCustomLabel, setUploadCustomLabel] = useState('');
   const [uploadRevision, setUploadRevision] = useState('');
   const [uploadRevDate, setUploadRevDate] = useState(new Date().toISOString().slice(0, 10));
   const [uploadNotes, setUploadNotes] = useState('');
@@ -59,6 +58,15 @@ export default function WorkInstructionRevision() {
       setParts([]);
     }
   }, []);
+
+  const loadDocTypes = useCallback(async () => {
+    try {
+      const { data: types } = await api.get('/api/parts/document-types');
+      setDocTypeOptions(mergeDocTypes(types, data.current));
+    } catch {
+      setDocTypeOptions(mergeDocTypes([], data.current));
+    }
+  }, [data.current]);
 
   const loadRevisions = useCallback(async (page = 1) => {
     const params = { page, page_size: REV_PAGE_SIZE };
@@ -79,38 +87,37 @@ export default function WorkInstructionRevision() {
   useEffect(() => { loadParts(); }, [loadParts]);
   useEffect(() => { setRevPage(1); }, [partId, docType]);
   useEffect(() => { loadRevisions(revPage); }, [partId, docType, revPage, loadRevisions]);
+  useEffect(() => { loadDocTypes(); }, [loadDocTypes]);
 
-  const selectedUploadPart = useMemo(
-    () => parts.find((p) => String(p.id) === String(uploadPartId)),
-    [parts, uploadPartId],
-  );
+  const resolvedUploadType = useMemo(() => {
+    if (!uploadDocType || uploadDocType === OTHER_DOC_TYPE) return null;
+    return uploadDocType;
+  }, [uploadDocType]);
 
   const currentForUpload = useMemo(() => {
-    if (!uploadPartId || !uploadDocType) return null;
+    if (!uploadPartId || !resolvedUploadType) return null;
     const fromList = data.current.find(
-      (d) => String(d.part_id) === String(uploadPartId) && d.doc_type === uploadDocType && d.is_current,
+      (d) => String(d.part_id) === String(uploadPartId) && d.doc_type === resolvedUploadType && d.is_current,
     );
-    if (fromList) return fromList;
-    const doc = (selectedUploadPart?.documents || []).find((d) => d.doc_type === uploadDocType);
-    if (!doc) return null;
-    return { ...doc, part_id: Number(uploadPartId), is_current: 1 };
-  }, [data, uploadPartId, uploadDocType, selectedUploadPart]);
+    return fromList || null;
+  }, [data, uploadPartId, resolvedUploadType]);
 
   useEffect(() => {
-    if (!uploadPartId || !uploadDocType) {
-      setUploadRevision('');
+    if (!uploadPartId || !resolvedUploadType) {
+      if (uploadDocType !== OTHER_DOC_TYPE) setUploadRevision('');
       return;
     }
     setUploadRevision(suggestNextRevision(currentForUpload?.revision));
-  }, [uploadPartId, uploadDocType, currentForUpload?.revision]);
+  }, [uploadPartId, resolvedUploadType, currentForUpload?.revision, uploadDocType]);
 
   const handleUpload = async () => {
     if (!uploadPartId) {
       setUploadMsg('Select a part');
       return;
     }
-    if (!uploadDocType) {
-      setUploadMsg('Select a document type');
+    const resolved = resolveDocTypeSelection(uploadDocType, uploadCustomLabel);
+    if (resolved.error) {
+      setUploadMsg(resolved.error);
       return;
     }
     if (!uploadFile) {
@@ -131,22 +138,28 @@ export default function WorkInstructionRevision() {
     try {
       const fd = new FormData();
       fd.append('file', uploadFile);
-      const params = { revision: uploadRevision.trim() };
+      const params = {
+        revision: uploadRevision.trim(),
+        doc_label: resolved.label,
+      };
       if (uploadRevDate) params.rev_date = uploadRevDate;
       if (uploadNotes.trim()) params.notes = uploadNotes.trim();
-      await api.post(`/api/parts/${uploadPartId}/documents/${uploadDocType}/upload`, fd, {
+      await api.post(`/api/parts/${uploadPartId}/documents/${resolved.key}/upload`, fd, {
         params,
       });
       setUploadMsg('File uploaded successfully — previous revision archived to history');
       setUploadFile(null);
       setUploadNotes('');
+      setUploadCustomLabel('');
       setPartId(String(uploadPartId));
-      setDocType(uploadDocType);
+      setDocType(resolved.key);
+      setUploadDocType(resolved.key);
       const { data: refreshed } = await api.get('/api/parts/documents/revisions', {
-        params: { part_id: uploadPartId, doc_type: uploadDocType },
+        params: { part_id: uploadPartId, doc_type: resolved.key },
       });
       setData(refreshed);
       await loadParts();
+      await loadDocTypes();
     } catch (e) {
       setUploadMsg(e.response?.data?.detail || 'Upload failed');
     } finally {
@@ -157,6 +170,8 @@ export default function WorkInstructionRevision() {
   const th = { padding: '8px 10px', textAlign: 'left', background: '#1e40af', color: '#fff', fontSize: 12 };
   const td = { padding: '8px 10px', borderBottom: `1px solid ${t.border}`, fontSize: 12 };
   const inp = { ...s.inp };
+  const uploadReady = uploadPartId && uploadDocType && uploadFile
+    && (uploadDocType !== OTHER_DOC_TYPE || uploadCustomLabel.trim());
 
   return (
     <div className={pageClass(t)} style={s.page}>
@@ -167,8 +182,8 @@ export default function WorkInstructionRevision() {
           Upload / Revise Document
         </div>
         <p style={{ margin: '0 0 12px', fontSize: 12, color: t.textDim }}>
-          Select part and document type, enter the new revision, then upload the PDF (max 5 MB).
-          The current version is moved to historic versions automatically.
+          Select part and document type (or Other for a new type), enter the new revision, then upload.
+          The current version is moved to historic versions automatically. Documents appear on the Work Instruction dashboard.
         </p>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 10, marginBottom: 12 }}>
           <label style={{ fontSize: 12, color: t.textDim }}>
@@ -191,9 +206,22 @@ export default function WorkInstructionRevision() {
               disabled={!uploadPartId}
             >
               <option value="">Select type…</option>
-              {DOC_TYPES.map(({ key, label }) => <option key={key} value={key}>{label}</option>)}
+              {docTypeOptions.map(({ key, label }) => <option key={key} value={key}>{label}</option>)}
+              <option value={OTHER_DOC_TYPE}>Other (new type)…</option>
             </select>
           </label>
+          {uploadDocType === OTHER_DOC_TYPE && (
+            <label style={{ fontSize: 12, color: t.textDim }}>
+              New Document Type Name *
+              <input
+                type="text"
+                value={uploadCustomLabel}
+                onChange={(e) => setUploadCustomLabel(e.target.value)}
+                placeholder="e.g. Process Sheet Revision"
+                style={{ ...inp, marginTop: 4 }}
+              />
+            </label>
+          )}
           <label style={{ fontSize: 12, color: t.textDim }}>
             New Revision *
             <input
@@ -227,7 +255,7 @@ export default function WorkInstructionRevision() {
             {' — will be archived when you upload the new file.'}
           </div>
         )}
-        {!currentForUpload && uploadPartId && uploadDocType && (
+        {!currentForUpload && uploadPartId && resolvedUploadType && (
           <div style={{ fontSize: 12, color: t.textDim, marginBottom: 12 }}>
             No current document for this part/type — this will be the first version.
           </div>
@@ -262,7 +290,7 @@ export default function WorkInstructionRevision() {
           <button
             type="button"
             onClick={handleUpload}
-            disabled={uploading || !uploadPartId || !uploadDocType || !uploadFile}
+            disabled={uploading || !uploadReady}
             style={s.btnAccent}
           >
             {uploading ? 'Uploading…' : 'Upload New Revision'}
@@ -295,7 +323,7 @@ export default function WorkInstructionRevision() {
           style={s.selector}
         >
           <option value="">All Document Types</option>
-          {DOC_TYPES.map(({ key, label }) => <option key={key} value={key}>{label}</option>)}
+          {docTypeOptions.map(({ key, label }) => <option key={key} value={key}>{label}</option>)}
         </select>
       </div>
 
@@ -321,7 +349,7 @@ export default function WorkInstructionRevision() {
             {data.current.filter((d) => d.is_current).map((d) => (
               <tr key={`c-${d.id}`}>
                 <td style={td}>{d.part_no}</td>
-                <td style={td}>{DOC_LABELS[d.doc_type] || d.doc_type}</td>
+                <td style={td}>{docTypeLabel(d.doc_type, d.doc_label, docTypeOptions)}</td>
                 <td style={td}>{d.revision}</td>
                 <td style={td}>{d.rev_date || '—'}</td>
                 <td style={td}><span style={{ color: '#16a34a', fontWeight: 600 }}>Current</span></td>
@@ -367,7 +395,7 @@ export default function WorkInstructionRevision() {
             {data.history.map((h) => (
               <tr key={`h-${h.id}`}>
                 <td style={td}>{h.part_no}</td>
-                <td style={td}>{DOC_LABELS[h.doc_type] || h.doc_type}</td>
+                <td style={td}>{docTypeLabel(h.doc_type, h.doc_label, docTypeOptions)}</td>
                 <td style={td}>{h.revision}</td>
                 <td style={td}>{h.rev_date || '—'}</td>
                 <td style={td}>{h.archived_at ? new Date(h.archived_at).toLocaleString() : '—'}</td>

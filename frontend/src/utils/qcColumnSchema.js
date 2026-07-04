@@ -1,8 +1,10 @@
 /** Part-level QC spec column definitions (Method, Freq, custom columns). */
 
 export const DEFAULT_QC_COLUMNS = [
-  { key: 'method', label: 'Method' },
-  { key: 'frequency', label: 'Freq' },
+  { key: 'method', label: 'Inspection Method' },
+  { key: 'frequency', label: 'Inspection Frequency (Operator)' },
+  { key: 'freq_inspector', label: 'Inspection Frequency (Inspector)' },
+  { key: 'control_method', label: 'Control Method' },
 ];
 
 export function normalizeQcColumnSchema(schema, qcParameters = []) {

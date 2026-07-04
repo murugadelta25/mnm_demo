@@ -11,7 +11,15 @@ from ..models import (
 )
 from ..auth import get_current_user
 from .hourly_output import _load_config, _parse_mins, _break_windows, _expected_parts
-from .parts import _find_part_by_variant, _cycle_time, _qc_column_schema
+from .parts import (
+    _find_part_by_variant,
+    _cycle_time,
+    _qc_column_schema,
+    _parse_param_table,
+    DEFAULT_TOOLS_COLUMNS,
+    DEFAULT_MACHINE_PARAM_COLUMNS,
+    DEFAULT_JIGS_COLUMNS,
+)
 from .machines import _compute_status
 
 router = APIRouter(prefix="/api/operator-dashboard", tags=["operator-dashboard"])
@@ -153,6 +161,7 @@ def get_dashboard_context(
             "id": plan.id,
             "model_variant": plan.model_variant,
             "current_operation": plan.current_operation,
+            "next_operation": plan.next_operation,
             "status": plan.status,
             "process_time": float(plan.process_time) if plan.process_time else None,
             "loading_unloading": float(plan.loading_unloading) if plan.loading_unloading else None,
@@ -160,22 +169,49 @@ def get_dashboard_context(
         "part": {
             "id": part.id,
             "part_no": part.part_no,
+            "part_name": getattr(part, "part_name", None),
             "model_variant": part.model_variant,
             "description": part.description,
             "tool_no": part.tool_no,
             "no_of_cavity": part.no_of_cavity,
             "production_section": part.production_section,
+            "input_material": getattr(part, "input_material", None),
+            "previous_operation": getattr(part, "previous_operation", None),
+            "next_operation": getattr(part, "next_operation", None) or (plan.next_operation if plan else None),
+            "machine_type": getattr(part, "machine_type", None) or machine.machine_type,
             "operation_code": part.operation_code or machine.name,
             "operation_name": part.operation_name or (plan.current_operation if plan else None),
+            "operation_sequence": getattr(part, "operation_sequence", None),
+            "process_time": float(part.process_time) if part.process_time else None,
+            "loading_unloading": float(part.loading_unloading) if part.loading_unloading else None,
+            "drawing_revision": getattr(part, "drawing_revision", None),
+            "manufacturing_status": getattr(part, "manufacturing_status", None) or "production",
+            "manufacturing_status_other": getattr(part, "manufacturing_status_other", None),
             "image_url": part.image_url,
+            "sketch_image_url": getattr(part, "sketch_image_url", None),
+            "tools_parameters": _parse_param_table(
+                getattr(part, "tools_params_json", None), DEFAULT_TOOLS_COLUMNS,
+            ),
+            "machine_parameters": _parse_param_table(
+                getattr(part, "machine_params_json", None), DEFAULT_MACHINE_PARAM_COLUMNS,
+            ),
+            "jigs_fixtures": _parse_param_table(
+                getattr(part, "jigs_fixtures_json", None), DEFAULT_JIGS_COLUMNS,
+            ),
         } if part else {
             "part_no": model_variant,
+            "part_name": None,
             "model_variant": model_variant,
             "tool_no": None,
             "description": None,
             "operation_code": machine.name,
             "operation_name": plan.current_operation if plan else None,
+            "next_operation": plan.next_operation if plan else None,
             "production_section": None,
+            "machine_type": machine.machine_type,
+            "tools_parameters": {"columns": DEFAULT_TOOLS_COLUMNS, "rows": []},
+            "machine_parameters": {"columns": DEFAULT_MACHINE_PARAM_COLUMNS, "rows": []},
+            "jigs_fixtures": {"columns": DEFAULT_JIGS_COLUMNS, "rows": []},
         },
         "cycle_time": round(ct, 2) if ct > 0 else None,
         "exp_output_per_hour": exp_per_hour,
@@ -183,6 +219,16 @@ def get_dashboard_context(
         "documents": [
             {
                 "doc_type": d.doc_type,
+                "doc_label": getattr(d, "doc_label", None) or (
+                    {
+                        "control_plan": "Control Plan",
+                        "wi_visual": "WI-Visual",
+                        "wi_tray": "WI-Tray",
+                        "breakdown_sheet": "Breakdown Sheet",
+                        "drawing_revision": "Part / Drawing Revision",
+                        "process_sheet_revision": "Process Sheet Revision",
+                    }.get(d.doc_type) or d.doc_type.replace("_", " ").title()
+                ),
                 "revision": d.revision,
                 "rev_date": d.rev_date.isoformat() if d.rev_date else None,
                 "file_url": d.file_url,

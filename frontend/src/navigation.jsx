@@ -23,15 +23,22 @@ export const TITAN_NAVIGATION = [
   {
     group: 'Production',
     icon: NAV_GROUP_ICONS.production,
-    roles: ['admin', 'supervisor', 'operator', 'quality'],
+    roles: ['admin', 'supervisor', 'operator'],
     items: [
-      { path: '/planning', label: 'Planning', icon: NAV_ICONS.planning, roles: ['admin', 'supervisor', 'operator'] },
       { path: '/work-orders', label: 'Work Orders', icon: NAV_ICONS.workOrders, roles: ['admin', 'supervisor', 'operator'] },
+      { path: '/planning', label: 'Planning', icon: NAV_ICONS.planning, roles: ['admin', 'supervisor', 'operator'] },
       { path: '/entry', label: 'Data Entry', icon: NAV_ICONS.entry, roles: ['admin', 'supervisor', 'operator'] },
       { path: '/hourly-output', label: 'Hourly Output', icon: NAV_ICONS.hourlyOutput, roles: ['admin', 'supervisor', 'operator'] },
-      { path: '/work-instructions', label: 'Work Instructions', icon: NAV_ICONS.workInstructions },
-      { path: '/qc-approvals', label: 'QC Approvals', icon: NAV_ICONS.workInstructions, roles: ['admin', 'supervisor', 'quality', 'operator'] },
       { path: '/model-change', label: 'Model Change', icon: NAV_ICONS.modelChange, roles: ['admin', 'supervisor', 'operator'] },
+    ],
+  },
+  {
+    group: 'QC',
+    icon: NAV_GROUP_ICONS.qc,
+    roles: ['admin', 'supervisor', 'operator', 'quality'],
+    items: [
+      { path: '/qc-approvals', label: 'QC Approvals', icon: NAV_ICONS.workInstructions, roles: ['admin', 'supervisor', 'quality', 'operator'] },
+      { path: '/work-instructions', label: 'Work Instructions', icon: NAV_ICONS.workInstructions },
     ],
   },
   {

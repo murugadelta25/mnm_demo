@@ -17,6 +17,7 @@ export default function Sidebar({ expanded = true }) {
   const { theme: t } = useTheme();
   const [openGroups, setOpenGroups] = useState({
     Production: true,
+    QC: true,
     Maintenance: true,
     Alerts: true,
     Settings: true,
@@ -28,6 +29,11 @@ export default function Sidebar({ expanded = true }) {
   const navWidth = expanded ? 'var(--titan-nav-width)' : '0px';
   const accentNav = t.navStyle === 'accent';
 
+  // High-contrast menu text against nav background (dark/techBlue vs light)
+  const navText = accentNav ? (t.text || '#f8fafc') : (t.text || '#1e293b');
+  const navTextActive = t.accent || (accentNav ? '#38bdf8' : '#1588DA');
+  /** Group headers: Production, QC, Maintenance, Alerts, Settings */
+  const navGroupColor = '#fbbf24';
   const navActiveBg = accentNav ? t.navFocus : t.bg;
 
   const leafStyle = (active) => ({
@@ -38,11 +44,12 @@ export default function Sidebar({ expanded = true }) {
     padding: '0 12px',
     margin: '2px 8px',
     textDecoration: 'none',
-    color: active ? t.accent : t.textMuted,
+    color: active ? navTextActive : navText,
     fontSize: 13,
     borderRadius: 'var(--titan-radius-sm)',
     background: active ? navActiveBg : 'transparent',
-    fontWeight: active ? 500 : 400,
+    fontWeight: active ? 700 : 600,
+    letterSpacing: '0.01em',
     transition: 'background 0.15s, color 0.15s',
     whiteSpace: 'nowrap',
     overflow: 'hidden',
@@ -88,23 +95,37 @@ export default function Sidebar({ expanded = true }) {
                     alignItems: 'center',
                     background: groupActive ? navActiveBg : 'transparent',
                     border: 'none',
-                    color: groupActive ? t.accent : t.text,
+                    color: navGroupColor,
                     cursor: 'pointer',
                     padding: '0 12px',
                     margin: '2px 8px',
                     height: 48,
                     fontSize: 14,
-                    fontWeight: 500,
+                    fontWeight: 700,
+                    letterSpacing: '0.04em',
+                    textTransform: 'uppercase',
                     borderRadius: 'var(--titan-radius-sm)',
                     transition: 'background 0.15s, color 0.15s',
                   }}
                   onClick={() => toggleGroup(section.group)}
                 >
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 12, minWidth: 0 }}>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 12, minWidth: 0, color: navGroupColor }}>
                     {renderNavIcon(section.icon)}
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{section.group}</span>
+                    <span style={{
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      fontWeight: 700,
+                      color: navGroupColor,
+                      textTransform: 'uppercase',
+                      letterSpacing: '0.04em',
+                    }}
+                    >
+                      {section.group}
+                    </span>
                   </span>
-                  {renderNavIcon(openGroups[section.group] ? EXPAND_LESS_ICON : EXPAND_MORE_ICON)}
+                  <span style={{ color: navGroupColor, display: 'inline-flex' }}>
+                    {renderNavIcon(openGroups[section.group] ? EXPAND_LESS_ICON : EXPAND_MORE_ICON)}
+                  </span>
                 </button>
               )}
 
@@ -117,15 +138,28 @@ export default function Sidebar({ expanded = true }) {
                     <Link
                       key={item.path}
                       to={item.path}
-                      className="titan-nav-leaf"
+                      className={`titan-nav-leaf${active ? ' active' : ''}${isNested ? ' titan-nav-leaf-child' : ' titan-nav-leaf-top'}`}
+                      aria-current={active ? 'page' : undefined}
                       style={{
                         ...leafStyle(active),
                         paddingLeft: isNested ? 44 : 12,
                         height: isNested ? 40 : 48,
+                        ...(!isNested
+                          ? { textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 700 }
+                          : { textTransform: 'none', fontWeight: active ? 700 : 600 }),
                       }}
                     >
                       {!isNested && renderNavIcon(item.icon)}
-                      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.label}</span>
+                      <span style={{
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        fontWeight: 'inherit',
+                        textTransform: isNested ? 'none' : 'uppercase',
+                        letterSpacing: isNested ? 'normal' : '0.04em',
+                      }}
+                      >
+                        {item.label}
+                      </span>
                     </Link>
                   );
                 })}

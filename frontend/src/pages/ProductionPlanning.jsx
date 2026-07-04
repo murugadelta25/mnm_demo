@@ -235,28 +235,40 @@ export default function ProductionPlanning() {
       .catch(() => setParts([]));
   }, []);
 
-  const applyPartToForm = useCallback((partId) => {
+  const applyPartToForm = useCallback((partId, extra = {}) => {
     if (!partId) {
-      setForm((p) => ({ ...p, part_id: '' }));
+      setForm((p) => ({ ...p, part_id: '', ...extra }));
       return;
     }
     const part = parts.find((p) => String(p.id) === String(partId));
-    if (!part) return;
+    if (!part) {
+      setForm((p) => ({ ...p, part_id: String(partId), ...extra }));
+      return;
+    }
     setForm((p) => ({
       ...p,
+      ...extra,
       part_id: String(partId),
       model_variant: partToPlanningVariant(part),
-      process_time: part.process_time != null && part.process_time !== ''
+      // Part Master: Operation Name → Current Operation; Next Operation → Next Operation
+      current_operation: part.operation_name || '',
+      next_operation: part.next_operation || '',
+      process_time: Number.isFinite(Number(part.process_time))
         ? String(part.process_time)
         : '',
-      loading_unloading: part.loading_unloading != null && part.loading_unloading !== ''
+      loading_unloading: Number.isFinite(Number(part.loading_unloading))
         ? String(part.loading_unloading)
         : '10',
     }));
   }, [parts]);
 
   useWebSocket(useCallback(msg => {
-    if (['plan_created','plan_started','plan_completed','plan_updated','plan_deleted','actual_qty_updated','station_created','station_updated','station_deleted','work_order_created','work_order_updated','plan_rescheduled','plans_bulk_rescheduled'].includes(msg.type)) {
+    if ([
+      'plan_created', 'plan_started', 'plan_completed', 'plan_updated', 'plan_deleted',
+      'actual_qty_updated', 'station_created', 'station_updated', 'station_deleted',
+      'work_order_created', 'work_order_updated', 'plan_rescheduled', 'plans_bulk_rescheduled',
+      'model_change_request', 'model_change_approved', 'model_change_completed', 'model_change_rejected',
+    ].includes(msg.type)) {
       fetchAll();
       fetchWorkOrders();
     }
@@ -338,10 +350,31 @@ export default function ProductionPlanning() {
 
   const setStatus = async (id, status) => {
     try {
-      await api.patch(`/api/plans/${id}/status`, { status });
-      fetchAll();
+      const { data } = await api.patch(`/api/plans/${id}/status`, { status });
+      if (data?.model_change_pending || data?.awaiting_model_change) {
+        setMsg(
+          `⏳ Model change request #${data.model_change_request_id || ''} raised — `
+          + 'approve it on the Model Change page to start the plan and apply the part on WI.',
+        );
+      } else if (data?.message) {
+        setMsg(`✅ ${data.message}`);
+      } else if (status === 'running') {
+        setMsg('✅ Plan started');
+      } else if (status === 'paused') {
+        setMsg('⏸ Plan paused');
+      } else if (status === 'completed') {
+        setMsg('✅ Plan completed');
+      }
+      await fetchAll();
+      // Keep feedback visible near actions (not only in create form)
+      window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err) {
-      setMsg('❌ ' + (err.response?.data?.detail || err.message));
+      const detail = err.response?.data?.detail;
+      const errText = Array.isArray(detail)
+        ? detail.map((d) => d.msg || d).join(', ')
+        : (detail || err.message);
+      setMsg(`❌ ${errText}`);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
     }
   };
 
@@ -630,6 +663,9 @@ export default function ProductionPlanning() {
   // derive runtime styles from theme
   const s = getStyles(t);
 
+  const msgIsError = msg.startsWith('❌') || msg.toLowerCase().includes('error');
+  const msgIsWait = msg.startsWith('⏳');
+
   return (
     <div className={pageClass(t)} style={{ padding: 20, background: t.bg, minHeight: 'calc(100vh - 52px)', color: t.text, transition: 'background 0.2s, color 0.2s' }}>
       {/* Header with clock + refresh + info button */}
@@ -660,6 +696,42 @@ export default function ProductionPlanning() {
           </div>
         }
       />
+
+      {msg && (
+        <div
+          role="status"
+          style={{
+            marginBottom: 12,
+            padding: '10px 14px',
+            borderRadius: 8,
+            fontSize: 13,
+            fontWeight: 600,
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: 12,
+            background: msgIsError ? '#fef2f2' : msgIsWait ? '#fffbeb' : '#ecfdf5',
+            color: msgIsError ? '#dc2626' : msgIsWait ? '#b45309' : '#047857',
+            border: `1px solid ${msgIsError ? '#fecaca' : msgIsWait ? '#fde68a' : '#a7f3d0'}`,
+          }}
+        >
+          <span>{msg}</span>
+          <button
+            type="button"
+            onClick={() => setMsg('')}
+            style={{
+              border: 'none',
+              background: 'transparent',
+              cursor: 'pointer',
+              fontWeight: 700,
+              color: 'inherit',
+              fontSize: 14,
+            }}
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {movePlan && (
         <MovePlanModal
@@ -751,12 +823,15 @@ export default function ProductionPlanning() {
               <select style={s.inp} value={form.work_order_id}
                 onChange={(e) => {
                   const wo = workOrders.find((w) => String(w.id) === e.target.value);
-                  setForm((p) => ({
-                    ...p,
-                    work_order_id: e.target.value,
-                    part_id: wo?.part_id ? String(wo.part_id) : p.part_id,
-                    model_variant: wo?.model_variant || p.model_variant,
-                  }));
+                  if (wo?.part_id) {
+                    applyPartToForm(wo.part_id, { work_order_id: e.target.value });
+                  } else {
+                    setForm((p) => ({
+                      ...p,
+                      work_order_id: e.target.value,
+                      model_variant: wo?.model_variant || p.model_variant,
+                    }));
+                  }
                 }}>
                 <option value="">— Optional: link plan to work order —</option>
                 {workOrders.map((wo) => (
@@ -935,15 +1010,37 @@ export default function ProductionPlanning() {
                   ))}
                 </select>
               </FField>
-              <FField t={t} label="Current Operation"><input style={s.inp} value={form.current_operation}
-                onChange={e => setForm(p => ({ ...p, current_operation: e.target.value }))} required /></FField>
-              <FField t={t} label="Next Operation"><input style={s.inp} value={form.next_operation}
-                onChange={e => setForm(p => ({ ...p, next_operation: e.target.value }))} required /></FField>
+              <FField t={t} label="Current Operation">
+                <input
+                  style={s.inp}
+                  value={form.current_operation}
+                  onChange={e => setForm(p => ({ ...p, current_operation: e.target.value }))}
+                  placeholder="From Part Master — Operation Name"
+                  required
+                />
+              </FField>
+              <FField t={t} label="Next Operation">
+                <input
+                  style={s.inp}
+                  value={form.next_operation}
+                  onChange={e => setForm(p => ({ ...p, next_operation: e.target.value }))}
+                  placeholder="From Part Master — Next Operation"
+                  required
+                />
+              </FField>
               <FField t={t} label="Model / Variant">
                 <input
                   style={s.inp}
                   value={form.model_variant}
-                  onChange={(e) => setForm((p) => ({ ...p, model_variant: e.target.value, part_id: '' }))}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    const match = parts.find((p) => partToPlanningVariant(p) === val.trim());
+                    if (match) {
+                      applyPartToForm(match.id);
+                    } else {
+                      setForm((p) => ({ ...p, model_variant: val, part_id: '' }));
+                    }
+                  }}
                   placeholder="e.g. TL/TQW/DI/12/250/80"
                   list="plan-part-variants"
                 />
@@ -953,25 +1050,77 @@ export default function ProductionPlanning() {
                   ))}
                 </datalist>
               </FField>
-              <FField t={t} label="Process Time (sec)"><input style={s.inp} type="number" min="0" step="0.01" value={form.process_time}
-                onChange={e => isValidDecimalInput(e.target.value) && setForm(p => ({ ...p, process_time: e.target.value }))} required /></FField>
-              <FField t={t} label="L&U Time (sec)"><input style={s.inp} type="number" min="0" step="0.01" value={form.loading_unloading}
-                onChange={e => isValidDecimalInput(e.target.value) && setForm(p => ({ ...p, loading_unloading: e.target.value }))} /></FField>
+              <FField t={t} label="Process Time (sec)">
+                <input
+                  style={s.inp}
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={form.process_time === '' || form.process_time == null || Number.isNaN(Number(form.process_time))
+                    ? ''
+                    : form.process_time}
+                  onChange={e => isValidDecimalInput(e.target.value) && setForm(p => ({ ...p, process_time: e.target.value }))}
+                  placeholder="From Part Master"
+                  required
+                />
+              </FField>
+              <FField t={t} label="L&U Time (sec)">
+                <input
+                  style={s.inp}
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={form.loading_unloading === '' || form.loading_unloading == null || Number.isNaN(Number(form.loading_unloading))
+                    ? ''
+                    : form.loading_unloading}
+                  onChange={e => isValidDecimalInput(e.target.value) && setForm(p => ({ ...p, loading_unloading: e.target.value }))}
+                  placeholder="From Part Master"
+                />
+              </FField>
               <FField t={t} label="Cycle Time CT (sec)">
                 <input style={{ ...s.inp, background: t.surface2, color: t.brand, fontWeight: 700 }} readOnly
                   value={formatCtSeconds(sumCt(form.process_time, form.loading_unloading))} />
               </FField>
               <FField t={t} label="Planned Qty">
-                <input style={s.inp} type="number" value={form.planned_qty}
-                  onChange={e => setForm(p => ({ ...p, planned_qty: parseInt(e.target.value) }))} required />
+                <input
+                  style={s.inp}
+                  type="number"
+                  value={form.planned_qty === '' || form.planned_qty == null || Number.isNaN(Number(form.planned_qty))
+                    ? ''
+                    : form.planned_qty}
+                  onChange={e => {
+                    const v = e.target.value;
+                    setForm((p) => ({
+                      ...p,
+                      planned_qty: v === '' ? '' : (Number.isNaN(parseInt(v, 10)) ? '' : parseInt(v, 10)),
+                    }));
+                  }}
+                  required
+                />
                 {selectedWorkOrder && form.planned_qty > selectedWorkOrder.remaining_qty && (
                   <span style={{ color: '#ef4444', fontSize: 11 }}>
                     Exceeds work order remaining ({selectedWorkOrder.remaining_qty} pcs)
                   </span>
                 )}
               </FField>
-              <FField t={t} label="Priority (1=High)"><input style={s.inp} type="number" min="1" max="10" value={form.priority}
-                onChange={e => setForm(p => ({ ...p, priority: parseInt(e.target.value) }))} /></FField>
+              <FField t={t} label="Priority (1=High)">
+                <input
+                  style={s.inp}
+                  type="number"
+                  min="1"
+                  max="10"
+                  value={form.priority === '' || form.priority == null || Number.isNaN(Number(form.priority))
+                    ? ''
+                    : form.priority}
+                  onChange={e => {
+                    const v = e.target.value;
+                    setForm((p) => ({
+                      ...p,
+                      priority: v === '' ? '' : (Number.isNaN(parseInt(v, 10)) ? '' : parseInt(v, 10)),
+                    }));
+                  }}
+                />
+              </FField>
               <FField t={t} label="Type">
                 <select style={s.inp} value={form.plan_type} onChange={e => setForm(p => ({ ...p, plan_type: e.target.value }))}>
                   <option value="scheduled">Scheduled</option>
@@ -982,7 +1131,16 @@ export default function ProductionPlanning() {
               <FField t={t} label="Notes" wide><input style={s.inp} value={form.notes}
                 onChange={e => setForm(p => ({ ...p, notes: e.target.value }))} placeholder="Optional notes..." /></FField>
             </div>
-            {msg && <p style={{ color: msg.startsWith('Error') ? '#ef4444' : t.brand, fontSize: 13 }}>{msg}</p>}
+            {msg && (
+              <p style={{
+                color: msgIsError ? '#ef4444' : msgIsWait ? '#b45309' : t.brand,
+                fontSize: 13,
+                fontWeight: 600,
+              }}
+              >
+                {msg}
+              </p>
+            )}
             <button style={s.submitBtn} type="submit">
               {form.plan_mode === 'single' && '✓ Create Plan'}
               {form.plan_mode === 'weekly' && '✓ Create Weekly Plan'}
@@ -1129,6 +1287,7 @@ export default function ProductionPlanning() {
                 {queue.map((p, idx) => {
                   const partLabel = planModelVariant(p, parts);
                   const wo = workOrders.find(w => w.id === p.work_order_id);
+                  const canStart = isPlanDateReached(p.plan_date);
                   return (
                   <div key={p.id} className={surfaceClass(t, 'raised')} style={{ ...s.pipelineItem, borderLeft: `3px solid ${idx === 0 ? t.accent : t.border}` }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -1158,11 +1317,17 @@ export default function ProductionPlanning() {
                     <div style={{ color: t.textMuted, fontSize: 11 }}>
                       Planned: {p.planned_qty} | CT: {formatCtSeconds(sumCt(p.process_time, p.loading_unloading))}s | {p.shift} | {p.plan_date}
                     </div>
-                    {idx === 0 && p.status === 'pending' && canEdit && canStart && (
+                    {idx === 0 && p.status === 'pending' && p.awaiting_model_change && (
+                      <span title="Approve on Model Change page to start plan and apply part on WI"
+                        style={{ fontSize: 10, color: '#f59e0b', marginTop: 4, display: 'inline-block', fontWeight: 600 }}>
+                        ⏳ Awaiting model change approval{p.model_change_request_id ? ` #${p.model_change_request_id}` : ''}
+                      </span>
+                    )}
+                    {idx === 0 && p.status === 'pending' && canEdit && canStart && !p.awaiting_model_change && (
                       <button style={{ ...s.miniBtn, background: t.accent, marginTop: 4 }}
                         onClick={() => setStatus(p.id, 'running')}>▶ Start</button>
                     )}
-                    {idx === 0 && p.status === 'pending' && canEdit && !canStart && (
+                    {idx === 0 && p.status === 'pending' && canEdit && !canStart && !p.awaiting_model_change && (
                       <span title={`Start allowed on or after ${p.plan_date}`}
                         style={{ fontSize: 10, color: t.textFaint, marginTop: 4, display: 'inline-block' }}>
                         🔒 Starts {p.plan_date}
@@ -1308,10 +1473,15 @@ export default function ProductionPlanning() {
                     </td>
                     <td style={s.td}>
                       <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                        {p.status === 'pending' && canEdit && canStart && (
+                        {p.status === 'pending' && p.awaiting_model_change && (
+                          <span title="Awaiting model change approval" style={{ fontSize: 10, color: '#f59e0b', fontWeight: 600 }}>
+                            ⏳ MC #{p.model_change_request_id || '—'}
+                          </span>
+                        )}
+                        {p.status === 'pending' && canEdit && canStart && !p.awaiting_model_change && (
                           <button style={{ ...s.miniBtn, background: t.accent }} onClick={() => setStatus(p.id, 'running')}>▶</button>
                         )}
-                        {p.status === 'pending' && canEdit && !canStart && (
+                        {p.status === 'pending' && canEdit && !canStart && !p.awaiting_model_change && (
                           <span title={`Start allowed on or after ${p.plan_date}`}
                             style={{ fontSize: 10, color: t.textFaint, alignSelf: 'center' }}>🔒</span>
                         )}
