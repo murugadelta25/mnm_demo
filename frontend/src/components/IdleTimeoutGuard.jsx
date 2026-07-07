@@ -7,7 +7,8 @@ import { hasPersistentSession } from '../auth/sessionPolicy';
 export const SESSION_EXPIRED_KEY = 'session_expired_reason';
 
 /**
- * Signs the user out after inactivity (see IDLE_TIMEOUT_MS).
+ * Signs the user out after inactivity (see IDLE_TIMEOUT_MS, default 60 minutes).
+ * Any mouse, keyboard, scroll, or touch activity keeps the session alive.
  * Skipped for persistent session users (e.g. sie_admin).
  */
 export default function IdleTimeoutGuard({ children }) {

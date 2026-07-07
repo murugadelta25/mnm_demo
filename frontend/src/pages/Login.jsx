@@ -25,7 +25,7 @@ export default function Login() {
   useEffect(() => {
     const reason = sessionStorage.getItem(SESSION_EXPIRED_KEY);
     if (reason === 'idle') {
-      setSessionNotice('Your session ended after 30 minutes of inactivity. Please sign in again.');
+      setSessionNotice('Your session ended after 60 minutes of inactivity. Please sign in again.');
       sessionStorage.removeItem(SESSION_EXPIRED_KEY);
     }
   }, []);
