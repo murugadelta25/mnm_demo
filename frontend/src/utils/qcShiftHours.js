@@ -26,7 +26,8 @@ export function shiftDurationMinutes(shiftStart, shiftEnd) {
 export function shiftHourCount(shiftStart, shiftEnd) {
   const total = shiftDurationMinutes(shiftStart, shiftEnd);
   if (total <= 0) return DEFAULT_OPERATOR_SLOTS;
-  return Math.min(MAX_OPERATOR_SLOTS, Math.max(1, Math.ceil(total / 60)));
+  const hours = Math.max(1, Math.floor((total + 59) / 60));
+  return Math.min(MAX_OPERATOR_SLOTS, hours);
 }
 
 export function buildHourSlots(shiftStart, shiftEnd, count) {

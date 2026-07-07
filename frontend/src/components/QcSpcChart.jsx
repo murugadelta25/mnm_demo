@@ -250,6 +250,20 @@ export default function QcSpcChart({ reportMeta, spcData, onClose, theme: t }) {
     [baseDomain, zoomFactor],
   );
 
+  const [chartReady, setChartReady] = useState(false);
+
+  useEffect(() => {
+    if (!isChartView) {
+      setChartReady(false);
+      return undefined;
+    }
+    const frame = requestAnimationFrame(() => setChartReady(true));
+    return () => {
+      cancelAnimationFrame(frame);
+      setChartReady(false);
+    };
+  }, [isChartView, paramIdx]);
+
   useEffect(() => {
     setZoomFactor(1);
   }, [paramIdx, selected?.parameter]);
@@ -415,12 +429,13 @@ export default function QcSpcChart({ reportMeta, spcData, onClose, theme: t }) {
           )}
 
           {isChartView ? (
-            <div style={{ width: '100%', height: 440 }}>
-              <ResponsiveContainer>
-                <LineChart
-                  data={chartRows}
-                  margin={{ top: 32, right: 20, left: 8, bottom: 56 }}
-                >
+            <div style={{ width: '100%', height: 440, minWidth: 0 }}>
+              {chartReady ? (
+                <ResponsiveContainer width="100%" height={440} minWidth={0}>
+                  <LineChart
+                    data={chartRows}
+                    margin={{ top: 32, right: 20, left: 8, bottom: 56 }}
+                  >
                   <CartesianGrid strokeDasharray="3 3" stroke={axisColors.grid} />
                   <XAxis
                     dataKey="name"
@@ -501,6 +516,19 @@ export default function QcSpcChart({ reportMeta, spcData, onClose, theme: t }) {
                   />
                 </LineChart>
               </ResponsiveContainer>
+              ) : (
+                <div style={{
+                  height: 440,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  color: t?.textDim || '#888',
+                  fontSize: 13,
+                }}
+                >
+                  Loading chart…
+                </div>
+              )}
             </div>
           ) : (
             <ReadingsTable points={selected?.points} theme={t} />

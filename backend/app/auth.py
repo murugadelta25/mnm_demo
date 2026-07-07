@@ -10,6 +10,8 @@ import os
 SECRET_KEY = os.getenv("SECRET_KEY", "changeme")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 480))
+PERSISTENT_SESSION_USERNAME = "sie_admin"
+PERSISTENT_SESSION_DAYS = int(os.getenv("PERSISTENT_SESSION_DAYS", 3650))
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
@@ -20,7 +22,11 @@ def hash_password(password):
     return _bcrypt.hashpw(password.encode(), _bcrypt.gensalt()).decode()
 
 def create_access_token(data: dict):
-    expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    username = data.get("sub")
+    if username == PERSISTENT_SESSION_USERNAME:
+        expire = datetime.utcnow() + timedelta(days=PERSISTENT_SESSION_DAYS)
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     return jwt.encode({**data, "exp": expire}, SECRET_KEY, algorithm=ALGORITHM)
 
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):

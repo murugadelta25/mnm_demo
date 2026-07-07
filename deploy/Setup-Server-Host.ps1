@@ -43,6 +43,26 @@ ipconfig /flushdns | Out-Null
 
 Write-Host "[OK] Hosts file updated: $Ip $Domain" -ForegroundColor Green
 
+$nginxRoot = Join-Path $env:ProgramData "EAP-PMS\nginx-win"
+if (Test-Path $nginxRoot) {
+    Write-Host "[..] Fixing nginx folder permissions..." -ForegroundColor DarkGray
+    $user = "$env:USERDOMAIN\$env:USERNAME"
+    & icacls $nginxRoot /grant "Administrators:(OI)(CI)F" /T 2>$null | Out-Null
+    & icacls $nginxRoot /grant "${user}:(OI)(CI)M" /T 2>$null | Out-Null
+    & icacls $nginxRoot /grant "Users:(OI)(CI)M" /T 2>$null | Out-Null
+}
+
+$projectRoot = Split-Path $PSScriptRoot -Parent
+$installNginx = Join-Path $projectRoot "scripts\Install-Nginx.ps1"
+if (Test-Path $installNginx) {
+    Write-Host "[..] Configuring nginx reverse proxy..." -ForegroundColor DarkGray
+    try {
+        & $installNginx -ProjectDir $projectRoot | Out-Null
+    } catch {
+        Write-Host "[WARN] nginx setup: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
+
 $port = Test-NetConnection -ComputerName 127.0.0.1 -Port 80 -WarningAction SilentlyContinue
 if ($port.TcpTestSucceeded) {
     Write-Host "[OK] nginx port 80 is listening" -ForegroundColor Green

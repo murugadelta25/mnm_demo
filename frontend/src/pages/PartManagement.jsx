@@ -234,7 +234,7 @@ function CollapsibleSection({ title, defaultOpen = true, headerExtra, children, 
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexShrink: 0 }}>
           {open && headerExtra}
-          <button type="button" onClick={() => setOpen((v) => !v)} style={s.btnSecondary}>
+          <button type="button" onClick={() => setOpen((v) => !v)} style={open ? s.btnHide : s.btnShow}>
             {open ? 'Hide' : 'Show'}
           </button>
         </div>
@@ -309,7 +309,7 @@ function DynamicParamTable({
       s={s}
       summary={`${rows.length} row(s) · ${columns.length} column(s)`}
       headerExtra={(
-        <button type="button" onClick={addRow} style={s.btnSecondary}>+ Add Row</button>
+        <button type="button" onClick={addRow} style={s.btnAddRow}>+ Add Row</button>
       )}
     >
       <div style={{
@@ -321,7 +321,7 @@ function DynamicParamTable({
           <span style={{ fontSize: 12, fontWeight: 600, color: t.text }}>
             Columns (rename or add — shared by all rows)
           </span>
-          <button type="button" onClick={addColumn} style={s.btnSecondary}>+ Add Column</button>
+          <button type="button" onClick={addColumn} style={s.btnAddColumn}>+ Add Column</button>
         </div>
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
           {columns.map((col) => (
@@ -1079,7 +1079,7 @@ export default function PartManagement() {
             s={s}
             summary={`${form.qc_parameters.length} parameter(s)`}
             headerExtra={(
-              <button type="button" onClick={addQcRow} style={s.btnSecondary}>+ Add Row</button>
+              <button type="button" onClick={addQcRow} style={s.btnAddRow}>+ Add Row</button>
             )}
           >
             <div style={{
@@ -1091,7 +1091,7 @@ export default function PartManagement() {
                 <span style={{ fontSize: 12, fontWeight: 600, color: t.text }}>
                   Spec columns (shared by all parameters — rename for each customer)
                 </span>
-                <button type="button" onClick={addQcColumn} style={s.btnSecondary}>+ Add Column</button>
+                <button type="button" onClick={addQcColumn} style={s.btnAddColumn}>+ Add Column</button>
               </div>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                 {(form.qc_column_schema || DEFAULT_QC_COLUMNS).map((col) => (

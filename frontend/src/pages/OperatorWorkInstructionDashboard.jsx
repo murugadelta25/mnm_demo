@@ -56,6 +56,12 @@ export default function OperatorWorkInstructionDashboard() {
   const navigate = useNavigate();
 
   const [machines, setMachines] = useState([]);
+  const [stationId, setStationId] = useState(() => {
+    const q = searchParams.get('station_id');
+    if (q) return Number(q);
+    const saved = loadDraft(DRAFT_KEYS.wiDashboard);
+    return saved?.stationId ?? null;
+  });
   const [machineId, setMachineId] = useState(() => {
     const q = searchParams.get('machine_id');
     if (q) return Number(q);
@@ -72,19 +78,65 @@ export default function OperatorWorkInstructionDashboard() {
 
   const shift = useMemo(() => getCurrentShift(config), [config]);
 
+  const stations = useMemo(() => {
+    const map = new Map();
+    machines.forEach((m) => {
+      if (!map.has(m.station_id)) {
+        map.set(m.station_id, {
+          id: m.station_id,
+          name: m.station_name || `Station ${m.station_id}`,
+          machines: [],
+        });
+      }
+      map.get(m.station_id).machines.push(m);
+    });
+    return [...map.values()].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+  }, [machines]);
+
+  const stationMachines = useMemo(
+    () => machines.filter((m) => m.station_id === stationId),
+    [machines, stationId],
+  );
+
   const loadMachines = useCallback(async () => {
     try {
       const { data } = await api.get('/api/operator-dashboard/machines');
       setMachines(data);
-      if (!machineId && data.length > 0) {
-        const q = searchParams.get('machine_id');
-        if (q) setMachineId(Number(q));
-        else setMachineId(data[0].id);
-      }
     } catch {
       setMachines([]);
     }
-  }, [machineId, searchParams]);
+  }, []);
+
+  // Keep station/machine in sync (cascade defaults, URL/draft restore)
+  useEffect(() => {
+    if (!machines.length) return;
+
+    const selected = machines.find((m) => m.id === machineId);
+    if (selected) {
+      if (stationId !== selected.station_id) setStationId(selected.station_id);
+      return;
+    }
+
+    const qMachine = Number(searchParams.get('machine_id')) || null;
+    const qStation = Number(searchParams.get('station_id')) || null;
+    const saved = loadDraft(DRAFT_KEYS.wiDashboard);
+
+    let nextMachineId = qMachine || saved?.machineId || null;
+    let nextStationId = qStation || saved?.stationId || stationId || null;
+
+    const fromUrlOrDraft = machines.find((m) => m.id === nextMachineId);
+    if (fromUrlOrDraft) {
+      nextStationId = fromUrlOrDraft.station_id;
+    } else if (!(nextStationId && machines.some((m) => m.station_id === nextStationId))) {
+      nextStationId = machines[0].station_id;
+    }
+
+    const inStation = machines.filter((m) => m.station_id === nextStationId);
+    nextMachineId = inStation[0]?.id ?? machines[0].id;
+
+    setStationId(nextStationId);
+    setMachineId(nextMachineId);
+  }, [machines, machineId, stationId, searchParams]);
 
   const loadContext = useCallback(async () => {
     if (!machineId) return;
@@ -122,8 +174,10 @@ export default function OperatorWorkInstructionDashboard() {
   useEffect(() => { loadContext(); }, [loadContext]);
 
   useEffect(() => {
-    if (machineId) saveDraft(DRAFT_KEYS.wiDashboard, { machineId });
-  }, [machineId]);
+    if (machineId || stationId) {
+      saveDraft(DRAFT_KEYS.wiDashboard, { machineId, stationId });
+    }
+  }, [machineId, stationId]);
 
   useWebSocket((msg) => {
     const type = msg?.type;
@@ -156,21 +210,30 @@ export default function OperatorWorkInstructionDashboard() {
     }
   });
 
-  const handleMachineChange = (id) => {
-    setMachineId(id);
-    setSearchParams({ machine_id: String(id) });
+  const syncUrl = (nextStationId, nextMachineId) => {
+    const params = {};
+    if (nextStationId) params.station_id = String(nextStationId);
+    if (nextMachineId) params.machine_id = String(nextMachineId);
+    setSearchParams(params);
   };
 
-  const stations = useMemo(() => {
-    const map = new Map();
-    machines.forEach((m) => {
-      if (!map.has(m.station_id)) {
-        map.set(m.station_id, { id: m.station_id, name: m.station_name, machines: [] });
-      }
-      map.get(m.station_id).machines.push(m);
-    });
-    return [...map.values()];
-  }, [machines]);
+  const handleStationChange = (id) => {
+    const nextStationId = Number(id) || null;
+    const inStation = machines.filter((m) => m.station_id === nextStationId);
+    const nextMachineId = inStation[0]?.id ?? null;
+    setStationId(nextStationId);
+    setMachineId(nextMachineId);
+    syncUrl(nextStationId, nextMachineId);
+  };
+
+  const handleMachineChange = (id) => {
+    const nextMachineId = Number(id) || null;
+    const m = machines.find((row) => row.id === nextMachineId);
+    const nextStationId = m?.station_id ?? stationId;
+    setStationId(nextStationId);
+    setMachineId(nextMachineId);
+    syncUrl(nextStationId, nextMachineId);
+  };
 
   const documents = useMemo(
     () => (context?.documents || []).filter((d) => d.file_url),
@@ -202,20 +265,39 @@ export default function OperatorWorkInstructionDashboard() {
         title="WORK INSTRUCTIONS"
         onRefresh={loadContext}
         extra={(
-          <select
-            value={machineId || ''}
-            onChange={(e) => handleMachineChange(Number(e.target.value))}
-            style={s.selector}
-            aria-label="Select station and machine"
-          >
-            {stations.map((st) => (
-              <optgroup key={st.id} label={st.name || `Station ${st.id}`}>
-                {st.machines.map((m) => (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: t.textMuted }}>
+              Station
+              <select
+                value={stationId || ''}
+                onChange={(e) => handleStationChange(e.target.value)}
+                style={s.selector}
+                aria-label="Select station"
+              >
+                {stations.length === 0 && <option value="">No stations</option>}
+                {stations.map((st) => (
+                  <option key={st.id} value={st.id}>
+                    {st.name || `Station ${st.id}`}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: t.textMuted }}>
+              Machine
+              <select
+                value={machineId || ''}
+                onChange={(e) => handleMachineChange(e.target.value)}
+                style={s.selector}
+                aria-label="Select machine"
+                disabled={!stationId || stationMachines.length === 0}
+              >
+                {stationMachines.length === 0 && <option value="">No machines</option>}
+                {stationMachines.map((m) => (
                   <option key={m.id} value={m.id}>{m.name}</option>
                 ))}
-              </optgroup>
-            ))}
-          </select>
+              </select>
+            </label>
+          </div>
         )}
       />
 

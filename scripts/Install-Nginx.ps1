@@ -10,6 +10,45 @@ $ErrorActionPreference = "Stop"
 
 $script:NginxRoot = Join-Path $env:ProgramData "EAP-PMS\nginx-win"
 
+function Test-IsAdministrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Test-NginxPrefixWritable {
+    param([string]$Prefix)
+    $confDir = Join-Path $Prefix "conf"
+    New-Item -ItemType Directory -Force -Path $confDir | Out-Null
+    $probe = Join-Path $confDir ".write_probe"
+    try {
+        [System.IO.File]::WriteAllText($probe, "ok", [System.Text.UTF8Encoding]::new($false))
+        Remove-Item $probe -Force -ErrorAction SilentlyContinue
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Repair-NginxPrefixAcl {
+    param([string]$Prefix)
+    if (-not (Test-IsAdministrator)) { return $false }
+    New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
+    $user = "$env:USERDOMAIN\$env:USERNAME"
+    & icacls $Prefix /grant "Administrators:(OI)(CI)F" /T 2>$null | Out-Null
+    & icacls $Prefix /grant "${user}:(OI)(CI)M" /T 2>$null | Out-Null
+    & icacls $Prefix /grant "Users:(OI)(CI)M" /T 2>$null | Out-Null
+    return (Test-NginxPrefixWritable -Prefix $Prefix)
+}
+
+function Clear-NginxConfReadOnly {
+    param([string]$Prefix)
+    $confFile = Join-Path $Prefix "conf\nginx.conf"
+    if (Test-Path $confFile) {
+        attrib -R $confFile 2>$null | Out-Null
+    }
+}
+
 function Write-NginxStep {
     param([string]$Message)
     Write-Host "  $Message" -ForegroundColor DarkGray
@@ -149,7 +188,17 @@ http {
     $serverBlock
 }
 "@
-    [System.IO.File]::WriteAllText((Join-Path $confDir "nginx.conf"), $mainConf, [System.Text.UTF8Encoding]::new($false))
+    $confFile = Join-Path $confDir "nginx.conf"
+    try {
+        [System.IO.File]::WriteAllText($confFile, $mainConf, [System.Text.UTF8Encoding]::new($false))
+    } catch {
+        Clear-NginxConfReadOnly -Prefix $NginxPrefix
+        if (Repair-NginxPrefixAcl -Prefix $NginxPrefix) {
+            [System.IO.File]::WriteAllText($confFile, $mainConf, [System.Text.UTF8Encoding]::new($false))
+        } else {
+            throw
+        }
+    }
 }
 
 function Ensure-HostsEntry {
@@ -225,19 +274,36 @@ function Open-FirewallPort80 {
 Write-NginxStep "Using nginx root: $script:NginxRoot"
 $domainCfg = Get-DomainConfig -Root $ProjectDir
 
+if (-not (Test-IsAdministrator)) {
+    Write-Host "  [WARN] Not running as Administrator - nginx needs port 80 and hosts file access." -ForegroundColor Yellow
+    Write-Host "  [WARN] Right-click PowerShell -> Run as administrator, then: .\run.ps1" -ForegroundColor Yellow
+    Write-Host "  [WARN] Or: deploy\Setup-Server-Host.bat (Run as administrator)" -ForegroundColor Yellow
+    if (-not (Test-NginxPrefixWritable -Prefix $script:NginxRoot)) {
+        throw "Cannot write nginx config under $script:NginxRoot (access denied). Run as Administrator once to fix permissions."
+    }
+}
+
 Write-NginxStep "Ensuring nginx binaries..."
 $nginxExe = Ensure-NginxWin -TargetDir $script:NginxRoot -ProjectDir $ProjectDir
 if (-not (Test-Path $nginxExe)) {
     throw "nginx.exe not found at $nginxExe"
 }
 
-Write-NginxStep "Writing nginx.conf..."
-Write-NginxConf -NginxPrefix $script:NginxRoot -DomainCfg $domainCfg -BackendPort $BackendPort -FrontendPort $FrontendPort
+if (-not (Test-NginxPrefixWritable -Prefix $script:NginxRoot)) {
+    Write-NginxStep "Repairing nginx folder permissions..."
+    if (-not (Repair-NginxPrefixAcl -Prefix $script:NginxRoot)) {
+        throw "Cannot write to $script:NginxRoot - run PowerShell as Administrator."
+    }
+}
 
 Ensure-NginxDirs -Prefix $script:NginxRoot
 
 Write-NginxStep "Stopping previous nginx instance (if any)..."
 Stop-NginxInstance -Exe $nginxExe -Prefix $script:NginxRoot
+Clear-NginxConfReadOnly -Prefix $script:NginxRoot
+
+Write-NginxStep "Writing nginx.conf..."
+Write-NginxConf -NginxPrefix $script:NginxRoot -DomainCfg $domainCfg -BackendPort $BackendPort -FrontendPort $FrontendPort
 
 Write-NginxStep "Starting nginx on port 80..."
 Start-NginxInstance -Exe $nginxExe -Prefix $script:NginxRoot

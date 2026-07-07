@@ -124,12 +124,22 @@ def default_instances_meta(hour_slots: List[dict]) -> Dict[str, dict]:
 
 def ensure_approval_structure(approval: Optional[dict], hour_slots: List[dict]) -> dict:
     approval = dict(approval or {})
-    instances = dict(approval.get("instances") or {})
+    valid_keys = {"first", *(slot["key"] for slot in hour_slots)}
+    instances = {
+        k: v for k, v in dict(approval.get("instances") or {}).items()
+        if k in valid_keys
+    }
     for key, default in default_instances_meta(hour_slots).items():
         if key not in instances:
             instances[key] = default
         else:
-            instances[key] = {**default, **instances[key]}
+            # Shift config owns slot labels and hour windows.
+            overrides = {"label": default["label"]}
+            if "hour_start" in default:
+                overrides["hour_start"] = default["hour_start"]
+            if "hour_end" in default:
+                overrides["hour_end"] = default["hour_end"]
+            instances[key] = {**default, **instances[key], **overrides}
     approval["instances"] = instances
     approval["hour_slots"] = hour_slots
     approval["operator_slot_count"] = len(hour_slots)

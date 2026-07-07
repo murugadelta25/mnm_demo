@@ -1,11 +1,16 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
+import { PlatformAuthProvider } from './context/PlatformAuthContext';
+import { FeatureFlagsProvider } from './context/FeatureFlagsContext';
 import { ThemeProvider } from './context/ThemeContext';
 import { BrandingProvider } from './context/BrandingContext';
 import { EmbedProvider } from './context/EmbedContext';
 import AppShell from './components/layout/AppShell';
 import IdleTimeoutGuard from './components/IdleTimeoutGuard';
+import FeatureRouteGuard from './components/FeatureRouteGuard';
 import Login from './pages/Login';
+import PlatformLogin from './pages/platform/PlatformLogin';
+import FeatureModulesAdmin from './pages/platform/FeatureModulesAdmin';
 import Dashboard from './pages/Dashboard';
 import DataEntry from './pages/DataEntry';
 import ModelChange from './pages/ModelChange';
@@ -32,7 +37,9 @@ function AuthenticatedShell() {
   if (!user) return <Navigate to="/login" replace />;
   return (
     <IdleTimeoutGuard>
-      <AppShell />
+      <FeatureRouteGuard>
+        <AppShell />
+      </FeatureRouteGuard>
     </IdleTimeoutGuard>
   );
 }
@@ -42,6 +49,10 @@ function AppRoutes() {
 
   return (
     <Routes>
+      <Route path="/platform/login" element={<PlatformLogin />} />
+      <Route path="/platform/modules" element={<FeatureModulesAdmin />} />
+      <Route path="/platform" element={<Navigate to="/platform/login" replace />} />
+
       <Route path="/login" element={<Login />} />
       <Route element={<AuthenticatedShell />}>
         <Route path="/dashboard" element={<Dashboard />} />
@@ -72,17 +83,21 @@ function AppRoutes() {
 export default function App() {
   return (
     <ThemeProvider>
-      <AuthProvider>
-        <BrowserRouter>
-          <BrandingProvider>
-            <EmbedProvider>
-              <ConfigProvider>
-                <AppRoutes />
-              </ConfigProvider>
-            </EmbedProvider>
-          </BrandingProvider>
-        </BrowserRouter>
-      </AuthProvider>
+      <FeatureFlagsProvider>
+        <PlatformAuthProvider>
+          <AuthProvider>
+            <BrowserRouter>
+              <BrandingProvider>
+                <EmbedProvider>
+                  <ConfigProvider>
+                    <AppRoutes />
+                  </ConfigProvider>
+                </EmbedProvider>
+              </BrandingProvider>
+            </BrowserRouter>
+          </AuthProvider>
+        </PlatformAuthProvider>
+      </FeatureFlagsProvider>
     </ThemeProvider>
   );
 }

@@ -52,21 +52,71 @@ def _live_entry_date(shift: dict) -> date:
     return today
 
 
-def _resolve_running_plan(db: Session, machine_id: int, entry_date: date, shift: str):
-    plan = db.query(ProductionPlan).filter(
-        ProductionPlan.machine_id == machine_id,
-        ProductionPlan.plan_date == entry_date,
-        ProductionPlan.shift == shift,
-        ProductionPlan.status == "running",
-    ).order_by(ProductionPlan.priority).first()
-    if plan:
-        return plan
-    return db.query(ProductionPlan).filter(
-        ProductionPlan.machine_id == machine_id,
-        ProductionPlan.plan_date == entry_date,
-        ProductionPlan.shift == shift,
-        ProductionPlan.status.in_(["pending", "running"]),
-    ).order_by(ProductionPlan.priority).first()
+def _plan_query(db: Session, entry_date: date, shift: str, statuses):
+    return (
+        db.query(ProductionPlan)
+        .filter(
+            ProductionPlan.plan_date == entry_date,
+            ProductionPlan.shift == shift,
+            ProductionPlan.status.in_(statuses),
+        )
+        .order_by(ProductionPlan.priority, ProductionPlan.id)
+    )
+
+
+def _resolve_running_plan(db: Session, machine_id: int, station_id: Optional[int], entry_date: date, shift: str):
+    """
+    Resolve the active plan for WI / operator context.
+
+    Station-level planning is the default: machines in a station share the same
+    part / WI details. Resolution order:
+      1. Plan assigned to this machine
+      2. Station-level plan (machine_id is NULL, station_no = station)
+      3. Any plan on the same station (sibling machine)
+    """
+    for statuses in (("running",), ("pending", "running")):
+        plan = (
+            _plan_query(db, entry_date, shift, statuses)
+            .filter(ProductionPlan.machine_id == machine_id)
+            .first()
+        )
+        if plan:
+            return plan
+
+        if not station_id:
+            continue
+
+        plan = (
+            _plan_query(db, entry_date, shift, statuses)
+            .filter(
+                ProductionPlan.station_no == station_id,
+                ProductionPlan.machine_id.is_(None),
+            )
+            .first()
+        )
+        if plan:
+            return plan
+
+        plan = (
+            _plan_query(db, entry_date, shift, statuses)
+            .filter(ProductionPlan.station_no == station_id)
+            .first()
+        )
+        if plan:
+            return plan
+
+    return None
+
+
+def _resolve_part_for_plan(db: Session, plan: Optional[ProductionPlan]):
+    """Find Part Master row from plan variant / operation fields."""
+    if not plan:
+        return None
+    for key in (plan.model_variant, plan.current_operation, plan.next_operation):
+        part = _find_part_by_variant(db, key)
+        if part:
+            return part
+    return None
 
 
 @router.get("/context")
@@ -102,12 +152,12 @@ def get_dashboard_context(
     if not entry_date:
         entry_date = _live_entry_date(shift_obj or {"start": "08:00", "end": "20:00"})
 
-    plan = _resolve_running_plan(db, machine_id, entry_date, shift_id)
-    model_variant = plan.model_variant if plan else None
+    plan = _resolve_running_plan(db, machine_id, machine.station_id, entry_date, shift_id)
+    model_variant = (plan.model_variant or plan.current_operation) if plan else None
     process_time = float(plan.process_time) if plan and plan.process_time else None
     loading_unloading = float(plan.loading_unloading) if plan and plan.loading_unloading else 10
 
-    part = _find_part_by_variant(db, model_variant) if model_variant else None
+    part = _resolve_part_for_plan(db, plan)
     if part:
         if part.process_time:
             process_time = float(part.process_time)

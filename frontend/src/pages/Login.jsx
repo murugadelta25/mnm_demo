@@ -1,12 +1,14 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { useFeatureFlags } from '../context/FeatureFlagsContext';
 import { useBranding } from '../context/BrandingContext';
 import { useTheme } from '../context/ThemeContext';
 import LogoIcon from '../components/graphics/LogoIcon';
 import ThemeModeToggler from '../components/layout/ThemeModeToggler';
 import api from '../api/client';
 import { SESSION_EXPIRED_KEY } from '../components/IdleTimeoutGuard';
+import { isFeatureEnabled } from '../config/featureRegistry';
 
 export default function Login() {
   const [creds, setCreds] = useState({ username: '', password: '' });
@@ -15,6 +17,7 @@ export default function Login() {
   const [loading, setLoading] = useState(false);
   const [networkUrls, setNetworkUrls] = useState([]);
   const { login } = useAuth();
+  const { modules } = useFeatureFlags();
   const nav = useNavigate();
   const { theme: t } = useTheme();
   const { siteTitle } = useBranding();
@@ -42,8 +45,11 @@ export default function Login() {
     setLoading(true);
     try {
       const role = await login(creds.username, creds.password);
-      if (role === 'maintenance') nav('/maintenance');
-      else nav('/dashboard');
+      if (role === 'maintenance' && isFeatureEnabled('maintenance.dashboard', modules)) {
+        nav('/maintenance');
+      } else {
+        nav('/dashboard');
+      }
     } catch (err) {
       if (err.code === 'ECONNABORTED' || err.message?.includes('timeout') || err.code === 'ERR_NETWORK') {
         setError('Cannot reach the server. Make sure the backend is running on port 8010.');

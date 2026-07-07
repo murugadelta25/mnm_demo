@@ -47,7 +47,8 @@ export function ThemeProvider({ children }) {
     r.style.setProperty('--nav-focus', theme.navFocus);
     r.style.setProperty('--scroll-track', theme.scrollTrack);
     r.style.setProperty('--scroll-thumb', theme.scrollThumb);
-    r.style.setProperty('--content-bg', theme.contentBg);
+    if (theme.contentBg) r.style.setProperty('--content-bg', theme.contentBg);
+    else r.style.removeProperty('--content-bg');
     r.style.setProperty('--nav-bg', theme.navBg);
     r.style.setProperty('--appbar-bg', theme.appBarBg);
     r.style.setProperty('--appbar-border', theme.appBarBorder);

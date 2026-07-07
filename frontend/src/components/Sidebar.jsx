@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { useFeatureFlags } from '../context/FeatureFlagsContext';
 import { useTheme } from '../context/ThemeContext';
 import { getNavigationForRole } from '../navigation';
 import {
@@ -15,16 +16,11 @@ export default function Sidebar({ expanded = true }) {
   const { pathname } = useLocation();
   const nav = useNavigate();
   const { theme: t } = useTheme();
-  const [openGroups, setOpenGroups] = useState({
-    Production: true,
-    QC: true,
-    Maintenance: true,
-    Alerts: true,
-    Settings: true,
-  });
+  const [openGroups, setOpenGroups] = useState({});
 
+  const { modules } = useFeatureFlags();
   const toggleGroup = (g) => setOpenGroups((p) => ({ ...p, [g]: !p[g] }));
-  const MENU = getNavigationForRole(user?.role);
+  const MENU = getNavigationForRole(user?.role, modules);
 
   const navWidth = expanded ? 'var(--titan-nav-width)' : '0px';
   const accentNav = t.navStyle === 'accent';
@@ -124,12 +120,12 @@ export default function Sidebar({ expanded = true }) {
                     </span>
                   </span>
                   <span style={{ color: navGroupColor, display: 'inline-flex' }}>
-                    {renderNavIcon(openGroups[section.group] ? EXPAND_LESS_ICON : EXPAND_MORE_ICON)}
+                    {renderNavIcon(openGroups[section.group] === false ? EXPAND_MORE_ICON : EXPAND_LESS_ICON)}
                   </span>
                 </button>
               )}
 
-              {(!section.group || openGroups[section.group]) &&
+              {(!section.group || openGroups[section.group] !== false) &&
                 visibleItems.map((item) => {
                   const active = pathname === item.path;
                   const isNested = Boolean(section.group);

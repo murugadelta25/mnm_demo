@@ -15,11 +15,20 @@ from .routers import operator_dashboard as operator_dashboard_router
 from .routers import qc_inspection as qc_inspection_router
 from .routers import deviation_alerts as deviation_alerts_router
 from .routers import notifications as notifications_router
+from .routers import platform as platform_router
+from .routers import features as features_router
 from .ws_manager import manager
 from sqlalchemy import text, inspect
 from sqlalchemy.orm import Session
 from .models import get_db, engine
 from .scheduler_service import start_scheduler, stop_scheduler
+
+
+def _run_migrate(label: str, fn):
+    try:
+        fn()
+    except Exception as exc:
+        print(f"[WARN] {label} migration skipped: {exc}")
 
 
 def _ensure_work_instruction_tables():
@@ -43,24 +52,44 @@ def _ensure_work_instruction_tables():
         print(f"[WARN] Work instruction table bootstrap failed: {exc}")
     try:
         from migrate_qc_enhancements import main as qc_migrate
-        qc_migrate()
+        _run_migrate("qc_enhancements", qc_migrate)
     except Exception as exc:
-        print(f"[WARN] QC enhancement migration skipped: {exc}")
+        print(f"[WARN] QC enhancement import failed: {exc}")
     try:
         from migrate_quality_role import main as quality_role_migrate
-        quality_role_migrate()
+        _run_migrate("quality_role", quality_role_migrate)
     except Exception as exc:
-        print(f"[WARN] Quality role migration skipped: {exc}")
+        print(f"[WARN] Quality role import failed: {exc}")
     try:
         from migrate_operation_code import main as operation_code_migrate
-        operation_code_migrate()
+        _run_migrate("operation_code", operation_code_migrate)
     except Exception as exc:
-        print(f"[WARN] operation_code migration skipped: {exc}")
+        print(f"[WARN] operation_code import failed: {exc}")
     try:
         from migrate_work_orders import main as work_orders_migrate
-        work_orders_migrate()
+        _run_migrate("work_orders", work_orders_migrate)
     except Exception as exc:
-        print(f"[WARN] work_orders migration skipped: {exc}")
+        print(f"[WARN] work_orders import failed: {exc}")
+    try:
+        from migrate_model_change_plan_link import main as mcr_migrate
+        _run_migrate("model_change_plan_link", mcr_migrate)
+    except Exception as exc:
+        print(f"[WARN] model_change_plan_link import failed: {exc}")
+    try:
+        from migrate_oee_machine import run as oee_machine_migrate
+        _run_migrate("oee_machine", oee_machine_migrate)
+    except Exception as exc:
+        print(f"[WARN] oee_machine import failed: {exc}")
+    try:
+        from migrate_part_doc_types import main as part_doc_migrate
+        _run_migrate("part_doc_types", part_doc_migrate)
+    except Exception as exc:
+        print(f"[WARN] part_doc_types import failed: {exc}")
+    try:
+        from migrate_part_process_sheet import main as process_sheet_migrate
+        _run_migrate("part_process_sheet", process_sheet_migrate)
+    except Exception as exc:
+        print(f"[WARN] part_process_sheet import failed: {exc}")
 
 
 def _ensure_deviation_alert_table():
@@ -124,6 +153,8 @@ app.include_router(operator_dashboard_router.router)
 app.include_router(qc_inspection_router.router)
 app.include_router(deviation_alerts_router.router)
 app.include_router(notifications_router.router)
+app.include_router(platform_router.router)
+app.include_router(features_router.router)
 
 # Serve uploaded machine images — pathlib works on both Windows and Linux
 STATIC_DIR = Path(__file__).parent.parent / "static"

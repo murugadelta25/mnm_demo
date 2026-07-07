@@ -6,6 +6,7 @@ import { Link, Outlet } from 'react-router-dom';
 import { useEmbed } from '../../context/EmbedContext';
 import { useTheme } from '../../context/ThemeContext';
 import { useConfig } from '../../context/ConfigContext';
+import { useFeatureFlags } from '../../context/FeatureFlagsContext';
 import { contentAreaStyle } from '../../themes/pmsThemes';
 import Sidebar from '../Sidebar';
 import AppBar from './AppBar';
@@ -15,7 +16,8 @@ export default function AppShell() {
   const { config } = useConfig();
   const { isIntegration, navHidden, toggleNav } = useEmbed();
   const [navOpen, setNavOpen] = useState(true);
-  const needsFactorySetup = config?.factory?.configured !== true;
+  const { isEnabled } = useFeatureFlags();
+  const needsFactorySetup = config?.factory?.configured !== true && isEnabled('settings.factory_setup');
 
   const sidebarExpanded = isIntegration ? !navHidden : navOpen;
   const onMenuClick = isIntegration ? toggleNav : () => setNavOpen((value) => !value);

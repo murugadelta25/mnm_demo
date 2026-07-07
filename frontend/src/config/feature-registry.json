@@ -1,0 +1,172 @@
+{
+  "$schema": "Feature registry — add new pages here only; nav, routes, and /platform/modules auto-update.",
+  "version": 1,
+  "standalone": [
+    {
+      "id": "dashboard",
+      "label": "Dashboard",
+      "path": "/dashboard",
+      "navIcon": "dashboard",
+      "alwaysEnabled": true
+    }
+  ],
+  "groups": [
+    {
+      "id": "production",
+      "label": "Production",
+      "navIcon": "production",
+      "roles": ["admin", "supervisor", "operator"],
+      "items": [
+        {
+          "id": "production.work_orders",
+          "label": "Work Orders",
+          "path": "/work-orders",
+          "navIcon": "workOrders",
+          "roles": ["admin", "supervisor", "operator"]
+        },
+        {
+          "id": "production.planning",
+          "label": "Planning",
+          "path": "/planning",
+          "navIcon": "planning",
+          "roles": ["admin", "supervisor", "operator"]
+        },
+        {
+          "id": "production.data_entry",
+          "label": "Data Entry",
+          "path": "/entry",
+          "navIcon": "entry",
+          "roles": ["admin", "supervisor", "operator"]
+        },
+        {
+          "id": "production.hourly_output",
+          "label": "Hourly Output",
+          "path": "/hourly-output",
+          "navIcon": "hourlyOutput",
+          "roles": ["admin", "supervisor", "operator"]
+        },
+        {
+          "id": "production.model_change",
+          "label": "Model Change",
+          "path": "/model-change",
+          "navIcon": "modelChange",
+          "roles": ["admin", "supervisor", "operator"]
+        }
+      ]
+    },
+    {
+      "id": "qc",
+      "label": "QC",
+      "navIcon": "qc",
+      "roles": ["admin", "supervisor", "operator", "quality"],
+      "items": [
+        {
+          "id": "qc.approvals",
+          "label": "QC Approvals",
+          "path": "/qc-approvals",
+          "navIcon": "workInstructions",
+          "roles": ["admin", "supervisor", "quality", "operator"]
+        },
+        {
+          "id": "qc.work_instructions",
+          "label": "Work Instructions",
+          "path": "/work-instructions",
+          "navIcon": "workInstructions"
+        }
+      ]
+    },
+    {
+      "id": "maintenance",
+      "label": "Maintenance",
+      "navIcon": "maintenance",
+      "roles": ["admin", "supervisor", "operator", "maintenance"],
+      "items": [
+        {
+          "id": "maintenance.breakdown",
+          "label": "Breakdown",
+          "path": "/breakdown",
+          "navIcon": "breakdown",
+          "roles": ["admin", "supervisor", "operator"]
+        },
+        {
+          "id": "maintenance.dashboard",
+          "label": "Maintenance",
+          "path": "/maintenance",
+          "navIcon": "maintenance",
+          "roles": ["admin", "maintenance"]
+        },
+        {
+          "id": "maintenance.loss_tracker",
+          "label": "Loss Tracker",
+          "path": "/loss-tracker",
+          "navIcon": "lossTracker",
+          "roles": ["admin", "supervisor", "maintenance"]
+        }
+      ]
+    },
+    {
+      "id": "alerts",
+      "label": "Alerts",
+      "navIcon": "alerts",
+      "roles": ["admin", "supervisor"],
+      "items": [
+        {
+          "id": "alerts.email",
+          "label": "Email Alerts",
+          "path": "/alerts/email",
+          "navIcon": "emailAlerts"
+        }
+      ]
+    },
+    {
+      "id": "settings",
+      "label": "Settings",
+      "navIcon": "settings",
+      "roles": ["admin"],
+      "items": [
+        {
+          "id": "settings.users",
+          "label": "Users",
+          "path": "/users",
+          "navIcon": "users",
+          "roles": ["admin"]
+        },
+        {
+          "id": "settings.parts",
+          "label": "Part Master",
+          "path": "/parts",
+          "navIcon": "parts",
+          "roles": ["admin", "supervisor"]
+        },
+        {
+          "id": "settings.wi_revisions",
+          "label": "WI Revisions",
+          "path": "/wi-revisions",
+          "navIcon": "workInstructions",
+          "roles": ["admin", "supervisor"]
+        },
+        {
+          "id": "settings.machines",
+          "label": "Machines",
+          "path": "/machines",
+          "navIcon": "machines",
+          "roles": ["admin"]
+        },
+        {
+          "id": "settings.factory_setup",
+          "label": "Factory Setup",
+          "path": "/factory-setup",
+          "navIcon": "config",
+          "roles": ["admin"]
+        },
+        {
+          "id": "settings.configuration",
+          "label": "Configuration",
+          "path": "/config",
+          "navIcon": "config",
+          "roles": ["admin"]
+        }
+      ]
+    }
+  ]
+}
