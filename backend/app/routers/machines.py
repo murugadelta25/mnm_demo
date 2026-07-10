@@ -241,6 +241,15 @@ async def push_status(machine_id: int, data: StatusPush,
         ).first()
         if active_bd:
             return {"id": machine_id, "status": m.status, "source": data.source, "note": "breakdown ticket active"}
+        # Active model-change (setting change in progress) takes priority — don't override
+        active_mc = db.query(ModelChangeRequest).filter(
+            ModelChangeRequest.machine_id == machine_id,
+            ModelChangeRequest.status.in_(["approved", "in_progress"]),
+        ).first()
+        if active_mc:
+            return {"id": machine_id, "status": m.status, "source": data.source, "note": "setting change active"}
+    if m.status == data.status:
+        return {"id": machine_id, "status": m.status, "source": data.source, "note": "no change"}
     m.status = data.status
     _log_status(machine_id, data.status, data.source or "api", db)
     db.commit()

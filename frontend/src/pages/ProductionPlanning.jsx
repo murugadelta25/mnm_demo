@@ -1125,8 +1125,15 @@ export default function ProductionPlanning() {
                 <select style={s.inp} value={form.plan_type} onChange={e => setForm(p => ({ ...p, plan_type: e.target.value }))}>
                   <option value="scheduled">Scheduled</option>
                   <option value="urgent">Urgent</option>
-                  <option value="trial">Trial</option>
+                  <option value="trial">Trial (concurrent — allows running alongside existing plan)</option>
                 </select>
+                {form.plan_type === 'trial' && (
+                  <div style={{ fontSize: 11, color: '#8b5cf6', marginTop: 4, padding: '4px 8px',
+                                background: '#8b5cf615', borderRadius: 4, border: '1px solid #8b5cf644' }}>
+                    ⚠ Trial mode: this plan will run concurrently with any existing running plan on the same machine.
+                    For normal production, use Scheduled — it will auto-pause the previous plan.
+                  </div>
+                )}
               </FField>
               <FField t={t} label="Notes" wide><input style={s.inp} value={form.notes}
                 onChange={e => setForm(p => ({ ...p, notes: e.target.value }))} placeholder="Optional notes..." /></FField>

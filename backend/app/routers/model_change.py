@@ -62,6 +62,16 @@ def _start_linked_plan(mcr, db):
     if not plan:
         return None
     if plan.status in ("pending", "paused"):
+        # Auto-pause any other running plan on the same machine (unless trial)
+        if plan.plan_type != "trial" and plan.machine_id:
+            conflicting = db.query(ProductionPlan).filter(
+                ProductionPlan.machine_id == plan.machine_id,
+                ProductionPlan.id != plan.id,
+                ProductionPlan.status == "running",
+            ).all()
+            for conflict in conflicting:
+                conflict.status = "paused"
+                conflict.updated_at = now_ist()
         plan.status = "running"
         plan.updated_at = now_ist()
     return plan
@@ -170,10 +180,10 @@ async def complete_request(mcr_id: int, db: Session = Depends(get_db), user=Depe
     elapsed = int((mcr.end_time - mcr.start_time).total_seconds() / 60) if mcr.start_time else 0
 
     machine = db.query(Machine).filter(Machine.id == mcr.machine_id).first()
-    # Prefer running if linked plan is running, else idle
-    plan = db.query(ProductionPlan).filter(ProductionPlan.id == mcr.plan_id).first() if mcr.plan_id else None
-    next_status = "running" if (plan and plan.status == "running") else "running"
-    if machine and machine.status not in ("breakdown", "offline"):
+    # After setting change completes, set to idle — the machine status API (PLC/Node-RED)
+    # will update to running once the machine actually starts producing
+    next_status = "idle"
+    if machine and machine.status not in ("breakdown", "offline", "alarm"):
         machine.status = next_status
     # Loss Tracker segment: close setting_change by logging next status
     _log_status(mcr.machine_id, next_status, "model_change", db)

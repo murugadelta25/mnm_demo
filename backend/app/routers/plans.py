@@ -365,6 +365,16 @@ async def update_status(plan_id: int, data: PlanUpdate, db: Session = Depends(ge
         )
         if existing_active:
             # Approval already applied plan start — treat as already running
+            # Auto-pause any other running plan on the same machine (unless trial)
+            if plan.plan_type != "trial" and plan.machine_id:
+                conflicting = db.query(ProductionPlan).filter(
+                    ProductionPlan.machine_id == plan.machine_id,
+                    ProductionPlan.id != plan.id,
+                    ProductionPlan.status == "running",
+                ).all()
+                for conflict in conflicting:
+                    conflict.status = "paused"
+                    conflict.updated_at = now_ist()
             plan.status = "running"
             plan.updated_at = now_ist()
             db.commit()
@@ -426,8 +436,21 @@ async def update_status(plan_id: int, data: PlanUpdate, db: Session = Depends(ge
 
     # Resume from paused (no new model-change gate)
     if data.status == "running":
+        # Auto-pause any other running plan on the same machine, unless this is a trial plan
+        # (trial = intentional concurrent run, e.g. setup verification alongside production)
+        if plan.plan_type != "trial" and plan.machine_id:
+            conflicting = db.query(ProductionPlan).filter(
+                ProductionPlan.machine_id == plan.machine_id,
+                ProductionPlan.id != plan.id,
+                ProductionPlan.status == "running",
+            ).all()
+            for conflict in conflicting:
+                conflict.status = "paused"
+                conflict.updated_at = now_ist()
+                await manager.broadcast({"type": "plan_updated", "plan_id": conflict.id, "status": "paused"})
+
         machine = db.query(Machine).filter(Machine.id == plan.machine_id).first()
-        if machine and machine.status not in ("breakdown", "offline", "setting_change"):
+        if machine and machine.status not in ("breakdown", "offline", "setting_change", "alarm"):
             machine.status = "running"
         db.commit()
         await manager.broadcast({
