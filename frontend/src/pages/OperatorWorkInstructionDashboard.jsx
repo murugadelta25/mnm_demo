@@ -263,7 +263,7 @@ export default function OperatorWorkInstructionDashboard() {
     <div className={pageClass(t)} style={s.page}>
       <PageHeader
         title="WORK INSTRUCTIONS"
-        onRefresh={loadContext}
+        onRefresh={showQc ? undefined : loadContext}
         extra={(
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: t.textMuted }}>

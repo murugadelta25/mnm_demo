@@ -59,11 +59,17 @@ export default function PageHeader({ title, onRefresh, extra }) {
     return () => clearInterval(t);
   }, []);
 
-  // Auto-refresh countdown
+  // Auto-refresh countdown — pauses when onRefresh is undefined (e.g. modal open)
   useEffect(() => {
     countRef.current = AUTO_REFRESH_SEC;
     setCountdown(AUTO_REFRESH_SEC);
     const t = setInterval(() => {
+      if (!onRefresh) {
+        // Reset countdown while paused so it starts fresh when modal closes
+        countRef.current = AUTO_REFRESH_SEC;
+        setCountdown(AUTO_REFRESH_SEC);
+        return;
+      }
       countRef.current -= 1;
       setCountdown(countRef.current);
       if (countRef.current <= 0) {
@@ -73,7 +79,7 @@ export default function PageHeader({ title, onRefresh, extra }) {
       }
     }, 1000);
     return () => clearInterval(t);
-  }, [onRefresh]); // reset when onRefresh changes (e.g. filter change)
+  }, [onRefresh]);
 
   const triggerRefresh = async () => {
     setSpinning(true);

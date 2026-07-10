@@ -51,7 +51,7 @@ export function clearDraft(key) {
   }
 }
 
-/** Merge QC reading rows — keep user-entered cells when server cell is empty. */
+/** Merge QC reading rows — local draft only fills cells the server left empty. */
 export function mergeQcReadings(serverReadings, localReadings, displayParams, cellCount) {
   if (!localReadings?.length) return serverReadings || [];
   if (!serverReadings?.length) {
@@ -70,9 +70,10 @@ export function mergeQcReadings(serverReadings, localReadings, displayParams, ce
     const locCells = loc.cells || [];
     const cc = cellCount || Math.max(srvCells.length, locCells.length);
     const cells = Array.from({ length: cc }, (_, c) => {
-      const local = String(locCells[c] ?? '').trim();
       const server = String(srvCells[c] ?? '').trim();
-      return local || server || '';
+      const local = String(locCells[c] ?? '').trim();
+      // Server value always wins — local draft only fills truly empty server cells
+      return server || local || '';
     });
     return {
       ...srv,

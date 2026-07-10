@@ -375,7 +375,9 @@ def save_draft(
     if not report.operator_id:
         report.operator_id = user.id
 
-    # Merge only editable operator columns from incoming readings
+    # Merge readings: protect inspector columns and future unstarted columns only.
+    # Accept incoming values for current and past operator columns so user edits
+    # are never reverted by a time-window check at auto-save time.
     existing = json.loads(report.readings_json or "[]")
     incoming = data.readings
     merged = []
@@ -389,10 +391,11 @@ def save_draft(
         new_cells = normalize_cells(row.get("cells"), approval)
         for col in range(cc):
             if col in (ci0, ci1):
+                # Always protect inspector columns from operator writes
                 new_cells[col] = old_cells[col]
-            elif column_editable_for_operator(approval, col, ts):
-                pass
-            else:
+            # All operator columns: accept incoming value if non-empty,
+            # otherwise keep existing to avoid blanking submitted data
+            elif new_cells[col] in (None, ""):
                 new_cells[col] = old_cells[col]
         merged.append({**row, "cells": new_cells})
     report.readings_json = json.dumps(merged)

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import api from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
@@ -24,10 +24,7 @@ import {
 } from '../utils/qcShiftHours';
 import {
   draftKey,
-  loadDraft,
-  saveDraft,
   clearDraft,
-  mergeQcReadings,
 } from '../utils/formPersistence';
 import {
   DEFAULT_QC_COLUMNS,
@@ -51,7 +48,8 @@ function readingsFromReport(report, displayParams, shiftStart, shiftEnd) {
   const { cellCount } = layoutFromReport(report, shiftStart, shiftEnd);
   const saved = report?.readings || [];
   return displayParams.map((p, i) => {
-    const row = saved.find((r) => r.parameter === p.parameter) || saved[i];
+    // Match by index first — parameter names are not unique (e.g. multiple "Dimension" rows)
+    const row = saved[i] || null;
     const cells = row?.cells || [];
     return Array.from({ length: cellCount }, (_, c) => (cells[c] != null ? String(cells[c]) : ''));
   });
@@ -237,6 +235,8 @@ export default function QcInspectionSheet({
     const { cellCount: cc } = computeShiftLayout(shiftStart, shiftEnd);
     return createEmptyReadings(displayParams.length, cc);
   });
+  const readingsRef = useRef(readings);
+  useEffect(() => { readingsRef.current = readings; }, [readings]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [sheetLoaded, setSheetLoaded] = useState(false);
@@ -252,24 +252,9 @@ export default function QcInspectionSheet({
     [machineId, partId, form.shift, inspectionDate],
   );
 
-  // Restore local draft immediately on open / refresh (before API returns).
-  useEffect(() => {
-    if (!qcDraftKey || !cellCount) return;
-    const local = loadDraft(qcDraftKey);
-    if (!local) return;
-    if (local.form) {
-      setForm((prev) => ({ ...prev, ...local.form }));
-    }
-    if (local.readings?.length) {
-      setReadings(local.readings.map((row) => {
-        const cells = [...row];
-        while (cells.length < cellCount) cells.push('');
-        return cells.slice(0, cellCount);
-      }));
-    }
-    if (local.reportId) setReportId(local.reportId);
-    if (local.instances) setInstances(local.instances);
-  }, [qcDraftKey, cellCount]);
+  // Stable ref for displayParams — avoids re-running the load effect on every context refresh
+  const displayParamsRef = useRef(displayParams);
+  useEffect(() => { displayParamsRef.current = displayParams; }, [displayParams]);
 
   useEffect(() => {
     if (!machineId || !inspectionDate) {
@@ -290,20 +275,11 @@ export default function QcInspectionSheet({
       });
     load.then((r) => {
       if (cancelled) return;
-      const local = qcDraftKey ? loadDraft(qcDraftKey) : null;
-      const localRows = local?.readings?.length
-        ? displayParams.map((p, i) => ({ parameter: p.parameter, cells: local.readings[i] || [] }))
-        : null;
+      const dp = displayParamsRef.current;
       const { cellCount: cc } = computeShiftLayout(shiftStart, shiftEnd);
       if (r.data) {
-        const mergedReadings = mergeQcReadings(
-          r.data.readings,
-          localRows,
-          displayParams,
-          cc,
-        );
-        const reportWithMerged = { ...r.data, readings: mergedReadings };
-        applyReportToState(reportWithMerged, displayParams, {
+        // Server is the only source of truth — never merge sessionStorage over server data
+        applyReportToState(r.data, dp, {
           setReportId, setApprovalStatus, setApprovalMeta, setReadings, setForm,
         }, shiftStart, shiftEnd);
         setInstances(r.data.instances || r.data.approval?.instances || {});
@@ -311,41 +287,22 @@ export default function QcInspectionSheet({
         else if (['quality', 'supervisor', 'admin'].includes(user?.role)) {
           setReviewingInstanceKey(pendingReviewInstance(r.data.approval || { instances: r.data.instances }));
         }
-      } else if (local?.readings?.length) {
-        setReadings(local.readings.map((row) => {
-          const cells = [...row];
-          while (cells.length < cc) cells.push('');
-          return cells.slice(0, cc);
-        }));
-        if (local.form) setForm((prev) => ({ ...prev, ...local.form }));
-        if (local.reportId) setReportId(local.reportId);
-        if (local.instances) setInstances(local.instances);
       } else {
+        // No server report — start completely blank, clear any stale sessionStorage
+        if (qcDraftKey) clearDraft(qcDraftKey);
         setReportId(null);
         setApprovalStatus('draft');
         setApprovalMeta({});
         setInstances({});
-        const { cellCount: cc } = computeShiftLayout(shiftStart, shiftEnd);
-        setReadings(createEmptyReadings(displayParams.length, cc));
+        setReadings(createEmptyReadings(dp.length, cc));
       }
       setSheetLoaded(true);
     }).catch(() => {
       if (!cancelled) setSheetLoaded(true);
     });
     return () => { cancelled = true; };
-  }, [machineId, partId, form.shift, inspectionDate, displayParams, initialReportId, reviewingProp, user?.role, shiftStart, shiftEnd, qcDraftKey]);
-
-  useEffect(() => {
-    if (!qcDraftKey || !sheetLoaded || approvalStatus === 'approved') return undefined;
-    const timer = setTimeout(() => {
-      saveDraft(qcDraftKey, { form, readings, reportId, instances });
-    }, 500);
-    return () => clearTimeout(timer);
-  }, [qcDraftKey, form, readings, reportId, instances, sheetLoaded, approvalStatus]);
-
-  useEffect(() => {
-    if (approvalStatus === 'approved' && qcDraftKey) clearDraft(qcDraftKey);
-  }, [approvalStatus, qcDraftKey]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [machineId, partId, form.shift, inspectionDate, initialReportId, reviewingProp, user?.role, shiftStart, shiftEnd, qcDraftKey]);
 
   const setReading = useCallback((row, col, val) => {
     setReadings((prev) => {
@@ -356,51 +313,49 @@ export default function QcInspectionSheet({
     });
   }, [cellCount]);
 
-  const buildPayload = useCallback(() => ({
-    part_id: part.id || null,
-    machine_id: machine.id || null,
-    article_no: form.article_no,
-    machine_name: form.machine_name,
-    description: form.description,
-    operation_code: form.operation_code,
-    operation_name: form.operation_name,
-    production_section: form.production_section,
-    shift: form.shift,
-    inspection_date: form.inspection_date,
-    operator_name: user?.username || '',
-    readings: displayParams.map((p, i) => {
-      const cols = serializeParamColumns(p, qcColumnSchema);
-      return {
-        parameter: p.parameter,
-        std_value: p.std_value,
-        is_numeric: !!p.is_numeric,
-        lsl: p.lsl != null ? Number(p.lsl) : null,
-        usl: p.usl != null ? Number(p.usl) : null,
-        method: cols.method,
-        frequency: cols.frequency,
-        extra_columns: cols.extra_columns,
-        cells: readings[i] || [],
-      };
-    }),
-    approval: {
-      operator_time: new Date().toTimeString().slice(0, 5),
-    },
-  }), [part.id, machine.id, form, displayParams, readings, user?.username, qcColumnSchema]);
+  const buildPayload = useCallback(() => {
+    const currentReadings = readingsRef.current;
+    return {
+      part_id: part.id || null,
+      machine_id: machine.id || null,
+      article_no: form.article_no,
+      machine_name: form.machine_name,
+      description: form.description,
+      operation_code: form.operation_code,
+      operation_name: form.operation_name,
+      production_section: form.production_section,
+      shift: form.shift,
+      inspection_date: form.inspection_date,
+      operator_name: user?.username || '',
+      readings: displayParams.map((p, i) => {
+        const cols = serializeParamColumns(p, qcColumnSchema);
+        return {
+          parameter: p.parameter,
+          std_value: p.std_value,
+          is_numeric: !!p.is_numeric,
+          lsl: p.lsl != null ? Number(p.lsl) : null,
+          usl: p.usl != null ? Number(p.usl) : null,
+          method: cols.method,
+          frequency: cols.frequency,
+          extra_columns: cols.extra_columns,
+          cells: currentReadings[i] || [],
+        };
+      }),
+      approval: {
+        operator_time: new Date().toTimeString().slice(0, 5),
+      },
+    };
+  }, [part.id, machine.id, form, displayParams, user?.username, qcColumnSchema]);
 
   useEffect(() => {
-    if (!sheetLoaded || approvalStatus === 'approved' || !machineId) return undefined;
+    // Only auto-save if a report already exists (reportId set by explicit submit).
+    // Never auto-create a new draft record — that causes phantom reports on every open.
+    if (!sheetLoaded || approvalStatus === 'approved' || !machineId || !reportId) return undefined;
     const timer = setTimeout(() => {
-      api.put('/api/qc-inspection/draft', buildPayload())
-        .then((r) => {
-          if (r.data?.id) {
-            setReportId(r.data.id);
-            setInstances(r.data.instances || r.data.approval?.instances || {});
-          }
-        })
-        .catch(() => {});
-    }, 1200);
+      api.put('/api/qc-inspection/draft', buildPayload()).catch(() => {});
+    }, 5000);
     return () => clearTimeout(timer);
-  }, [sheetLoaded, approvalStatus, machineId, buildPayload]);
+  }, [sheetLoaded, approvalStatus, machineId, reportId, buildPayload]);
 
   const applyLoadedReport = useCallback((report) => {
     if (!report) return;
@@ -422,22 +377,30 @@ export default function QcInspectionSheet({
         },
       });
       if (data) {
-        applyLoadedReport(data);
+        // Only refresh approval/instance metadata — never overwrite active readings
+        setReportId(data.id);
+        setApprovalStatus(data.status || 'draft');
+        setApprovalMeta(data);
+        setInstances(data.instances || data.approval?.instances || {});
         return data;
       }
       if (reportId) {
         const { data: byId } = await api.get(`/api/qc-inspection/${reportId}`);
-        applyLoadedReport(byId);
+        setReportId(byId.id);
+        setApprovalStatus(byId.status || 'draft');
+        setApprovalMeta(byId);
+        setInstances(byId.instances || byId.approval?.instances || {});
         return byId;
       }
     } catch {
       /* ignore */
     }
     return null;
-  }, [machineId, partId, form.shift, inspectionDate, reportId, applyLoadedReport]);
+  }, [machineId, partId, form.shift, inspectionDate, reportId]);
 
   const handleClose = async () => {
-    if (approvalStatus !== 'approved' && machineId) {
+    // Only save on close if a report already exists — don't create phantom drafts
+    if (approvalStatus !== 'approved' && machineId && reportId) {
       try {
         await api.put('/api/qc-inspection/draft', buildPayload());
       } catch {
@@ -459,8 +422,9 @@ export default function QcInspectionSheet({
         setError('No hourly slot is open for entry right now. Missed or future hours cannot be submitted.');
         return;
       }
+      // Always use current UI readings — never use server readings which may be stale
       const payload = buildPayload();
-      const readingRows = fresh?.readings || payload.readings;
+      const readingRows = payload.readings;
       const { complete, missing } = validateInstanceReadings(readingRows, displayParams, instKey, {
         instances: freshInstances,
         hour_slots: fresh?.hour_slots || fresh?.approval?.hour_slots || hourSlots,
@@ -476,7 +440,7 @@ export default function QcInspectionSheet({
       if (!id) {
         const { data: draft } = await api.put('/api/qc-inspection/draft', payload);
         id = draft.id;
-        applyLoadedReport(draft);
+        setReportId(draft.id);
       }
       const { data } = await api.post(`/api/qc-inspection/${id}/submit-instance`, {
         instance_key: instKey,

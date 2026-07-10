@@ -26,6 +26,7 @@ export default function NotificationBell() {
   const btnRef = useRef(null);
 
   const load = useCallback(async () => {
+    if (!localStorage.getItem('token')) return;
     try {
       const { data } = await api.get('/api/notifications/');
       setItems(data.items || []);
@@ -36,6 +37,7 @@ export default function NotificationBell() {
   }, []);
 
   useEffect(() => {
+    if (!localStorage.getItem('token')) return undefined;
     load();
     const id = setInterval(load, 30000);
     return () => clearInterval(id);

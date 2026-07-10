@@ -1,7 +1,23 @@
 import axios from 'axios';
 import { PERSISTENT_SESSION_USERNAME } from '../auth/sessionPolicy';
 
-// Empty baseURL = relative paths — Vite proxy forwards /api to backend (localhost:8010)
+const inIframe = () => {
+  try { return window.self !== window.top; } catch { return true; }
+};
+
+// Accept token injected by parent PMM3 frame via postMessage
+window.addEventListener('message', (e) => {
+  if (e.data?.type === 'PMS_TOKEN' && e.data.token) {
+    localStorage.setItem('token', e.data.token);
+    if (e.data.user) localStorage.setItem('user', JSON.stringify(e.data.user));
+  }
+});
+
+// Signal parent that we are ready to receive the token
+if (inIframe()) {
+  window.parent.postMessage({ type: 'PMS_READY' }, '*');
+}
+
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_URL || '',
   timeout: 30000,
@@ -24,7 +40,8 @@ api.interceptors.response.use(
       } catch {
         username = null;
       }
-      if (username !== PERSISTENT_SESSION_USERNAME) {
+      // Don't redirect when embedded — just reject so the component handles it
+      if (!inIframe() && username !== PERSISTENT_SESSION_USERNAME) {
         localStorage.removeItem('token');
         localStorage.removeItem('user');
         window.location.href = '/login';
