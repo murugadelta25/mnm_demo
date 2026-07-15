@@ -6,7 +6,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 import json
 import io
-from ..models import Machine, Station, ProductionPlan, MachineStatusLog, SiteConfig, OEEEntry, ModelChangeRequest, get_db, now_ist
+from ..models import Machine, Station, ProductionPlan, MachineStatusLog, SiteConfig, OEEEntry, ModelChangeRequest, Part, get_db, now_ist
 from ..auth import get_current_user
 from .config import DEFAULT_CONFIG, merge_config
 
@@ -557,13 +557,39 @@ def _effective_shift_end(shift_start: datetime, shift_end: datetime) -> datetime
     return now
 
 
+def _get_cycle_profile(db: Session, variant: str) -> Optional[dict]:
+    """Return cycle_profile for a part only if it has interruptions > 0 configured.
+    Returns None for all normal parts (no profile or interruptions=0).
+    """
+    if not variant:
+        return None
+    part = db.query(Part).filter(
+        (Part.part_no == variant) | (Part.model_variant == variant),
+        Part.active == 1,
+    ).first()
+    if not part or not getattr(part, 'cycle_profile_json', None):
+        return None
+    try:
+        profile = json.loads(part.cycle_profile_json)
+        # Only activate stitching when explicitly configured with interruptions > 0
+        if isinstance(profile, dict) and int(profile.get('interruptions') or 0) > 0:
+            return profile
+    except Exception:
+        pass
+    return None
+
+
 def _build_status_segments(
     db: Session,
     machine_id: int,
     shift_start: datetime,
     effective_end: datetime,
+    cycle_profile: Optional[dict] = None,
 ) -> list:
-    """Status segments from shift_start through effective_end, including carry-in state."""
+    """Status segments from shift_start through effective_end.
+    cycle_profile is only passed for parts that explicitly have interruptions > 0.
+    For all other parts (cycle_profile=None) the raw segments are returned unchanged.
+    """
     if effective_end <= shift_start:
         return []
 
@@ -601,7 +627,7 @@ def _build_status_segments(
             continue
         timeline.append((log.changed_at, log.status))
 
-    segments = []
+    raw_segments = []
     for i, (t_start, status) in enumerate(timeline):
         t_end = timeline[i + 1][0] if i + 1 < len(timeline) else effective_end
         seg_start = max(t_start, shift_start)
@@ -609,13 +635,18 @@ def _build_status_segments(
         if seg_end <= seg_start:
             continue
         dur = int((seg_end - seg_start).total_seconds())
-        segments.append({
+        raw_segments.append({
             'state': _classify(status, dur),
             'start': seg_start,
             'end': seg_end,
             'seconds': dur,
         })
-    return segments
+
+    # Only stitch when this specific part has a cycle_profile with interruptions > 0
+    if not cycle_profile or not raw_segments:
+        return raw_segments
+
+    return _stitch_segments(raw_segments, cycle_profile)
 
 
 def _classify(status: str, duration_sec: int) -> str:
@@ -624,6 +655,98 @@ def _classify(status: str, duration_sec: int) -> str:
     if status in ('running', 'idle'):
         return status
     return 'idle'
+
+
+def _running_part_threshold_ratio(cfg: Optional[dict]) -> float:
+    """Read the running-part threshold from config as a percentage (default 30%)."""
+    if not cfg:
+        return 0.3
+    hourly_cfg = cfg.get('hourly_output') or {}
+    raw = hourly_cfg.get('running_part_threshold_pct', cfg.get('running_part_threshold_pct', 30))
+    try:
+        pct = float(raw)
+    except (TypeError, ValueError):
+        return 0.3
+    if pct <= 0:
+        return 0.0
+    return min(max(pct / 100.0, 0.0), 1.0)
+
+
+def _countable_running_segments(segments: list, process_time_sec: Optional[float], ratio: float = 0.3) -> int:
+    """Count running segments only when they cross the configured threshold.
+
+    A short micro-run before a stoppage should not increment the part total.
+    When no process time is available, preserve the existing behavior and count all running segments.
+    """
+    if not process_time_sec or process_time_sec <= 0:
+        return sum(1 for seg in segments if seg.get('state') == 'running')
+
+    threshold_sec = max(1, int(float(process_time_sec) * ratio))
+    return sum(1 for seg in segments if seg.get('state') == 'running' and seg.get('seconds', 0) >= threshold_sec)
+
+
+def _stitch_segments(segments: list, profile: Optional[dict]) -> list:
+    """Merge multi-segment cycles. Returns segments unchanged when profile is
+    None or interruptions <= 0 — so normal parts are never affected.
+
+    Full pattern matched (oldest-first):
+        Running  →  (Ld/UnLd → Running) × N
+
+    The leading Running may optionally be a micro-run (<=threshold_sec).
+    For VMC-style parts the leading Running is a full operation block —
+    threshold_sec=0 means any Running qualifies as the cycle opener.
+    """
+    if not profile or not segments:
+        return segments
+    interruptions = int(profile.get('interruptions') or 0)
+    threshold_sec = int(profile.get('micro_run_threshold_sec') or 0)
+    if interruptions <= 0:
+        return segments
+
+    out = []
+    i = 0
+    n = len(segments)
+    while i < n:
+        pos = i
+        group = []
+
+        # Leading Running: required as cycle opener.
+        # If threshold_sec > 0, only accept it when duration <= threshold (micro-run).
+        # If threshold_sec == 0, accept any Running as the opener.
+        if pos < n and segments[pos]['state'] == 'running':
+            if threshold_sec == 0 or segments[pos]['seconds'] <= threshold_sec:
+                group.append(segments[pos])
+                pos += 1
+
+        # Require all N (ld_unld -> running) pairs
+        matched = len(group) > 0
+        for _ in range(interruptions):
+            if pos + 1 >= n:
+                matched = False
+                break
+            if segments[pos]['state'] != 'ld_unld':
+                matched = False
+                break
+            if segments[pos + 1]['state'] != 'running':
+                matched = False
+                break
+            group.append(segments[pos])
+            group.append(segments[pos + 1])
+            pos += 2
+
+        if matched and len(group) >= 2:
+            merged = {
+                'state': 'running',
+                'start': group[0]['start'],
+                'end': group[-1]['end'],
+                'seconds': sum(g['seconds'] for g in group),
+            }
+            out.append(merged)
+            i = pos
+        else:
+            out.append(segments[i])
+            i += 1
+    return out
 
 
 def _line_meta(cfg: dict, line_id: str):
@@ -704,6 +827,7 @@ def build_hourly_output(
 
     break_cfg = (cfg.get('breaks') or {}).get(shift, {})
     breaks = _break_windows(break_cfg)
+    running_part_threshold_ratio = _running_part_threshold_ratio(cfg)
     shift_start, shift_end = _shift_window(entry_date, shift_def)
     effective_end = _effective_shift_end(shift_start, shift_end)
     is_live = shift_start < effective_end < shift_end
@@ -762,17 +886,44 @@ def build_hourly_output(
             slots, shift_start, shift_end, breaks, planned_total, windows,
         )
 
-        segments = _build_status_segments(db, m.id, shift_start, effective_end)
+        # Resolve cycle_profile ONLY for parts that explicitly have interruptions > 0.
+        # For machines running multiple variants, only stitch if ALL active variants
+        # resolve to the same non-None profile — otherwise leave segments raw.
+        cycle_profile = None
+        active_variants = [
+            _plan_variant(p) for p in machine_plans
+            if getattr(p, 'status', None) in ('running', 'completed')
+        ]
+        if active_variants:
+            profiles = [_get_cycle_profile(db, v) for v in active_variants]
+            # All variants must have the same non-None profile for stitching to apply
+            non_null = [p for p in profiles if p is not None]
+            if non_null and len(non_null) == len(profiles):
+                # Check all profiles are identical (same interruptions + threshold)
+                first = non_null[0]
+                all_same = all(
+                    p.get('interruptions') == first.get('interruptions') and
+                    p.get('micro_run_threshold_sec') == first.get('micro_run_threshold_sec')
+                    for p in non_null
+                )
+                if all_same:
+                    cycle_profile = first
+
+        segments = _build_status_segments(db, m.id, shift_start, effective_end, cycle_profile)
 
         def count_transitions_through(slot_end_dt: datetime, state_filter):
             """Count transitions (occurrences) from shift_start up to slot_end_dt."""
             slot_end_dt = min(slot_end_dt, effective_end)
-            return sum(
-                1 for seg in segments
+            relevant = [
+                seg for seg in segments
                 if seg['state'] in state_filter
                 and seg['start'] >= shift_start
                 and seg['start'] < slot_end_dt
-            )
+            ]
+            if state_filter == {'running'}:
+                threshold_reference_sec = primary_ct if primary_ct else None
+                return _countable_running_segments(relevant, threshold_reference_sec, running_part_threshold_ratio)
+            return len(relevant)
 
         running_cum, ld_cum, idle_cum = [], [], []
         for s in slots:

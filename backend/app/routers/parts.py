@@ -126,6 +126,17 @@ def _qc_column_schema(part: Part) -> list:
     return list(DEFAULT_QC_COLUMN_SCHEMA)
 
 
+def _parse_cycle_profile(part: Part) -> Optional[dict]:
+    raw = getattr(part, "cycle_profile_json", None)
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else None
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
 def _empty_param_table(default_columns: list) -> dict:
     return {"columns": list(default_columns), "rows": []}
 
@@ -291,6 +302,7 @@ class PartCreate(BaseModel):
     tools_parameters: Optional[ParamTableIn] = None
     machine_parameters: Optional[ParamTableIn] = None
     jigs_fixtures: Optional[ParamTableIn] = None
+    cycle_profile: Optional[dict] = None
 
 
 class PartUpdate(PartCreate):
@@ -364,6 +376,11 @@ def _apply_part_fields(part: Part, data: PartCreate) -> None:
         data.jigs_fixtures.model_dump() if data.jigs_fixtures else None,
         DEFAULT_JIGS_COLUMNS,
     )
+    if data.cycle_profile is not None:
+        part.cycle_profile_json = json.dumps(data.cycle_profile) if data.cycle_profile else None
+    else:
+        # preserve existing value on update — only overwrite when explicitly sent
+        pass
 
 
 def _part_out(part: Part, db: Session) -> dict:
@@ -400,6 +417,7 @@ def _part_out(part: Part, db: Session) -> dict:
         "active": part.active,
         "image_url": part.image_url,
         "sketch_image_url": getattr(part, "sketch_image_url", None),
+        "cycle_profile": _parse_cycle_profile(part),
         "qc_column_schema": _qc_column_schema(part),
         "tools_parameters": _parse_param_table(
             getattr(part, "tools_params_json", None), DEFAULT_TOOLS_COLUMNS,
@@ -479,6 +497,7 @@ def list_part_options(
             "process_time": float(p.process_time) if p.process_time else None,
             "loading_unloading": float(p.loading_unloading) if p.loading_unloading else 10,
             "cycle_time": _cycle_time(p),
+            "cycle_profile": _parse_cycle_profile(p),
         }
         for p in rows
     ]

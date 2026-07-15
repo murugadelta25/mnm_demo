@@ -263,6 +263,7 @@ CREATE TABLE IF NOT EXISTS parts (
     tools_params_json TEXT,
     machine_params_json TEXT,
     jigs_fixtures_json TEXT,
+    cycle_profile_json TEXT NULL DEFAULT NULL,
     active TINYINT(1) DEFAULT 1,
     created_by INT,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

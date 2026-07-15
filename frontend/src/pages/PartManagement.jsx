@@ -70,6 +70,7 @@ const EMPTY_PART = {
   tools_parameters: emptyParamTable(DEFAULT_TOOLS_COLUMNS),
   machine_parameters: emptyParamTable(DEFAULT_MACHINE_PARAM_COLUMNS),
   jigs_fixtures: emptyParamTable(DEFAULT_JIGS_COLUMNS),
+  cycle_profile: null,
 };
 
 const DOC_TYPES = [
@@ -148,6 +149,7 @@ function partFormFromApi(p, { includeImages = true } = {}) {
     machine_parameters: normalizeParamTable(p.machine_parameters, DEFAULT_MACHINE_PARAM_COLUMNS),
     jigs_fixtures: normalizeParamTable(p.jigs_fixtures, DEFAULT_JIGS_COLUMNS),
     active: includeImages ? (p.active ?? 1) : 1,
+    cycle_profile: p.cycle_profile || null,
   };
 }
 
@@ -706,6 +708,7 @@ export default function PartManagement() {
         tools_parameters: serializeParamTable(form.tools_parameters),
         machine_parameters: serializeParamTable(form.machine_parameters),
         jigs_fixtures: serializeParamTable(form.jigs_fixtures),
+        cycle_profile: form.cycle_profile || null,
       };
       if (selectedId) {
         await api.put(`/api/parts/${selectedId}`, payload);
@@ -1269,6 +1272,23 @@ export default function PartManagement() {
             </div>
           )}
 
+          <CollapsibleSection
+            title="CYCLE PROFILE (Multi-Segment Cycle Stitching)"
+            defaultOpen={false}
+            t={t}
+            s={s}
+            summary={form.cycle_profile?.interruptions > 0
+              ? `${form.cycle_profile.interruptions} interruption(s) · threshold ${form.cycle_profile.micro_run_threshold_sec || 0}s`
+              : 'Disabled'}
+          >
+            <CycleProfileEditor
+              profile={form.cycle_profile}
+              onChange={cp => setForm(f => ({ ...f, cycle_profile: cp }))}
+              t={t}
+              inp={inp}
+            />
+          </CollapsibleSection>
+
           <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
             <button type="button" onClick={savePart} disabled={saving} style={s.btnAccent}>
               {saving ? 'Saving…' : selectedId ? 'Update Part' : 'Save Part'}
@@ -1368,6 +1388,84 @@ function OperationSequenceEditor({ steps, onChange, t, s, inp }) {
       <button type="button" onClick={addStep} style={s.btnSecondary}>
         + Add
       </button>
+    </div>
+  );
+}
+
+function CycleProfileEditor({ profile, onChange, t, inp }) {
+  const enabled = !!(profile?.interruptions > 0);
+  const interruptions = profile?.interruptions ?? 0;
+  const threshold = profile?.micro_run_threshold_sec ?? 0;
+  const label = profile?.label ?? '';
+
+  const update = (patch) => {
+    const next = { interruptions, micro_run_threshold_sec: threshold, label, ...(profile || {}), ...patch };
+    onChange(next.interruptions > 0 ? next : null);
+  };
+
+  // Build visual pattern preview
+  const patternParts = [];
+  if (threshold > 0) patternParts.push(`Run(≤${threshold}s)`);
+  for (let i = 0; i < Math.min(interruptions, 6); i++) {
+    patternParts.push('Ld/UnLd');
+    patternParts.push(i === interruptions - 1 ? 'Run ✓' : 'Run');
+  }
+  const pattern = patternParts.join(' → ');
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+      <p style={{ margin: 0, fontSize: 12, color: t.textDim }}>
+        Define how many loading/unloading interruptions occur inside one complete part cycle
+        (e.g. repositioning for VMC multi-angle operations). When enabled, the Loss Tracker
+        will merge these segments into a single logical cycle for accurate count and duration.
+      </p>
+
+      <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+        <label style={{ fontSize: 12, color: t.textDim }}>
+          Interruptions per cycle
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
+            <input type="number" min="0" max="20"
+              value={interruptions}
+              onChange={e => update({ interruptions: Math.max(0, parseInt(e.target.value) || 0) })}
+              style={{ ...inp, width: 80 }}
+            />
+            <span style={{ fontSize: 11, color: t.textFaint }}>(0 = disabled)</span>
+          </div>
+        </label>
+
+        <label style={{ fontSize: 12, color: t.textDim }}>
+          Micro-run threshold (s)
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4 }}>
+            <input type="number" min="0" max="120"
+              value={threshold}
+              onChange={e => update({ micro_run_threshold_sec: Math.max(0, parseInt(e.target.value) || 0) })}
+              style={{ ...inp, width: 80 }}
+            />
+            <span style={{ fontSize: 11, color: t.textFaint }}>Running ≤ this = setup move</span>
+          </div>
+        </label>
+
+        <label style={{ fontSize: 12, color: t.textDim }}>
+          Profile label
+          <input type="text"
+            value={label}
+            onChange={e => update({ label: e.target.value })}
+            placeholder="e.g. 3-position VMC"
+            style={{ ...inp, marginTop: 4, minWidth: 180 }}
+          />
+        </label>
+      </div>
+
+      {interruptions > 0 && (
+        <div style={{ padding: '10px 14px', borderRadius: 8, background: '#8b5cf611',
+                      border: '1px solid #8b5cf644', fontSize: 12 }}>
+          <span style={{ fontWeight: 700, color: '#8b5cf6', marginRight: 8 }}>Pattern preview:</span>
+          <span style={{ color: t.text, fontFamily: 'monospace' }}>{pattern || '—'}</span>
+          <div style={{ marginTop: 6, fontSize: 11, color: t.textFaint }}>
+            {interruptions} Ld/UnLd break{interruptions > 1 ? 's' : ''} → {interruptions + 1} Running segment{interruptions > 1 ? 's' : ''} merged into 1 cycle
+          </div>
+        </div>
+      )}
     </div>
   );
 }

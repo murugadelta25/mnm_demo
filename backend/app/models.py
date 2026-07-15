@@ -20,6 +20,37 @@ engine = create_engine(
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
+
+def ensure_oee_schema(bind=None):
+    """Ensure legacy databases have the raw OEE columns used for audit tracking."""
+    if bind is None:
+        bind = engine
+
+    try:
+        from sqlalchemy import inspect, text
+
+        inspector = inspect(bind)
+        if not inspector.has_table("oee_entries"):
+            return False
+
+        columns = {column["name"] for column in inspector.get_columns("oee_entries")}
+        with bind.begin() as conn:
+            if "ar_raw" not in columns:
+                conn.execute(text("ALTER TABLE oee_entries ADD COLUMN ar_raw DECIMAL(7, 2) NULL"))
+            if "pr_raw" not in columns:
+                conn.execute(text("ALTER TABLE oee_entries ADD COLUMN pr_raw DECIMAL(7, 2) NULL"))
+            if "qr_raw" not in columns:
+                conn.execute(text("ALTER TABLE oee_entries ADD COLUMN qr_raw DECIMAL(7, 2) NULL"))
+            if "oee_raw" not in columns:
+                conn.execute(text("ALTER TABLE oee_entries ADD COLUMN oee_raw DECIMAL(7, 2) NULL"))
+        return True
+    except Exception:
+        return False
+
+
+ensure_oee_schema()
+
+
 def get_db():
     db = SessionLocal()
     try:
@@ -110,10 +141,15 @@ class OEEEntry(Base):
     actual_qty = Column(Integer)
     accp_qty = Column(Integer)
     defect_qty = Column(Integer)
-    ar = Column(Numeric(5, 2))
-    pr = Column(Numeric(5, 2))
-    qr = Column(Numeric(5, 2))
-    oee = Column(Numeric(5, 2))
+    ar = Column(Numeric(6, 2))
+    pr = Column(Numeric(6, 2))
+    qr = Column(Numeric(6, 2))
+    oee = Column(Numeric(6, 2))
+    # Original uncapped values — stored for audit; NULL means no capping occurred
+    ar_raw  = Column(Numeric(7, 2), nullable=True)
+    pr_raw  = Column(Numeric(7, 2), nullable=True)
+    qr_raw  = Column(Numeric(7, 2), nullable=True)
+    oee_raw = Column(Numeric(7, 2), nullable=True)
     created_by = Column(Integer, ForeignKey("users.id"))
 
 class ModelChangeRequest(Base):
@@ -330,6 +366,7 @@ class Part(Base):
     tools_params_json = Column(Text)
     machine_params_json = Column(Text)
     jigs_fixtures_json = Column(Text)
+    cycle_profile_json = Column(Text, nullable=True)
     active = Column(Integer, default=1)
     created_by = Column(Integer, ForeignKey("users.id"))
     created_at = Column(TIMESTAMP)

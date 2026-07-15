@@ -188,6 +188,11 @@ export default function LossTracker() {
   const [reasonErr, setReasonErr]       = useState('');
   const [stationApplyResult, setStationApplyResult] = useState(null);
 
+  // cycle stitching
+  const [stitchEnabled, setStitchEnabled] = useState(false);
+  const [stitchVariant, setStitchVariant] = useState('');
+  const [partOptions, setPartOptions]     = useState([]);
+
   // threshold config
   const [limitsMin, setLimitsMin]     = useState(loadLimits);
   const [showSettings, setShowSettings] = useState(false);
@@ -325,13 +330,16 @@ export default function LossTracker() {
     // For overnight shifts fetch histoDate + nextDay to cover post-midnight portion
     const dateFrom = histoDate;
     const dateTo   = isOvernight ? fmt(nextDay) : histoDate;
-    api.get(`/api/machines/${histoMachineId}/status-log`, {
-      params: { limit: 5000, date_from: dateFrom, date_to: dateTo }
-    })
+    const params = { limit: 5000, date_from: dateFrom, date_to: dateTo };
+    if (stitchEnabled && stitchVariant) {
+      params.stitch = true;
+      params.model_variant = stitchVariant;
+    }
+    api.get(`/api/machines/${histoMachineId}/status-log`, { params })
       .then(r => setHistoLog(r.data))
       .catch(() => {})
       .finally(() => setHistoLoading(false));
-  }, [histoMachineId, histoShift, histoDate, shifts]);
+  }, [histoMachineId, histoShift, histoDate, shifts, stitchEnabled, stitchVariant]);
 
   // Pareto data
   const paretoData = useMemo(() => {
@@ -416,6 +424,7 @@ export default function LossTracker() {
     const activeLog = pageTab === 'live' ? liveLog : histLog;
     if (!activeLog.length || !shifts.length) return [];
     const rows = buildRows(activeLog, LIMITS_MS);
+    const isStitchedView = stitchEnabled && !!stitchVariant;
     const ALL_ST = ['running','ld/unld','idle','breakdown','alarm','offline','setting_change'];
     const DAY = 86400000;
     const nowUTC = Date.now();
@@ -486,11 +495,12 @@ export default function LossTracker() {
         const rowEnd   = rowStart + r.durationMs;
         const ov = overlapMs(rowStart, rowEnd, win.wStart, win.wEnd);
         if (ov <= 0) return;
-        if (ALL_ST.includes(r.effStatus)) {
-          acc[r.effStatus] += ov;
+        const effectiveStatus = isStitchedView && r.status === 'running' && r.is_stitched ? 'running' : r.effStatus;
+        if (ALL_ST.includes(effectiveStatus)) {
+          acc[effectiveStatus] += ov;
           // Count event only if this row STARTED within the shift window
           if (rowStart >= win.wStart && rowStart < win.wEnd)
-            cnt[r.effStatus] += 1;
+            cnt[effectiveStatus] += 1;
         }
       });
 
@@ -508,7 +518,7 @@ export default function LossTracker() {
       };
       return { shift: sh, acc, cnt, toHM, shiftDurMs, elapsedMs, dateLabel, notStarted: false };
     }).filter(Boolean);
-  }, [pageTab, liveLog, histLog, shifts, limitsMin]); // eslint-disable-line
+  }, [pageTab, liveLog, histLog, shifts, limitsMin, stitchEnabled, stitchVariant]); // eslint-disable-line
 
   // Bell curve: X = hour slots for whole shift, Y = count of running+idle cycles per slot
   // Selected slot is highlighted; avg running reference line shown on that slot
@@ -541,6 +551,7 @@ export default function LossTracker() {
       return ms >= winStart && ms < winEnd;
     });
 
+    const isStitchedView = stitchEnabled && !!stitchVariant;
     const bars = shiftHourSlots.map(sl => {
       const slotStart = winStart + sl.slotIndex * 3600000;
       const slotEnd = slotStart + 3600000;
@@ -548,9 +559,18 @@ export default function LossTracker() {
         const ms = toMs(r.changed_at);
         return ms >= slotStart && ms < slotEnd;
       };
-      const runRows  = shiftRows.filter(r => r.effStatus === 'running' && inSlot(r));
-      const ldRows   = shiftRows.filter(r => r.effStatus === 'ld/unld'  && inSlot(r));
-      const idleRows = shiftRows.filter(r => r.effStatus === 'idle'     && inSlot(r));
+      const runRows  = shiftRows.filter(r => {
+        const effectiveStatus = isStitchedView && r.status === 'running' && r.is_stitched ? 'running' : r.effStatus;
+        return effectiveStatus === 'running' && inSlot(r);
+      });
+      const ldRows   = shiftRows.filter(r => {
+        const effectiveStatus = isStitchedView && r.status === 'running' && r.is_stitched ? 'running' : r.effStatus;
+        return effectiveStatus === 'ld/unld' && inSlot(r);
+      });
+      const idleRows = shiftRows.filter(r => {
+        const effectiveStatus = isStitchedView && r.status === 'running' && r.is_stitched ? 'running' : r.effStatus;
+        return effectiveStatus === 'idle' && inSlot(r);
+      });
       const avg = arr => arr.length
         ? Math.round(arr.reduce((s, r) => s + r.durationMs / 1000, 0) / arr.length) : 0;
       return {
@@ -567,19 +587,21 @@ export default function LossTracker() {
 
     const avg = arr => arr.length
       ? Math.round(arr.reduce((s, r) => s + r.durationMs / 1000, 0) / arr.length) : 0;
+    const pickStatus = r => (isStitchedView && r.status === 'running' && r.is_stitched ? 'running' : r.effStatus);
     return {
       bars,
-      runAvg:  avg(shiftRows.filter(r => r.effStatus === 'running')),
-      ldAvg:   avg(shiftRows.filter(r => r.effStatus === 'ld/unld')),
-      idleAvg: avg(shiftRows.filter(r => r.effStatus === 'idle')),
+      runAvg:  avg(shiftRows.filter(r => pickStatus(r) === 'running')),
+      ldAvg:   avg(shiftRows.filter(r => pickStatus(r) === 'ld/unld')),
+      idleAvg: avg(shiftRows.filter(r => pickStatus(r) === 'idle')),
     };
-  }, [histoShift, histoHour, histoDate, histoLog, shifts, shiftHourSlots, limitsMin]); // eslint-disable-line
+  }, [histoShift, histoHour, histoDate, histoLog, shifts, shiftHourSlots, limitsMin, stitchEnabled, stitchVariant]); // eslint-disable-line
 
   useEffect(() => {
-    Promise.all([api.get('/api/stations/'), api.get('/api/machines/')])
-      .then(([p, m]) => {
+    Promise.all([api.get('/api/stations/'), api.get('/api/machines/'), api.get('/api/parts/options', { params: { active_only: true, limit: 200 } })])
+      .then(([p, m, parts]) => {
         setStations(p.data);
         setMachines(m.data);
+        setPartOptions(parts.data || []);
         if (p.data.length > 0) {
           const firstPair = String(p.data[0].id);
           setStationId(firstPair);
@@ -613,26 +635,33 @@ export default function LossTracker() {
     setHistLoaded(false);
   }, [stationId, machines]);
 
+  const buildStatusLogParams = useCallback((extra = {}) => {
+    const params = { limit: 5000, ...extra };
+    if (stitchEnabled && stitchVariant) {
+      params.stitch = true;
+      params.model_variant = stitchVariant;
+    }
+    return params;
+  }, [stitchEnabled, stitchVariant]);
+
   const fetchLive = useCallback(async (mid) => {
     if (!mid) { setLiveLog([]); return; }
     const dates = liveQueryDates(shifts);
-    const r = await api.get(`/api/machines/${mid}/status-log`, {
-      params: { limit: 5000, ...dates }
-    });
+    const params = buildStatusLogParams({ ...dates });
+    const r = await api.get(`/api/machines/${mid}/status-log`, { params });
     setLiveLog(r.data);
-  }, [shifts]);
+  }, [shifts, buildStatusLogParams]);
 
   useEffect(() => { if (machineId) fetchLive(machineId); }, [machineId, fetchLive]);
 
   const fetchHistoric = useCallback(async () => {
     if (!machineId || !dateFrom || !dateTo) return;
-    const r = await api.get(`/api/machines/${machineId}/status-log`, {
-      params: { limit: 2000, date_from: dateFrom, date_to: dateTo }
-    });
+    const params = buildStatusLogParams({ limit: 2000, date_from: dateFrom, date_to: dateTo });
+    const r = await api.get(`/api/machines/${machineId}/status-log`, { params });
     setHistLog(r.data);
     setHistLoaded(true);
     setHistFilter('');
-  }, [machineId, dateFrom, dateTo]);
+  }, [machineId, dateFrom, dateTo, buildStatusLogParams]);
 
   const saveReason = async (logId) => {
     if (!editReason.value.trim()) { setReasonErr('Reason is mandatory'); return; }
@@ -869,6 +898,13 @@ export default function LossTracker() {
                           {log.breached && (
                             <span style={{ fontSize: 10, background: '#ef4444', color: '#fff',
                                            borderRadius: 4, padding: '1px 5px', fontWeight: 700 }}>EXCEEDED</span>
+                          )}
+                          {log.is_stitched && (
+                            <span title={`Merged ${log.merged_count} segments: ${(log.stitched_ids || []).join(', ')}`}
+                              style={{ fontSize: 10, background: '#8b5cf6', color: '#fff',
+                                       borderRadius: 4, padding: '1px 6px', fontWeight: 700, cursor: 'help' }}>
+                              ⊕ {log.merged_count} segs
+                            </span>
                           )}
                         </div>
                       </td>
@@ -1166,6 +1202,42 @@ export default function LossTracker() {
                            borderRadius: 6, cursor: 'pointer', fontSize: 13 }}
             onClick={() => fetchLive(machineId)}>Refresh</button>
         )}
+
+        {/* Cycle Stitch toggle */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 'auto', flexWrap: 'wrap' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer',
+                          fontSize: 12, color: stitchEnabled ? '#8b5cf6' : t.textMuted, fontWeight: 600 }}>
+            <input type="checkbox" checked={stitchEnabled}
+              onChange={e => { setStitchEnabled(e.target.checked); setLiveLog([]); setHistLog([]); setHistLoaded(false); }}
+              style={{ accentColor: '#8b5cf6', width: 14, height: 14 }} />
+            Merge Multi-Segment Cycles
+          </label>
+          {stitchEnabled && (
+            <select style={{ ...inp, fontSize: 12, padding: '4px 8px', minWidth: 180,
+                             borderColor: '#8b5cf6', background: '#8b5cf611' }}
+              value={stitchVariant}
+              onChange={e => { setStitchVariant(e.target.value); setLiveLog([]); setHistLog([]); setHistLoaded(false); }}>
+              <option value="">— Select Part / Model —</option>
+              {partOptions.filter(p => p.cycle_profile).map(p => (
+                <option key={p.id} value={p.part_no}>
+                  {p.part_no}{p.cycle_profile?.label ? ` (${p.cycle_profile.label})` : ''}
+                </option>
+              ))}
+              {partOptions.filter(p => !p.cycle_profile).length > 0 && (
+                <optgroup label="── No cycle profile ──">
+                  {partOptions.filter(p => !p.cycle_profile).map(p => (
+                    <option key={p.id} value={p.part_no}>{p.part_no}</option>
+                  ))}
+                </optgroup>
+              )}
+            </select>
+          )}
+          {stitchEnabled && stitchVariant && (
+            <span style={{ fontSize: 11, color: '#8b5cf6', fontStyle: 'italic' }}>
+              ⊕ cycles merged per profile
+            </span>
+          )}
+        </div>
       </div>
 
       {/* ── Shift Time Split + Cycle Time (always visible) ── */}

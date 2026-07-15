@@ -266,6 +266,8 @@ def get_status_log(
     limit: int = 500,
     date_from: str = None,
     date_to: str = None,
+    stitch: bool = False,
+    model_variant: str = None,
     db: Session = Depends(get_db),
     _=Depends(get_current_user)
 ):
@@ -285,7 +287,6 @@ def get_status_log(
     logs = q.order_by(MachineStatusLog.changed_at.desc()).limit(limit).all()
     result = []
     for i, l in enumerate(logs):
-        end_time = logs[i - 1].changed_at.strftime('%Y-%m-%dT%H:%M:%S') if i > 0 else None
         result.append({
             "id": l.id, "status": l.status,
             "changed_at": l.changed_at.strftime('%Y-%m-%dT%H:%M:%S'),
@@ -293,6 +294,26 @@ def get_status_log(
             "source": l.source,
             "deviation_reason": l.deviation_reason or "",
         })
+
+    if stitch and model_variant:
+        try:
+            from ..models import Part
+            import json as _json
+            part = db.query(Part).filter(
+                (Part.part_no == model_variant) | (Part.model_variant == model_variant),
+                Part.active == 1,
+            ).first()
+            if part and getattr(part, 'cycle_profile_json', None):
+                profile = _json.loads(part.cycle_profile_json)
+                # Only stitch when interruptions > 0 is explicitly configured
+                if isinstance(profile, dict) and int(profile.get('interruptions') or 0) > 0:
+                    from ..cycle_stitcher import stitch_cycles
+                    result = stitch_cycles(result, profile)
+                    for row in result:
+                        row.pop('_consumed', None)
+        except Exception as exc:
+            print(f"[CycleStitcher] error: {exc}")
+
     return result
 
 
