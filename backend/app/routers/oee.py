@@ -42,6 +42,24 @@ class OEECreate(BaseModel):
     actual_qty: int
     defect_qty: int = 0
 
+def _cap(value: float) -> float:
+    """Cap a percentage at 100. Returns the capped value."""
+    return min(float(value), 100.0)
+
+
+def _calculate_display_rates(ar_raw: float, pr_raw: float, qr_raw: float) -> dict:
+    ar = _cap(ar_raw)
+    pr = _cap(pr_raw)
+    qr = _cap(qr_raw)
+    oee = round(ar * pr * qr / 10000, 2)
+    return {
+        "ar": ar,
+        "pr": pr,
+        "qr": qr,
+        "oee": oee,
+    }
+
+
 def calculate_oee(data: OEECreate) -> dict:
     # CT = Process Time + Loading & Unloading (seconds)
     ct = data.process_time + data.loading_unloading
@@ -67,34 +85,48 @@ def calculate_oee(data: OEECreate) -> dict:
     # Accepted Qty = Actual Qty - Defect Qty
     accp_qty = max(0, data.actual_qty - data.defect_qty)
 
-    # AR = Operating Time / Available Shift Time
-    ar = round((operating / available * 100), 2) if available > 0 else 0
+    # Raw (uncapped) rates
+    ar_raw = round((operating / available * 100), 2) if available > 0 else 0
+    pr_raw = round((data.actual_qty / possible_qty * 100), 2) if possible_qty > 0 else 0
+    qr_raw = round((accp_qty / data.actual_qty * 100), 2) if data.actual_qty > 0 else 0
+    oee_raw = round(ar_raw * pr_raw * qr_raw / 10000, 2)
 
-    # PR = Actual Qty / Possible Qty
-    pr = round((data.actual_qty / possible_qty * 100), 2) if possible_qty > 0 else 0
-
-    # QR = Accepted Qty / Actual Qty
-    qr = round((accp_qty / data.actual_qty * 100), 2) if data.actual_qty > 0 else 0
-
-    # OEE = AR * PR * QR
-    oee = round(ar * pr * qr / 10000, 2)
+    # Capped rates (display / stored values — never exceed 100%)
+    rates = _calculate_display_rates(ar_raw, pr_raw, qr_raw)
+    ar = rates["ar"]
+    pr = rates["pr"]
+    qr = rates["qr"]
+    oee = rates["oee"]
 
     return {
-        # Only writable computed columns — generated columns (cycle_time, total_breaks,
-        # shift_working_minutes, management_loss_total, total_down_time, production_loss)
-        # are STORED GENERATED in MySQL and must NOT be written by the application.
         "available_shift_time": available,
         "operating_time": operating,
         "possible_qty": possible_qty,
         "accp_qty": accp_qty,
         "ar": ar, "pr": pr, "qr": qr, "oee": oee,
+        # Original uncapped values tracked for audit
+        "ar_raw": ar_raw, "pr_raw": pr_raw, "qr_raw": qr_raw, "oee_raw": oee_raw,
+        # Flags indicating which values were capped
+        "ar_capped":  ar_raw  > 100,
+        "pr_capped":  pr_raw  > 100,
+        "qr_capped":  qr_raw  > 100,
+        "oee_capped": oee_raw > oee,
     }
 
 @router.post("/")
 def create_entry(data: OEECreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
     from ..models import ProductionPlan
     calc = calculate_oee(data)
-    entry = OEEEntry(**data.model_dump(), **calc, created_by=user.id)
+    # Only store raw values when capping actually occurred
+    entry_fields = {
+        k: v for k, v in calc.items()
+        if k not in ("ar_capped", "pr_capped", "qr_capped", "oee_capped")
+    }
+    if not calc["ar_capped"]:  entry_fields.pop("ar_raw",  None)
+    if not calc["pr_capped"]:  entry_fields.pop("pr_raw",  None)
+    if not calc["qr_capped"]:  entry_fields.pop("qr_raw",  None)
+    if not calc["oee_capped"]: entry_fields.pop("oee_raw", None)
+    entry = OEEEntry(**data.model_dump(), **entry_fields, created_by=user.id)
     db.add(entry)
     db.flush()
 
@@ -220,10 +252,13 @@ def update_defect(entry_id: int, data: DefectUpdate,
     actual = entry.actual_qty or 0
     new_defect = max(0, data.defect_qty)
     new_accp   = max(0, actual - new_defect)
-    new_qr     = round(new_accp / actual * 100, 2) if actual > 0 else 0
+    qr_raw_new = round(new_accp / actual * 100, 2) if actual > 0 else 0
     ar         = float(entry.ar or 0)
     pr         = float(entry.pr or 0)
-    new_oee    = round(ar * pr * new_qr / 10000, 2)
+    rates_new  = _calculate_display_rates(ar, pr, qr_raw_new)
+    new_qr     = rates_new["qr"]
+    oee_raw_new = round(ar * pr * qr_raw_new / 10000, 2)
+    new_oee     = rates_new["oee"]
 
     # write log
     log = OEEDefectLog(
@@ -246,13 +281,17 @@ def update_defect(entry_id: int, data: DefectUpdate,
     entry.defect_qty = new_defect
     entry.accp_qty   = new_accp
     entry.qr         = new_qr
+    entry.qr_raw     = qr_raw_new  if qr_raw_new  > 100 else None
     entry.oee        = new_oee
+    entry.oee_raw    = oee_raw_new if oee_raw_new > new_oee else None
     db.commit()
     db.refresh(entry)
     return {
         "id": entry_id,
         "defect_qty": new_defect, "accp_qty": new_accp,
         "qr": new_qr, "oee": new_oee,
+        "qr_raw":  qr_raw_new  if qr_raw_new  > 100 else None,
+        "oee_raw": oee_raw_new if oee_raw_new > new_oee else None,
         "before": {"defect_qty": before_defect, "accp_qty": before_accp,
                    "qr": before_qr, "oee": before_oee}
     }
@@ -343,11 +382,21 @@ def download_xlsx(
     ws_oee.title = "OEE Report"
     oee_hdrs = ["Date","Station","Machine","Shift","Model / Variant","Current Operation","Next Operation","CT (sec)",
                 "Avail (min)","Op Time (min)","Possible Qty","Actual Qty",
-                "Prod Loss","Accepted Qty","Defect Qty","AR%","PR%","QR%","OEE%"]
+                "Prod Loss","Accepted Qty","Defect Qty",
+                "AR%","PR%","QR%","OEE%",
+                "AR% (original)","PR% (original)","QR% (original)","OEE% (original)"]
     make_header(ws_oee, oee_hdrs)
     for e in entries:
         ct = (e.process_time or 0) + (e.loading_unloading or 0)
         prod_loss = max(0, (e.possible_qty or 0) - (e.actual_qty or 0))
+        ar_val  = float(e.ar  or 0)
+        pr_val  = float(e.pr  or 0)
+        qr_val  = float(e.qr  or 0)
+        oee_val = float(e.oee or 0)
+        ar_raw  = float(e.ar_raw  or 0) if e.ar_raw is not None else None
+        pr_raw  = float(e.pr_raw  or 0) if e.pr_raw is not None else None
+        qr_raw  = float(e.qr_raw  or 0) if e.qr_raw is not None else None
+        oee_raw = float(e.oee_raw or 0) if e.oee_raw is not None else None
         ws_oee.append([
             str(e.entry_date), station_map.get(e.station_no, str(e.station_no)),
             machine_map.get(e.machine_id, "") if e.machine_id else "",
@@ -356,11 +405,19 @@ def download_xlsx(
             ct, e.available_shift_time, e.operating_time,
             e.possible_qty, e.actual_qty, prod_loss,
             e.accp_qty, e.defect_qty,
-            float(e.ar or 0), float(e.pr or 0), float(e.qr or 0), float(e.oee or 0),
+            ar_val, pr_val, qr_val, oee_val,
+            ar_raw  if ar_raw  is not None else "—",
+            pr_raw  if pr_raw  is not None else "—",
+            qr_raw  if qr_raw  is not None else "—",
+            oee_raw if oee_raw is not None else "—",
         ])
-        oee_val = float(e.oee or 0)
-        ws_oee.cell(ws_oee.max_row, 19).font = grn_f if oee_val>=85 else (amb_f if oee_val>=65 else red_f)
-    for i, w in enumerate([12,14,10,8,16,14,14,10,12,14,12,12,10,12,12,8,8,8,8], 1):
+        ri = ws_oee.max_row
+        ws_oee.cell(ri, 19).font = grn_f if oee_val>=85 else (amb_f if oee_val>=65 else red_f)
+        # Highlight capped cells in amber
+        for col, raw in [(16, ar_raw), (17, pr_raw), (18, qr_raw), (19, oee_raw)]:
+            if raw is not None:
+                ws_oee.cell(ri, col).font = amb_f
+    for i, w in enumerate([12,14,10,8,16,14,14,10,12,14,12,12,10,12,12,8,8,8,8,14,14,14,14], 1):
         ws_oee.column_dimensions[ws_oee.cell(1,i).column_letter].width = w
 
     # ── QC Logs sheet ──
@@ -495,7 +552,8 @@ def download_csv(
                      "Lunch","Tea","TPM","Other Clean","Mgmt Mtg","No Load","New Model","Power Cut",
                      "Planned Maint","No Manpower","Avail Time","Setting","Tool Change","Dim Corr",
                      "Scrap","Breakdown","Operating Time","Possible Qty","Actual Qty","Accp Qty",
-                     "Defect Qty","AR%","PR%","QR%","OEE%"])
+                     "Defect Qty","AR%","PR%","QR%","OEE%",
+                     "AR% (original)","PR% (original)","QR% (original)","OEE% (original)"])
     for e in entries:
         writer.writerow([e.entry_date, e.station_no, e.shift, e.model_variant or "", e.current_operation, e.next_operation,
                          (e.process_time or 0)+(e.loading_unloading or 0), e.start_time, e.stop_time,
@@ -504,7 +562,11 @@ def download_csv(
                          e.planned_maintenance, e.no_manpower_planned, e.available_shift_time,
                          e.setting_time, e.tool_change, e.dimension_correction, e.scrap_removal,
                          e.break_down, e.operating_time, e.possible_qty, e.actual_qty, e.accp_qty,
-                         e.defect_qty, e.ar, e.pr, e.qr, e.oee])
+                         e.defect_qty, e.ar, e.pr, e.qr, e.oee,
+                         float(e.ar_raw  or 0) if e.ar_raw  else "",
+                         float(e.pr_raw  or 0) if e.pr_raw  else "",
+                         float(e.qr_raw  or 0) if e.qr_raw  else "",
+                         float(e.oee_raw or 0) if e.oee_raw else ""])
     output.seek(0)
     return StreamingResponse(iter([output.getvalue()]), media_type="text/csv",
                              headers={"Content-Disposition": "attachment; filename=oee_report.csv"})

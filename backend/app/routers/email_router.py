@@ -103,7 +103,9 @@ def build_oee_xlsx(db: Session) -> bytes:
 
     headers = ["Date","Station","Shift","Model / Variant","Current Operation","Next Operation","CT (sec)",
                "Avail (min)","Op Time (min)","Possible Qty","Actual Qty",
-               "Prod Loss","Accepted Qty","Defect Qty","AR%","PR%","QR%","OEE%"]
+               "Prod Loss","Accepted Qty","Defect Qty",
+               "AR%","PR%","QR%","OEE%",
+               "AR% (original)","PR% (original)","QR% (original)","OEE% (original)"]
     ws.append(headers)
     for col in range(1, len(headers) + 1):
         cell = ws.cell(row=1, column=col)
@@ -113,20 +115,33 @@ def build_oee_xlsx(db: Session) -> bytes:
     for e in entries:
         ct = (e.process_time or 0) + (e.loading_unloading or 0)
         prod_loss = max(0, (e.possible_qty or 0) - (e.actual_qty or 0))
+        ar_val = float(e.ar or 0)
+        pr_val = float(e.pr or 0)
+        qr_val = float(e.qr or 0)
+        oee_val = float(e.oee or 0)
+        ar_raw = float(e.ar_raw or 0) if e.ar_raw is not None else None
+        pr_raw = float(e.pr_raw or 0) if e.pr_raw is not None else None
+        qr_raw = float(e.qr_raw or 0) if e.qr_raw is not None else None
+        oee_raw = float(e.oee_raw or 0) if e.oee_raw is not None else None
         ws.append([
             str(e.entry_date), station_map.get(e.station_no, str(e.station_no)),
             e.shift, e.model_variant or "", e.current_operation, e.next_operation,
             ct, e.available_shift_time, e.operating_time,
             e.possible_qty, e.actual_qty, prod_loss,
             e.accp_qty, e.defect_qty,
-            float(e.ar or 0), float(e.pr or 0),
-            float(e.qr or 0), float(e.oee or 0),
+            ar_val, pr_val, qr_val, oee_val,
+            ar_raw if ar_raw is not None else "—",
+            pr_raw if pr_raw is not None else "—",
+            qr_raw if qr_raw is not None else "—",
+            oee_raw if oee_raw is not None else "—",
         ])
-        oee_val = float(e.oee or 0)
-        oee_cell = ws.cell(ws.max_row, 18)
-        oee_cell.font = grn_font if oee_val >= 85 else (amb_font if oee_val >= 65 else red_font)
+        row_idx = ws.max_row
+        ws.cell(row_idx, 18).font = grn_font if oee_val >= 85 else (amb_font if oee_val >= 65 else red_font)
+        for col, raw in [(15, ar_raw), (16, pr_raw), (17, qr_raw), (18, oee_raw)]:
+            if raw is not None:
+                ws.cell(row_idx, col).font = amb_font
 
-    col_widths = [12,14,8,16,14,14,10,12,14,12,12,10,12,12,8,8,8,8]
+    col_widths = [12,14,8,16,14,14,10,12,14,12,12,10,12,12,8,8,8,8,14,14,14,14]
     for i, w in enumerate(col_widths, 1):
         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
 

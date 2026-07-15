@@ -164,12 +164,25 @@ export default function Configuration() {
       </Section>
 
       <Section title="Data Validation Settings">
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 12 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 12, flexWrap: 'wrap' }}>
           <label style={{ color: t.textMuted, fontSize: 13 }}>Check previous shift data for past N days:</label>
           <input style={{ ...s.inp, width: 60 }} type="number" min="1" max="30"
             value={config.checkDataDaysBack ?? 1}
             onChange={e => setConfig(prev => ({ ...prev, checkDataDaysBack: Math.max(1, parseInt(e.target.value) || 1) }))} />
           <span style={{ color: t.textDim, fontSize: 12 }}>(default: 1 day)</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+          <label style={{ color: t.textMuted, fontSize: 13 }}>Running part threshold (% of process time):</label>
+          <input style={{ ...s.inp, width: 80 }} type="number" min="0" max="100"
+            value={config.hourly_output?.running_part_threshold_pct ?? 30}
+            onChange={e => setConfig(prev => ({
+              ...prev,
+              hourly_output: {
+                ...(prev.hourly_output || {}),
+                running_part_threshold_pct: Math.max(0, Math.min(100, parseInt(e.target.value, 10) || 0)),
+              },
+            }))} />
+          <span style={{ color: t.textDim, fontSize: 12 }}>(0 disables the threshold; default: 30%)</span>
         </div>
       </Section>
 

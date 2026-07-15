@@ -43,6 +43,9 @@ DEFAULT_CONFIG = {
         },
     },
     "checkDataDaysBack": 1,
+    "hourly_output": {
+        "running_part_threshold_pct": 30,
+    },
     "loss_tracker_limits": {
         "idle": 1,
         "breakdown": 90,
@@ -95,6 +98,9 @@ def merge_config(stored: dict) -> dict:
     lt = stored.get("loss_tracker_limits") or {}
     default_lt = DEFAULT_CONFIG["loss_tracker_limits"]
     merged["loss_tracker_limits"] = {**default_lt, **lt}
+    hourly = stored.get("hourly_output") or {}
+    default_hourly = DEFAULT_CONFIG["hourly_output"]
+    merged["hourly_output"] = {**default_hourly, **hourly}
     return merged
 
 
