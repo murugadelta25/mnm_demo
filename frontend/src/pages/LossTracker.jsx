@@ -224,6 +224,9 @@ export default function LossTracker() {
   const [histoLog,       setHistoLog]       = useState([]);
   const [histoLoading,   setHistoLoading]   = useState(false);
 
+  // machine CT + threshold config for cycle time analysis (matches hourly output logic)
+  const [histoCt, setHistoCt] = useState({ cycle_time_sec: 0, running_part_threshold_pct: 30 });
+
   // convert minutes to ms
   const LIMITS_MS = Object.fromEntries(
     Object.entries(limitsMin).map(([k, v]) => [k, v * 60 * 1000])
@@ -340,6 +343,18 @@ export default function LossTracker() {
       .catch(() => {})
       .finally(() => setHistoLoading(false));
   }, [histoMachineId, histoShift, histoDate, shifts, stitchEnabled, stitchVariant]);
+
+  // fetch machine CT + threshold config for cycle time analysis
+  useEffect(() => {
+    if (!histoMachineId || !histoShift || !histoDate) {
+      setHistoCt({ cycle_time_sec: 0, running_part_threshold_pct: 30 });
+      return;
+    }
+    api.get('/api/hourly-output/machine-ct', {
+      params: { machine_id: histoMachineId, entry_date: histoDate, shift: histoShift },
+    }).then(r => setHistoCt(r.data))
+      .catch(() => setHistoCt({ cycle_time_sec: 0, running_part_threshold_pct: 30 }));
+  }, [histoMachineId, histoShift, histoDate]);
 
   // Pareto data
   const paretoData = useMemo(() => {
@@ -494,27 +509,31 @@ export default function LossTracker() {
         const rowStart = parseTS(r.changed_at).getTime();
         const rowEnd   = rowStart + r.durationMs;
         const ov = overlapMs(rowStart, rowEnd, win.wStart, win.wEnd);
-        if (ov <= 0) return;
         const effectiveStatus = isStitchedView && r.status === 'running' && r.is_stitched ? 'running' : r.effStatus;
-        if (ALL_ST.includes(effectiveStatus)) {
+        if (!ALL_ST.includes(effectiveStatus)) return;
+        const startsInShift = rowStart >= win.wStart && rowStart < win.wEnd;
+        if (ov > 0) {
           acc[effectiveStatus] += ov;
-          // Count event only if this row STARTED within the shift window
-          if (rowStart >= win.wStart && rowStart < win.wEnd)
-            cnt[effectiveStatus] += 1;
+        }
+        if (startsInShift) {
+          cnt[effectiveStatus] += 1;
         }
       });
 
-      // unaccounted = total shift hours - sum of all known status durations
+      // unaccounted = elapsed time so far minus known durations (not full shift)
+      const baseMs = pageTab === 'live' ? elapsedMs : shiftDurMs;
       const knownMs = ALL_ST.filter(k => k !== '_unaccounted').reduce((s, k) => s + acc[k], 0);
-      acc._unaccounted = Math.max(0, shiftDurMs - knownMs);
-      cnt._unaccounted = 0; // no events for unaccounted time
+      acc._unaccounted = Math.max(0, baseMs - knownMs);
+      cnt._unaccounted = 0;
 
-      // Date label: IST date when this shift window started
       const dateLabel = istDateStr(win.wStart);
 
       const toHM = ms => {
         const tot = Math.max(0, Math.round(ms / 60000));
-        return tot >= 60 ? `${Math.floor(tot / 60)}h ${tot % 60}m` : `${tot}m`;
+        if (tot >= 60) return `${Math.floor(tot / 60)}h ${tot % 60}m`;
+        if (tot > 0) return `${tot}m`;
+        const secs = Math.max(0, Math.round(ms / 1000));
+        return secs > 0 ? `${secs}s` : '0m';
       };
       return { shift: sh, acc, cnt, toHM, shiftDurMs, elapsedMs, dateLabel, notStarted: false };
     }).filter(Boolean);
@@ -552,6 +571,13 @@ export default function LossTracker() {
     });
 
     const isStitchedView = stitchEnabled && !!stitchVariant;
+
+    const ctSec = histoCt.cycle_time_sec || 0;
+    const threshPct = histoCt.running_part_threshold_pct ?? 30;
+    const runThreshMs = ctSec > 0 && threshPct > 0
+      ? ctSec * (threshPct / 100) * 1000
+      : 0;
+
     const bars = shiftHourSlots.map(sl => {
       const slotStart = winStart + sl.slotIndex * 3600000;
       const slotEnd = slotStart + 3600000;
@@ -559,10 +585,13 @@ export default function LossTracker() {
         const ms = toMs(r.changed_at);
         return ms >= slotStart && ms < slotEnd;
       };
-      const runRows  = shiftRows.filter(r => {
+      const runRowsAll = shiftRows.filter(r => {
         const effectiveStatus = isStitchedView && r.status === 'running' && r.is_stitched ? 'running' : r.effStatus;
         return effectiveStatus === 'running' && inSlot(r);
       });
+      const runRows = runThreshMs > 0
+        ? runRowsAll.filter(r => r.durationMs >= runThreshMs)
+        : runRowsAll;
       const ldRows   = shiftRows.filter(r => {
         const effectiveStatus = isStitchedView && r.status === 'running' && r.is_stitched ? 'running' : r.effStatus;
         return effectiveStatus === 'ld/unld' && inSlot(r);
@@ -588,13 +617,16 @@ export default function LossTracker() {
     const avg = arr => arr.length
       ? Math.round(arr.reduce((s, r) => s + r.durationMs / 1000, 0) / arr.length) : 0;
     const pickStatus = r => (isStitchedView && r.status === 'running' && r.is_stitched ? 'running' : r.effStatus);
+    const countableRun = r => pickStatus(r) === 'running' && (runThreshMs <= 0 || r.durationMs >= runThreshMs);
     return {
       bars,
-      runAvg:  avg(shiftRows.filter(r => pickStatus(r) === 'running')),
+      runAvg:  avg(shiftRows.filter(r => countableRun(r))),
       ldAvg:   avg(shiftRows.filter(r => pickStatus(r) === 'ld/unld')),
       idleAvg: avg(shiftRows.filter(r => pickStatus(r) === 'idle')),
+      ctSec,
+      threshPct,
     };
-  }, [histoShift, histoHour, histoDate, histoLog, shifts, shiftHourSlots, limitsMin, stitchEnabled, stitchVariant]); // eslint-disable-line
+  }, [histoShift, histoHour, histoDate, histoLog, shifts, shiftHourSlots, limitsMin, stitchEnabled, stitchVariant, histoCt]); // eslint-disable-line
 
   useEffect(() => {
     Promise.all([api.get('/api/stations/'), api.get('/api/machines/'), api.get('/api/parts/options', { params: { active_only: true, limit: 200 } })])
@@ -1390,6 +1422,14 @@ export default function LossTracker() {
                     <b style={{ color: histoColors.ldUnld.legend }}>Avg Ld/UnLd: {bellData.ldAvg}s</b>
                     {' · '}
                     <b style={{ color: histoColors.idle.legend }}>Avg Idle: {bellData.idleAvg}s</b>
+                    {bellData.ctSec > 0 && (
+                      <>
+                        {' · '}
+                        <span style={{ color: t.textFaint, fontSize: 11 }}>
+                          CT: {bellData.ctSec}s · threshold: ≥{Math.round(bellData.ctSec * (bellData.threshPct / 100))}s ({bellData.threshPct}%)
+                        </span>
+                      </>
+                    )}
                   </span>
                 )}
               </>

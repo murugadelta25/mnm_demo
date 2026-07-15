@@ -17,6 +17,7 @@ from .routers import deviation_alerts as deviation_alerts_router
 from .routers import notifications as notifications_router
 from .routers import platform as platform_router
 from .routers import features as features_router
+from .routers import machine_kpi as machine_kpi_router
 from .ws_manager import manager
 from sqlalchemy import text, inspect
 from sqlalchemy.orm import Session
@@ -155,6 +156,7 @@ app.include_router(deviation_alerts_router.router)
 app.include_router(notifications_router.router)
 app.include_router(platform_router.router)
 app.include_router(features_router.router)
+app.include_router(machine_kpi_router.router)
 
 # Serve uploaded machine images — pathlib works on both Windows and Linux
 STATIC_DIR = Path(__file__).parent.parent / "static"

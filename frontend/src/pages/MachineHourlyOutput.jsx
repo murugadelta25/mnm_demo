@@ -12,6 +12,14 @@ import usePersistedState from '../hooks/usePersistedState';
 
 // IST calendar dates (match Loss Tracker — avoid UTC drift from toISOString)
 const todayStr = () => new Date().toLocaleDateString('en-CA');
+
+function isValidDate(str) {
+  if (!str || !/^\d{4}-\d{2}-\d{2}$/.test(str)) return false;
+  const [y, m, d] = str.split('-').map(Number);
+  if (m < 1 || m > 12 || d < 1 || d > 31) return false;
+  const date = new Date(y, m - 1, d);
+  return date.getFullYear() === y && date.getMonth() === m - 1 && date.getDate() === d;
+}
 const yesterdayStr = () => {
   const d = new Date();
   d.setDate(d.getDate() - 1);
@@ -32,12 +40,24 @@ function liveEntryDateForShift(shift) {
 
 const STATE_ROWS = [
   { key: 'running', label: 'Running' },
-  { key: 'ld_unld', label: 'Ld/UnLd' },
-  { key: 'idle', label: 'Idle' },
   { key: 'expected', label: 'Exp Output' },
+  { key: 'ar', label: 'AR', pct: true },
+  { key: 'pr', label: 'PR', pct: true },
+  { key: 'qr', label: 'QR', pct: true },
+  { key: 'oee', label: 'OEE', pct: true },
 ];
 
 const VARIANT_COLORS = ['#86efac', '#fde047', '#f9a8d4', '#93c5fd'];
+
+const STATUS_HEART_COLORS = {
+  running: '#10b981',
+  idle: '#f59e0b',
+  breakdown: '#ef4444',
+  alarm: '#f97316',
+  setting_change: '#8b5cf6',
+  offline: '#6b7280',
+};
+const HEARTBEAT_CSS = `@keyframes liveHeartbeat{0%,100%{transform:scale(1)}25%{transform:scale(1.25)}40%{transform:scale(1)}55%{transform:scale(1.15)}70%{transform:scale(1)}}`;
 
 function shiftDate(daysOffset) {
   const d = new Date();
@@ -67,15 +87,25 @@ function buildPalette(t, isDark) {
       rowLabel: isDark ? '#4ade80' : '#15803d',
       border: isDark ? '#166534' : '#86efac',
     },
-    ld_unld: {
-      rowBg: isDark ? '#0c4a6e22' : '#e0f2fe',
-      rowLabel: isDark ? '#38bdf8' : '#0369a1',
-      border: isDark ? '#0369a1' : '#7dd3fc',
+    ar: {
+      rowBg: isDark ? '#0c4a6e44' : '#dbeafe',
+      rowLabel: isDark ? '#7dd3fc' : '#1d4ed8',
+      border: isDark ? '#0ea5e9' : '#60a5fa',
     },
-    idle: {
-      rowBg: isDark ? '#450a0a22' : '#fee2e2',
-      rowLabel: isDark ? '#f87171' : '#b91c1c',
-      border: isDark ? '#991b1b' : '#fca5a5',
+    pr: {
+      rowBg: isDark ? '#43140744' : '#ffedd5',
+      rowLabel: isDark ? '#fdba74' : '#b45309',
+      border: isDark ? '#f59e0b' : '#f97316',
+    },
+    qr: {
+      rowBg: isDark ? '#450a0a44' : '#fee2e2',
+      rowLabel: isDark ? '#fca5a5' : '#b91c1c',
+      border: isDark ? '#ef4444' : '#f87171',
+    },
+    oee: {
+      rowBg: isDark ? '#1e1b4b44' : '#e0e7ff',
+      rowLabel: isDark ? '#a5b4fc' : '#3730a3',
+      border: isDark ? '#6366f1' : '#818cf8',
     },
     expected: {
       rowBg: isDark ? '#312e8122' : '#ede9fe',
@@ -223,14 +253,29 @@ function HourlyStateTable({ states, shiftTotals, slots, palette, layout, t, incr
   const labelW = layout.ultra ? 56 : layout.compact ? 62 : 68;
   const cellPad = slotCount > 10 ? '3px 1px' : slotCount > 8 ? '4px 2px' : '5px 3px';
 
+  const pctKeys = new Set(['ar', 'pr', 'qr', 'oee']);
   const displayValues = (rowKey) => {
     const raw = states?.[rowKey] || [];
-    if (incremental || rowKey === 'expected') return raw;
+    if (pctKeys.has(rowKey) || incremental || rowKey === 'expected') return raw;
     if (rowKey === 'running') return runningVals;
     return incrementalHourly(raw);
   };
 
-  const formatCell = (val) => (val == null || val === 0 ? 0 : val);
+  const formatCell = (val, isPct) => {
+    if (val == null || val === 0) return 0;
+    if (isPct) return typeof val === 'number' ? Math.round(val) : val;
+    return val;
+  };
+
+  const oeeStyle = (val, rowPalette) => {
+    if (val == null) return { background: rowPalette.rowBg, color: rowPalette.rowLabel, fontWeight: 700, fontSize: cellFont };
+    const v = typeof val === 'number' ? val : parseFloat(val) || 0;
+    if (v >= 85) return { ...palette.perfGreen, fontSize: cellFont, fontWeight: 700 };
+    if (v >= 60) return { ...palette.perfBlue, fontSize: cellFont, fontWeight: 700 };
+    if (v >= 40) return { ...palette.perfOrange, fontSize: cellFont, fontWeight: 700 };
+    if (v > 0) return { ...palette.perfRed, fontSize: cellFont, fontWeight: 700 };
+    return { background: rowPalette.rowBg, color: rowPalette.rowLabel, fontWeight: 700, fontSize: cellFont };
+  };
 
   return (
     <div className="titan-hourly-table-wrap">
@@ -250,14 +295,16 @@ function HourlyStateTable({ states, shiftTotals, slots, palette, layout, t, incr
             <th style={{
               padding: cellPad, background: isDarkShadow(t) ? '#42200666' : '#fef08a88',
               color: isDarkShadow(t) ? '#fde047' : '#854d0e', fontSize: metaFont, textAlign: 'center', fontWeight: 800,
-              width: 44, minWidth: 44,
+              minWidth: 56, whiteSpace: 'nowrap',
             }}>Total</th>
           </tr>
         </thead>
         <tbody>
           {STATE_ROWS.map(row => {
             const rowPalette = palette[row.key];
+            if (!rowPalette) return null;
             const values = displayValues(row.key);
+            const isPct = row.pct;
             return (
               <tr key={row.key}>
                 <td style={{
@@ -265,11 +312,11 @@ function HourlyStateTable({ states, shiftTotals, slots, palette, layout, t, incr
                   color: rowPalette.rowLabel, background: rowPalette.rowBg,
                   borderLeft: `3px solid ${rowPalette.border}`,
                   whiteSpace: 'nowrap', width: labelW, minWidth: labelW, maxWidth: labelW,
-                }}>{row.label}</td>
+                }}>{row.label}{isPct ? '%' : ''}</td>
                 {values.map((val, i) => {
-                  const displayVal = incremental && row.key !== 'expected' && !(expected[i] > 0)
+                  const displayVal = incremental && !isPct && row.key !== 'expected' && !(expected[i] > 0)
                     ? 0
-                    : formatCell(val);
+                    : formatCell(val, isPct);
                   let cellStyle = { ...palette.cellNeutral, background: rowPalette.rowBg, color: t.text };
                   if (row.key === 'running') {
                     const exp = expected[i] || 0;
@@ -282,8 +329,8 @@ function HourlyStateTable({ states, shiftTotals, slots, palette, layout, t, incr
                       fontWeight: 700,
                       fontSize: cellFont,
                     };
-                  } else if (row.key === 'ld_unld' || row.key === 'idle') {
-                    cellStyle = { background: rowPalette.rowBg, color: rowPalette.rowLabel, fontWeight: 600, fontSize: cellFont };
+                  } else if (isPct) {
+                    cellStyle = oeeStyle(val, rowPalette);
                   }
                   return (
                     <td key={i} style={{
@@ -294,8 +341,12 @@ function HourlyStateTable({ states, shiftTotals, slots, palette, layout, t, incr
                 })}
                 <td style={{
                   padding: cellPad, textAlign: 'center', borderBottom: `1px solid ${t.border}`,
-                  ...palette.totalCol, fontSize: cellFont, width: 44, minWidth: 44,
-                }}>{shiftTotals?.[row.key] ?? 0}</td>
+                  ...palette.totalCol, fontSize: cellFont, minWidth: 56, whiteSpace: 'nowrap',
+                }}>
+                  {isPct
+                    ? `${typeof (shiftTotals?.[row.key]) === 'number' ? Math.round(shiftTotals[row.key]) : (shiftTotals?.[row.key] ?? 0)}%`
+                    : (shiftTotals?.[row.key] ?? 0)}
+                </td>
               </tr>
             );
           })}
@@ -305,13 +356,14 @@ function HourlyStateTable({ states, shiftTotals, slots, palette, layout, t, incr
   );
 }
 
-function VariantSection({ variantBlock, colorIndex, slots, palette, layout, t, isLast }) {
+function VariantSection({ variantBlock, colorIndex, slots, palette, layout, t, isLast, isLive, machineStatus }) {
   const statFont = layout.ultra ? 9 : layout.compact ? 10 : 11;
   const statValueFont = layout.ultra ? 11 : layout.compact ? 12 : 13;
   const variantFont = layout.ultra ? 11 : layout.compact ? 13 : 14;
   const accent = VARIANT_COLORS[colorIndex % VARIANT_COLORS.length];
   const ctText = formatCtLabel(variantBlock.cycle_time_display, variantBlock.cycle_time);
   const planQty = variantBlock.planned_qty || 0;
+  const isCurrent = variantBlock.is_current;
 
   return (
     <div style={{ borderBottom: isLast ? 'none' : `1px solid ${t.border}` }}>
@@ -329,6 +381,7 @@ function VariantSection({ variantBlock, colorIndex, slots, palette, layout, t, i
           fontSize: variantFont, fontWeight: 800, color: t.text,
           textAlign: 'center', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
         }} title={variantBlock.variant}>
+          {isLive && isCurrent && <LiveHeart status={machineStatus} size={variantFont} />}
           {variantBlock.variant}
         </div>
         <div style={{
@@ -366,7 +419,15 @@ function formatMachineCt(machine) {
   return '—';
 }
 
-function MachineCard({ machine, slots, palette, layout, t }) {
+function LiveHeart({ status, size = 24 }) {
+  const color = STATUS_HEART_COLORS[status] || '#10b981';
+  const fs = Math.max(size, 22);
+  return (
+    <span style={{ color, fontSize: fs, display: 'inline-block', animation: 'liveHeartbeat 1.2s ease-in-out infinite', filter: `drop-shadow(0 0 8px ${color})`, marginRight: 6, verticalAlign: 'middle', lineHeight: 1 }} title={status}>&#x2764;</span>
+  );
+}
+
+function MachineCard({ machine, slots, palette, layout, t, isLive, shiftLabel }) {
   const metaFont = layout.ultra ? 10 : layout.compact ? 11 : 12;
   const nameFont = layout.ultra ? 14 : layout.compact ? 16 : 18;
   const statFont = layout.ultra ? 10 : layout.compact ? 11 : 12;
@@ -403,7 +464,10 @@ function MachineCard({ machine, slots, palette, layout, t }) {
               }}>
                 {machine.machine_name}
               </div>
-              <div style={{ fontSize: metaFont, color: t.textMuted, marginTop: 3 }}>{machine.station_name}</div>
+              <div style={{ fontSize: metaFont, color: t.textMuted, marginTop: 3 }}>
+                {machine.station_name}
+                {shiftLabel && <span style={{ marginLeft: 6, padding: '1px 6px', borderRadius: 4, background: t.accent + '22', color: t.accent, fontSize: 10, fontWeight: 600 }}>{shiftLabel}</span>}
+              </div>
             </div>
             <div style={{ fontSize: statFont, color: t.textDim, textAlign: 'right' }}>
               <div>
@@ -425,7 +489,10 @@ function MachineCard({ machine, slots, palette, layout, t }) {
               }}>
                 {machine.machine_name}
               </div>
-              <div style={{ fontSize: metaFont, color: t.textMuted, marginTop: 3 }}>{machine.station_name}</div>
+              <div style={{ fontSize: metaFont, color: t.textMuted, marginTop: 3 }}>
+                {machine.station_name}
+                {shiftLabel && <span style={{ marginLeft: 6, padding: '1px 6px', borderRadius: 4, background: t.accent + '22', color: t.accent, fontSize: 10, fontWeight: 600 }}>{shiftLabel}</span>}
+              </div>
             </div>
             <div style={{
               flex: '1 1 40%', textAlign: 'center', alignSelf: 'center',
@@ -450,10 +517,13 @@ function MachineCard({ machine, slots, palette, layout, t }) {
                     maxWidth: '100%',
                   }}
                 >
+                  {isLive && i === variants.length - 1 && <LiveHeart status={machine.machine_status} size={modelVariantFont(v, layout, variants.length)} />}
                   {v}
                 </div>
               )) : (
-                <div style={{ fontSize: metaFont + 1, fontWeight: 700, color: t.textFaint }}>—</div>
+                <div style={{ fontSize: metaFont + 1, fontWeight: 700, color: t.textFaint }}>
+                  {isLive && <LiveHeart status={machine.machine_status} size={metaFont + 1} />}—
+                </div>
               )}
             </div>
             <div style={{
@@ -487,6 +557,8 @@ function MachineCard({ machine, slots, palette, layout, t }) {
                 layout={layout}
                 t={t}
                 isLast={i === breakdown.length - 1}
+                isLive={isLive}
+                machineStatus={machine.machine_status}
               />
             ))}
           </div>
@@ -518,26 +590,48 @@ function PerformanceLegend({ palette, t }) {
     { label: '> 75% of expected', style: palette.perfBlue },
     { label: '> 90% of expected', style: palette.perfGreen },
   ];
+  const sep = <span style={{ borderLeft: `2px solid ${t.border}`, height: 20, margin: '0 6px' }} />;
   return (
     <div style={{
-      display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 12, padding: '8px 12px',
+      display: 'flex', flexWrap: 'wrap', gap: 8, rowGap: 6, marginBottom: 12, padding: '8px 14px',
       background: t.surface, borderRadius: 8, border: `1px solid ${t.border}`, alignItems: 'center',
     }}>
-      <span style={{ fontSize: 11, color: t.textMuted, fontWeight: 600 }}>Running vs expected:</span>
+      {/* Segment 1: Performance badges */}
+      <span style={{ fontSize: 11, color: t.textMuted, fontWeight: 700 }}>Performance:</span>
       {items.map(it => (
         <span key={it.label} style={{
           fontSize: 10, fontWeight: 700, padding: '3px 10px', borderRadius: 6, ...it.style,
         }}>{it.label}</span>
       ))}
-      <span style={{ fontSize: 10, color: t.textFaint, marginLeft: 'auto' }}>
-        <span style={{ color: palette.running.rowLabel }}>■ Running</span>
-        {' · '}
-        <span style={{ color: palette.ld_unld.rowLabel }}>■ Ld/UnLd</span>
-        {' · '}
-        <span style={{ color: palette.idle.rowLabel }}>■ Idle</span>
-        {' · '}
-        <span style={{ color: palette.expected.rowLabel }}>■ Expected</span>
-      </span>
+
+      {sep}
+
+      {/* Segment 2: Row color keys */}
+      <span style={{ fontSize: 11, color: t.textMuted, fontWeight: 700 }}>Rows:</span>
+      {[
+        ['Running', palette.running.rowLabel],
+        ['Expected', palette.expected.rowLabel],
+        ['AR', palette.ar.rowLabel],
+        ['PR', palette.pr.rowLabel],
+        ['QR', palette.qr.rowLabel],
+        ['OEE', palette.oee.rowLabel],
+      ].map(([label, color]) => (
+        <span key={label} style={{ fontSize: 12, fontWeight: 700, color, marginRight: 2 }}>■ {label}</span>
+      ))}
+
+      {sep}
+
+      {/* Segment 3: Machine status hearts */}
+      <span style={{ fontSize: 11, color: t.textMuted, fontWeight: 700 }}>Status:</span>
+      {[['Running','running'],['Idle','idle'],['Breakdown','breakdown'],['Alarm','alarm'],['Setting','setting_change'],['Offline','offline']].map(([label, key]) => {
+        const c = STATUS_HEART_COLORS[key];
+        return (
+          <span key={key} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 11, color: t.textMuted, marginRight: 2 }}>
+            <span style={{ color: c, fontSize: 14, animation: 'liveHeartbeat 1.2s ease-in-out infinite', filter: `drop-shadow(0 0 4px ${c})`, lineHeight: 1 }}>&#x2764;</span>
+            {label}
+          </span>
+        );
+      })}
     </div>
   );
 }
@@ -606,12 +700,38 @@ export default function MachineHourlyOutput() {
   }, [entryDate, shiftId, scope, stationId, lineId, factoryId]);
 
   const fetchData = useCallback(async () => {
-    if (!entryDate || !shiftId) return;
+    if (!entryDate || !shiftId || !isValidDate(entryDate)) return;
     setLoading(true);
     setFetchErr('');
     try {
-      const r = await api.get('/api/hourly-output/', { params: buildParams() });
-      setData(r.data);
+      if (shiftId === 'ALL') {
+        const enabledShifts = config.shifts.filter(sh => sh.enabled);
+        const results = await Promise.all(
+          enabledShifts.map(sh =>
+            api.get('/api/hourly-output/', {
+              params: { ...buildParams(), shift: sh.id },
+            }).then(r => ({ ...r.data, _shiftId: sh.id, _shiftName: sh.name }))
+          )
+        );
+        const merged = {
+          slots: results[0]?.slots || [],
+          machines: [],
+          scope: results[0]?.scope || scope,
+          scope_label: results[0]?.scope_label || '',
+          is_live: results.some(r => r.is_live),
+          as_of: results.find(r => r.as_of)?.as_of,
+          _allShifts: true,
+        };
+        for (const r of results) {
+          for (const m of (r.machines || [])) {
+            merged.machines.push({ ...m, _shiftLabel: r._shiftName || r._shiftId });
+          }
+        }
+        setData(merged);
+      } else {
+        const r = await api.get('/api/hourly-output/', { params: buildParams() });
+        setData(r.data);
+      }
     } catch (err) {
       setData(null);
       const msg = err.response?.data?.detail || err.message || 'Failed to load hourly output';
@@ -619,7 +739,7 @@ export default function MachineHourlyOutput() {
     } finally {
       setLoading(false);
     }
-  }, [buildParams, entryDate, shiftId]);
+  }, [buildParams, entryDate, shiftId, config.shifts, scope]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -630,9 +750,13 @@ export default function MachineHourlyOutput() {
   }, [isLiveView, fetchData]);
 
   const goToday = () => {
-    const sh = currentShift || config.shifts.find(s => s.id === shiftId);
-    setEntryDate(liveEntryDateForShift(sh));
-    if (currentShift?.id) setShiftId(currentShift.id);
+    if (shiftId === 'ALL') {
+      setEntryDate(todayStr());
+    } else {
+      const sh = currentShift || config.shifts.find(s => s.id === shiftId);
+      setEntryDate(liveEntryDateForShift(sh));
+      if (currentShift?.id) setShiftId(currentShift.id);
+    }
   };
 
   const downloadExcel = async () => {
@@ -661,6 +785,7 @@ export default function MachineHourlyOutput() {
 
   return (
     <div className={pageClass(t)} style={s.page}>
+      <style>{HEARTBEAT_CSS}</style>
       <PageHeader
         title="MACHINES HOURLY OUTPUT"
         onRefresh={fetchData}
@@ -684,7 +809,7 @@ export default function MachineHourlyOutput() {
           {isLiveView ? 'Live' : isHistoric ? 'Historic view' : 'Future date'}
         </span>
         <span style={{ color: t.textMuted, marginLeft: 12, fontSize: 12 }}>
-          Report: {entryDate} · {activeShift?.name || shiftId}
+          Report: {entryDate} · {shiftId === 'ALL' ? 'All Shifts' : (activeShift?.name || shiftId)}
           {data?.as_of && isLiveView && (
             <> · updated to <strong style={{ color: t.text }}>{data.as_of}</strong> IST</>
           )}
@@ -701,6 +826,7 @@ export default function MachineHourlyOutput() {
         <button style={s.quickBtn} onClick={() => setEntryDate(shiftDate(-1))}>← Yesterday</button>
         <button style={s.quickBtn} onClick={goToday}>Today</button>
         <select style={s.input} value={shiftId} onChange={e => setShiftId(e.target.value)}>
+          <option value="ALL">All Shifts</option>
           {config.shifts.filter(sh => sh.enabled).map(sh => (
             <option key={sh.id} value={sh.id}>{sh.name} ({sh.start}–{sh.end})</option>
           ))}
@@ -753,7 +879,7 @@ export default function MachineHourlyOutput() {
         <div style={s.empty}>Loading hourly output…</div>
       ) : !machines.length ? (
         <div style={s.empty}>
-          No machine data for {entryDate}, shift {shiftId}.
+          No machine data for {entryDate}, {shiftId === 'ALL' ? 'all shifts' : `shift ${shiftId}`}.
         </div>
       ) : (
         <div style={{
@@ -764,14 +890,16 @@ export default function MachineHourlyOutput() {
           gap: layout.ultra ? 8 : layout.compact ? 10 : 14,
           alignItems: 'stretch',
         }}>
-          {machines.map(m => (
+          {machines.map((m, mi) => (
             <MachineCard
-              key={m.machine_id}
+              key={`${m.machine_id}-${m._shiftLabel || mi}`}
               machine={m}
               slots={slots}
               palette={palette}
               layout={layout}
               t={t}
+              isLive={isLiveView}
+              shiftLabel={data?._allShifts ? m._shiftLabel : null}
             />
           ))}
         </div>

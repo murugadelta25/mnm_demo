@@ -184,6 +184,32 @@ export default function Configuration() {
             }))} />
           <span style={{ color: t.textDim, fontSize: 12 }}>(0 disables the threshold; default: 30%)</span>
         </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap', marginTop: 10 }}>
+          <label style={{ color: t.textMuted, fontSize: 13 }}>Idle → Ld/UnLd threshold (seconds):</label>
+          <input style={{ ...s.inp, width: 80 }} type="number" min="1" max="300"
+            value={config.hourly_output?.ld_unld_max_sec ?? 60}
+            onChange={e => setConfig(prev => ({
+              ...prev,
+              hourly_output: {
+                ...(prev.hourly_output || {}),
+                ld_unld_max_sec: Math.max(1, Math.min(300, parseInt(e.target.value, 10) || 60)),
+              },
+            }))} />
+          <span style={{ color: t.textDim, fontSize: 12 }}>Idle shorter than this is classified as Loading/Unloading (default: 60s)</span>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap', marginTop: 10 }}>
+          <label style={{ color: t.textMuted, fontSize: 13 }}>Micro-gap auto-merge (seconds):</label>
+          <input style={{ ...s.inp, width: 80 }} type="number" min="0" max="120"
+            value={config.hourly_output?.micro_gap_sec ?? 15}
+            onChange={e => setConfig(prev => ({
+              ...prev,
+              hourly_output: {
+                ...(prev.hourly_output || {}),
+                micro_gap_sec: Math.max(0, Math.min(120, parseInt(e.target.value, 10) || 0)),
+              },
+            }))} />
+          <span style={{ color: t.textDim, fontSize: 12 }}>Brief stop gaps shorter than this auto-merge into one cycle (0 = disabled; default: 15s)</span>
+        </div>
       </Section>
 
       <Section title="Default Breaks & Planned Losses per Shift">

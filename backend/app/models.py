@@ -447,3 +447,33 @@ class QcInspectionReport(Base):
     incharge_approved_at = Column(DateTime)
     submitted_by = Column(Integer, ForeignKey("users.id"))
     submitted_at = Column(TIMESTAMP)
+
+
+class MachineKpiLog(Base):
+    """Snapshot of machine KPI metrics for historic analysis."""
+    __tablename__ = "machine_kpi_log"
+    id = Column(Integer, primary_key=True, index=True)
+    machine_id = Column(Integer, ForeignKey("machines.id"), nullable=False)
+    entry_date = Column(Date, nullable=False)
+    shift = Column(String(1), nullable=False)
+    model_variant = Column(String(100))
+    available_time_min = Column(Float)
+    operating_time_min = Column(Float)
+    downtime_min = Column(Float)
+    actual_production_time_min = Column(Float)
+    cycle_time_sec = Column(Float)
+    planned_qty = Column(Integer)
+    actual_qty = Column(Integer)
+    good_qty = Column(Integer)
+    defect_qty = Column(Integer)
+    expected_qty = Column(Integer)
+    theoretical_qty = Column(Integer)
+    ar = Column(Float)
+    pr = Column(Float)
+    qr = Column(Float)
+    oee = Column(Float)
+    machine_utilization = Column(Float)
+    production_yield = Column(Float)
+    teep = Column(Float)
+    computed_at = Column(DateTime, nullable=False)
+    source = Column(String(20), default="auto")

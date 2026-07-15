@@ -45,6 +45,8 @@ DEFAULT_CONFIG = {
     "checkDataDaysBack": 1,
     "hourly_output": {
         "running_part_threshold_pct": 30,
+        "ld_unld_max_sec": 60,
+        "micro_gap_sec": 15,
     },
     "loss_tracker_limits": {
         "idle": 1,

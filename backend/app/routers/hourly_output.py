@@ -13,11 +13,14 @@ from .config import DEFAULT_CONFIG, merge_config
 router = APIRouter(prefix="/api/hourly-output", tags=["hourly-output"])
 
 LD_UNLD_MAX_SEC = 60
+MICRO_GAP_SEC = 15
 STATE_LABELS = [
     ('running', 'Running'),
-    ('ld_unld', 'Ld/UnLd'),
-    ('idle', 'Idle'),
     ('expected', 'Exp Hourly Output'),
+    ('ar', 'AR %'),
+    ('pr', 'PR %'),
+    ('qr', 'QR %'),
+    ('oee', 'OEE %'),
 ]
 
 _TIMED_BREAK_DEFAULTS = {
@@ -406,11 +409,16 @@ def _slot_parts_in_windows(
     slot_end: datetime,
     state_filter: set,
     ct: float,
+    threshold_ratio: float = 0.3,
 ) -> int:
-    """Count state transitions whose start falls in slot and within variant windows."""
+    """Count state transitions whose start falls in slot and within variant windows.
+
+    For running segments, applies the same duration threshold as the main
+    count_transitions_through to avoid counting micro-runs as parts.
+    """
     if not var_windows or not _slot_overlaps_windows(var_windows, slot_start, slot_end):
         return 0
-    count = 0
+    relevant = []
     for seg in segments:
         if seg['state'] not in state_filter:
             continue
@@ -418,9 +426,87 @@ def _slot_parts_in_windows(
             continue
         for w in var_windows:
             if seg['start'] >= w['start'] and seg['start'] < w['end']:
-                count += 1
+                relevant.append(seg)
                 break
-    return count
+    if state_filter == {'running'} and ct and ct > 0:
+        return _countable_running_segments(relevant, ct, threshold_ratio)
+    return len(relevant)
+
+
+def _slot_state_minutes(segments, slot_start, slot_end, state_filter):
+    """Sum segment durations overlapping with the slot for the given states."""
+    total = 0.0
+    for seg in segments:
+        if seg['state'] not in state_filter:
+            continue
+        lo = max(seg['start'], slot_start)
+        hi = min(seg['end'], slot_end)
+        if hi > lo:
+            total += (hi - lo).total_seconds() / 60.0
+    return total
+
+
+def _slot_state_mins_windowed(segments, var_windows, slot_start, slot_end, state_filter):
+    """Sum durations of matching states within both the hourly slot and the variant windows."""
+    if not var_windows:
+        return 0.0
+    total = 0.0
+    for seg in segments:
+        if seg['state'] not in state_filter:
+            continue
+        seg_lo = max(seg['start'], slot_start)
+        seg_hi = min(seg['end'], slot_end)
+        if seg_hi <= seg_lo:
+            continue
+        for w in var_windows:
+            lo = max(seg_lo, w['start'])
+            hi = min(seg_hi, w['end'])
+            if hi > lo:
+                total += (hi - lo).total_seconds() / 60.0
+    return total
+
+
+def _machine_qr(oee_entries):
+    """Average QR from OEE data entry, defaults to 100 if none."""
+    if not oee_entries:
+        return 100.0
+    vals = [float(e.qr) for e in oee_entries if e.qr is not None]
+    return sum(vals) / len(vals) if vals else 100.0
+
+
+def _compute_oee_slots(running_inc, expected, operating_mins, avail_mins, qr_val):
+    """Compute per-slot AR, PR, QR, OEE arrays.
+    AR = operating_time / available_time (operating = available - downtime).
+    PR = actual parts / expected parts.
+    """
+    ar_arr, pr_arr, qr_arr, oee_arr = [], [], [], []
+    for i in range(len(running_inc)):
+        avail = avail_mins[i] if i < len(avail_mins) else 60.0
+        op = operating_mins[i] if i < len(operating_mins) else 0.0
+        actual = running_inc[i]
+        exp = expected[i] if i < len(expected) else 0
+
+        ar = round(min(op / avail * 100, 100.0), 1) if avail > 0 else 0.0
+        pr = round(actual / exp * 100, 1) if exp > 0 else 0.0
+        qr = round(qr_val, 1)
+        oee_v = round(ar * pr * qr / 10000, 1)
+
+        ar_arr.append(ar)
+        pr_arr.append(pr)
+        qr_arr.append(qr)
+        oee_arr.append(oee_v)
+    return ar_arr, pr_arr, qr_arr, oee_arr
+
+
+def _oee_shift_totals(avail_mins, operating_mins, total_actual, total_expected, qr_val):
+    """Compute shift-level OEE totals."""
+    total_avail = sum(avail_mins)
+    total_op = sum(operating_mins)
+    ar = round(min(total_op / total_avail * 100, 100.0), 1) if total_avail > 0 else 0.0
+    pr = round(total_actual / total_expected * 100, 1) if total_expected > 0 else 0.0
+    qr = round(qr_val, 1)
+    oee = round(ar * pr * qr / 10000, 1)
+    return ar, pr, qr, oee
 
 
 def _build_variant_breakdown(
@@ -433,6 +519,8 @@ def _build_variant_breakdown(
     segments: list,
     machine_plans: list,
     machine_oee: list,
+    qr_val: float = 100.0,
+    running_threshold_ratio: float = 0.3,
 ) -> list:
     if not variants:
         return []
@@ -469,6 +557,7 @@ def _build_variant_breakdown(
             slot_end = min(shift_start + timedelta(hours=s['slot_index'] + 1), shift_end)
             running_hourly.append(_slot_parts_in_windows(
                 segments, status_windows, slot_start, slot_end, {'running'}, ct,
+                threshold_ratio=running_threshold_ratio,
             ))
             ld_hourly.append(_slot_parts_in_windows(
                 segments, status_windows, slot_start, slot_end, {'ld_unld'}, ct,
@@ -476,6 +565,23 @@ def _build_variant_breakdown(
             idle_hourly.append(_slot_parts_in_windows(
                 segments, status_windows, slot_start, slot_end, {'idle'}, ct,
             ))
+
+        # OEE metrics per variant per slot — AR uses operating time (running + ld_unld)
+        var_op_mins = []
+        var_avail_mins = []
+        for s in slots:
+            s_start = shift_start + timedelta(hours=s['slot_index'])
+            s_end = min(shift_start + timedelta(hours=s['slot_index'] + 1), shift_end)
+            var_op_mins.append(_slot_state_mins_windowed(
+                segments, status_windows, s_start, s_end, {'running', 'ld_unld'},
+            ))
+            var_avail_mins.append(_mins_available(s_start, s_end, breaks))
+        ar_h, pr_h, qr_h, oee_h = _compute_oee_slots(
+            running_hourly, expected_hourly, var_op_mins, var_avail_mins, qr_val,
+        )
+        ar_t, pr_t, qr_t, oee_t = _oee_shift_totals(
+            var_avail_mins, var_op_mins, sum(running_hourly), exp_shift_total, qr_val,
+        )
 
         if var_windows:
             w_start = min(w['start'] for w in var_windows)
@@ -486,6 +592,9 @@ def _build_variant_breakdown(
         breakdown.append({
             'variant': variant,
             'planned_qty': planned,
+            'is_current': False,
+            '_w_start': w_start,
+            '_w_end': w_end,
             'cycle_time': ct,
             'cycle_time_display': _fmt_ct_val(ct) if ct else '0',
             'window_start': w_start.strftime('%H:%M'),
@@ -497,14 +606,47 @@ def _build_variant_breakdown(
                 'ld_unld': ld_hourly,
                 'idle': idle_hourly,
                 'expected': expected_hourly,
+                'ar': ar_h,
+                'pr': pr_h,
+                'qr': qr_h,
+                'oee': oee_h,
             },
             'shift_totals': {
                 'running': sum(running_hourly),
                 'ld_unld': sum(ld_hourly),
                 'idle': sum(idle_hourly),
                 'expected': exp_shift_total,
+                'ar': ar_t,
+                'pr': pr_t,
+                'qr': qr_t,
+                'oee': oee_t,
             },
         })
+
+    running_plan_variants = {
+        (_plan_variant(p))
+        for p in machine_plans
+        if getattr(p, 'status', None) == 'running'
+    }
+
+    _now = datetime.now()
+    current_idx = None
+    for i, bd in enumerate(breakdown):
+        ws, we = bd.pop('_w_start'), bd.pop('_w_end')
+        if bd['variant'] in running_plan_variants:
+            current_idx = i
+    if current_idx is None:
+        for i, bd in enumerate(breakdown):
+            if bd.get('planned_qty', 0) > 0:
+                ws_check = [w for w in windows if w.get('variant') == bd['variant']]
+                if ws_check:
+                    w_end = max(w['end'] for w in ws_check)
+                    if _now <= w_end:
+                        current_idx = i
+    if current_idx is None and breakdown:
+        current_idx = len(breakdown) - 1
+    if current_idx is not None:
+        breakdown[current_idx]['is_current'] = True
 
     return breakdown
 
@@ -585,6 +727,8 @@ def _build_status_segments(
     shift_start: datetime,
     effective_end: datetime,
     cycle_profile: Optional[dict] = None,
+    ld_unld_max_sec: int = LD_UNLD_MAX_SEC,
+    micro_gap_sec: int = MICRO_GAP_SEC,
 ) -> list:
     """Status segments from shift_start through effective_end.
     cycle_profile is only passed for parts that explicitly have interruptions > 0.
@@ -636,25 +780,66 @@ def _build_status_segments(
             continue
         dur = int((seg_end - seg_start).total_seconds())
         raw_segments.append({
-            'state': _classify(status, dur),
+            'state': _classify(status, dur, ld_unld_max_sec),
             'start': seg_start,
             'end': seg_end,
             'seconds': dur,
         })
 
-    # Only stitch when this specific part has a cycle_profile with interruptions > 0
+    raw_segments = _merge_micro_gaps(raw_segments, micro_gap_sec)
+
     if not cycle_profile or not raw_segments:
         return raw_segments
 
     return _stitch_segments(raw_segments, cycle_profile)
 
 
-def _classify(status: str, duration_sec: int) -> str:
-    if status == 'idle' and duration_sec < LD_UNLD_MAX_SEC:
+def _classify(status: str, duration_sec: int, ld_unld_max: int = LD_UNLD_MAX_SEC) -> str:
+    if status == 'idle' and duration_sec < ld_unld_max:
         return 'ld_unld'
     if status in ('running', 'idle'):
         return status
     return 'idle'
+
+
+def _merge_micro_gaps(segments: list, gap_sec: int = MICRO_GAP_SEC) -> list:
+    """Auto-merge running segments separated by very short ld_unld gaps.
+
+    Handles brief corrections where the operator stops for a few seconds
+    without removing the part, then restarts. Without this, each stop/start
+    would be counted as a separate part.
+    """
+    if len(segments) < 3 or gap_sec <= 0:
+        return segments
+
+    out = []
+    i = 0
+    n = len(segments)
+    while i < n:
+        if (i + 2 < n
+                and segments[i]['state'] == 'running'
+                and segments[i + 1]['state'] == 'ld_unld'
+                and segments[i + 1]['seconds'] < gap_sec
+                and segments[i + 2]['state'] == 'running'):
+            merged = {
+                'state': 'running',
+                'start': segments[i]['start'],
+                'end': segments[i + 2]['end'],
+                'seconds': segments[i]['seconds'] + segments[i + 1]['seconds'] + segments[i + 2]['seconds'],
+            }
+            i += 3
+            while (i + 1 < n
+                   and segments[i]['state'] == 'ld_unld'
+                   and segments[i]['seconds'] < gap_sec
+                   and segments[i + 1]['state'] == 'running'):
+                merged['end'] = segments[i + 1]['end']
+                merged['seconds'] += segments[i]['seconds'] + segments[i + 1]['seconds']
+                i += 2
+            out.append(merged)
+        else:
+            out.append(segments[i])
+            i += 1
+    return out
 
 
 def _running_part_threshold_ratio(cfg: Optional[dict]) -> float:
@@ -670,6 +855,29 @@ def _running_part_threshold_ratio(cfg: Optional[dict]) -> float:
     if pct <= 0:
         return 0.0
     return min(max(pct / 100.0, 0.0), 1.0)
+
+
+def _cfg_ld_unld_max_sec(cfg: Optional[dict]) -> int:
+    """Idle duration below this (in seconds) is classified as Ld/UnLd. Default 60."""
+    if not cfg:
+        return LD_UNLD_MAX_SEC
+    hourly_cfg = cfg.get('hourly_output') or {}
+    try:
+        return max(1, int(hourly_cfg.get('ld_unld_max_sec', LD_UNLD_MAX_SEC)))
+    except (TypeError, ValueError):
+        return LD_UNLD_MAX_SEC
+
+
+def _cfg_micro_gap_sec(cfg: Optional[dict]) -> int:
+    """Ld/UnLd gaps shorter than this (in seconds) between two running segments
+    are auto-merged into a single running segment. Default 15. Set 0 to disable."""
+    if not cfg:
+        return MICRO_GAP_SEC
+    hourly_cfg = cfg.get('hourly_output') or {}
+    try:
+        return max(0, int(hourly_cfg.get('micro_gap_sec', MICRO_GAP_SEC)))
+    except (TypeError, ValueError):
+        return MICRO_GAP_SEC
 
 
 def _countable_running_segments(segments: list, process_time_sec: Optional[float], ratio: float = 0.3) -> int:
@@ -828,6 +1036,8 @@ def build_hourly_output(
     break_cfg = (cfg.get('breaks') or {}).get(shift, {})
     breaks = _break_windows(break_cfg)
     running_part_threshold_ratio = _running_part_threshold_ratio(cfg)
+    ld_unld_max = _cfg_ld_unld_max_sec(cfg)
+    micro_gap = _cfg_micro_gap_sec(cfg)
     shift_start, shift_end = _shift_window(entry_date, shift_def)
     effective_end = _effective_shift_end(shift_start, shift_end)
     is_live = shift_start < effective_end < shift_end
@@ -909,7 +1119,7 @@ def build_hourly_output(
                 if all_same:
                     cycle_profile = first
 
-        segments = _build_status_segments(db, m.id, shift_start, effective_end, cycle_profile)
+        segments = _build_status_segments(db, m.id, shift_start, effective_end, cycle_profile, ld_unld_max, micro_gap)
 
         def count_transitions_through(slot_end_dt: datetime, state_filter):
             """Count transitions (occurrences) from shift_start up to slot_end_dt."""
@@ -933,14 +1143,39 @@ def build_hourly_output(
             idle_cum.append(count_transitions_through(slot_end_dt, {'idle'}))
 
         ct_display = _ct_display_str(cycle_times)
+
+        # Per-slot OEE metrics
+        # AR = Operating Time / Available Time
+        # Operating Time = time in running + ld_unld (productive states)
+        # Downtime = idle + setting_change + breakdown + alarm + offline
+        qr_val = _machine_qr(machine_oee)
+        avail_mins = _hourly_avail_minutes(slots, shift_start, shift_end, breaks)
+        operating_mins_per_slot = []
+        for s in slots:
+            s_start = shift_start + timedelta(hours=s['slot_index'])
+            s_end = min(shift_start + timedelta(hours=s['slot_index'] + 1), shift_end, effective_end)
+            operating_mins_per_slot.append(
+                _slot_state_minutes(segments, s_start, s_end, {'running', 'ld_unld'})
+            )
+        running_inc = [running_cum[0]] + [max(0, running_cum[i] - running_cum[i - 1]) for i in range(1, len(running_cum))]
+        ar_hourly, pr_hourly, qr_hourly, oee_hourly = _compute_oee_slots(
+            running_inc, expected_hourly, operating_mins_per_slot, avail_mins, qr_val,
+        )
+        ar_tot, pr_tot, qr_tot, oee_tot = _oee_shift_totals(
+            avail_mins, operating_mins_per_slot,
+            running_cum[-1] if running_cum else 0, exp_shift_total, qr_val,
+        )
+
         variant_breakdown = _build_variant_breakdown(
             variants, windows, slots, shift_start, shift_end, breaks,
-            segments, machine_plans, machine_oee,
+            segments, machine_plans, machine_oee, qr_val,
+            running_threshold_ratio=running_part_threshold_ratio,
         )
 
         result_machines.append({
             'machine_id': m.id,
             'machine_name': m.name,
+            'machine_status': m.status or 'idle',
             'station_id': m.station_id,
             'station_name': station.display_name if station else str(m.station_id),
             'location': m.location or '',
@@ -959,12 +1194,20 @@ def build_hourly_output(
                 'ld_unld': ld_cum,
                 'idle': idle_cum,
                 'expected': expected_hourly,
+                'ar': ar_hourly,
+                'pr': pr_hourly,
+                'qr': qr_hourly,
+                'oee': oee_hourly,
             },
             'shift_totals': {
                 'running': running_cum[-1] if running_cum else 0,
                 'ld_unld': ld_cum[-1] if ld_cum else 0,
                 'idle': idle_cum[-1] if idle_cum else 0,
                 'expected': exp_shift_total,
+                'ar': ar_tot,
+                'pr': pr_tot,
+                'qr': qr_tot,
+                'oee': oee_tot,
             },
         })
 
@@ -1052,6 +1295,34 @@ def _build_xlsx(payload: dict) -> bytes:
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+@router.get("/machine-ct")
+def get_machine_ct(
+    machine_id: int = Query(...),
+    entry_date: date = Query(...),
+    shift: str = Query(...),
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Lightweight endpoint: returns the active cycle time for a machine on a date/shift."""
+    cfg = _load_config(db)
+    hourly_cfg = cfg.get('hourly_output') or {}
+    plans = db.query(ProductionPlan).filter(
+        ProductionPlan.machine_id == machine_id,
+        ProductionPlan.plan_date == entry_date,
+        ProductionPlan.shift == shift,
+        ProductionPlan.status.in_(['running', 'completed', 'pending']),
+    ).order_by(ProductionPlan.status.desc(), ProductionPlan.priority).all()
+    ct = _plan_ct(plans[0]) if plans else 0.0
+    pt = float(plans[0].process_time or 0) if plans else 0.0
+    return {
+        "cycle_time_sec": ct,
+        "process_time_sec": pt,
+        "running_part_threshold_pct": hourly_cfg.get('running_part_threshold_pct', 30),
+        "ld_unld_max_sec": hourly_cfg.get('ld_unld_max_sec', 60),
+        "micro_gap_sec": hourly_cfg.get('micro_gap_sec', 15),
+    }
 
 
 @router.get("/")

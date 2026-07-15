@@ -80,13 +80,29 @@ def get_group_emails(db: Session, group_ids: List[int]) -> List[str]:
 def build_oee_xlsx(db: Session) -> bytes:
     import openpyxl
     from openpyxl.styles import Font, PatternFill, Alignment
-    from ..models import Station, OEEDefectLog, User
+    from ..models import Station, OEEDefectLog, User, Machine, ProductionPlan, WorkOrder
 
     entries = db.query(OEEEntry).order_by(OEEEntry.entry_date.desc()).all()
     station_map = {p.id: (p.display_name or p.name) for p in db.query(Station).all()}
+    machine_map = {m.id: m.name for m in db.query(Machine).all()}
     user_map = {u.id: u.username for u in db.query(User).all()}
 
-    IST = 5.5 * 3600
+    dates = {e.entry_date for e in entries}
+    all_plans = db.query(ProductionPlan).filter(ProductionPlan.plan_date.in_(dates)).all() if dates else []
+    wo_ids = {p.work_order_id for p in all_plans if p.work_order_id}
+    wo_map = {w.id: w.work_order_no for w in db.query(WorkOrder).filter(WorkOrder.id.in_(wo_ids)).all()} if wo_ids else {}
+    plan_lookup = {}
+    for p in all_plans:
+        key = (p.machine_id, str(p.plan_date), p.shift, p.current_operation)
+        wo_no = wo_map.get(p.work_order_id, "")
+        existing = plan_lookup.get(key)
+        if not existing:
+            plan_lookup[key] = {"wo": wo_no, "planned": p.planned_qty or 0}
+        else:
+            existing["planned"] += (p.planned_qty or 0)
+            if wo_no and not existing["wo"]:
+                existing["wo"] = wo_no
+
     def fmt_ist(dt_val):
         if not dt_val: return ''
         return dt_val.strftime('%d-%m-%Y %H:%M:%S IST')
@@ -101,8 +117,9 @@ def build_oee_xlsx(db: Session) -> bytes:
     grn_font  = Font(bold=True, color="059669")
     amb_font  = Font(bold=True, color="D97706")
 
-    headers = ["Date","Station","Shift","Model / Variant","Current Operation","Next Operation","CT (sec)",
-               "Avail (min)","Op Time (min)","Possible Qty","Actual Qty",
+    headers = ["Date","Station","Machine","Shift","Work Order","Model / Variant",
+               "Current Operation","Next Operation","CT (sec)",
+               "Avail (min)","Op Time (min)","Plan Qty","Possible Qty","Actual Qty",
                "Prod Loss","Accepted Qty","Defect Qty",
                "AR%","PR%","QR%","OEE%",
                "AR% (original)","PR% (original)","QR% (original)","OEE% (original)"]
@@ -123,11 +140,15 @@ def build_oee_xlsx(db: Session) -> bytes:
         pr_raw = float(e.pr_raw or 0) if e.pr_raw is not None else None
         qr_raw = float(e.qr_raw or 0) if e.qr_raw is not None else None
         oee_raw = float(e.oee_raw or 0) if e.oee_raw is not None else None
+        key = (e.machine_id, str(e.entry_date), e.shift, e.current_operation)
+        pl = plan_lookup.get(key, {})
         ws.append([
             str(e.entry_date), station_map.get(e.station_no, str(e.station_no)),
-            e.shift, e.model_variant or "", e.current_operation, e.next_operation,
+            machine_map.get(e.machine_id, "") if e.machine_id else "",
+            e.shift, pl.get("wo", ""), e.model_variant or "",
+            e.current_operation, e.next_operation,
             ct, e.available_shift_time, e.operating_time,
-            e.possible_qty, e.actual_qty, prod_loss,
+            pl.get("planned", ""), e.possible_qty, e.actual_qty, prod_loss,
             e.accp_qty, e.defect_qty,
             ar_val, pr_val, qr_val, oee_val,
             ar_raw if ar_raw is not None else "—",
@@ -136,12 +157,12 @@ def build_oee_xlsx(db: Session) -> bytes:
             oee_raw if oee_raw is not None else "—",
         ])
         row_idx = ws.max_row
-        ws.cell(row_idx, 18).font = grn_font if oee_val >= 85 else (amb_font if oee_val >= 65 else red_font)
-        for col, raw in [(15, ar_raw), (16, pr_raw), (17, qr_raw), (18, oee_raw)]:
+        ws.cell(row_idx, 21).font = grn_font if oee_val >= 85 else (amb_font if oee_val >= 65 else red_font)
+        for col, raw in [(18, ar_raw), (19, pr_raw), (20, qr_raw), (21, oee_raw)]:
             if raw is not None:
                 ws.cell(row_idx, col).font = amb_font
 
-    col_widths = [12,14,8,16,14,14,10,12,14,12,12,10,12,12,8,8,8,8,14,14,14,14]
+    col_widths = [12,14,12,8,18,16,14,14,10,12,14,10,12,12,10,12,12,8,8,8,8,14,14,14,14]
     for i, w in enumerate(col_widths, 1):
         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
 

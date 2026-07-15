@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, Fragment } from 'react';
+import { useNavigate } from 'react-router-dom';
 import api from '../api/client';
 import { useWebSocket } from '../api/useWebSocket';
 import PageHeader from '../components/PageHeader';
@@ -15,6 +16,24 @@ const AR_COLOR = '#4fc3f7';
 const PR_COLOR = '#f8a5c8';
 const QR_COLOR = '#f8bf05';
 const todayStr = () => new Date().toISOString().slice(0, 10);
+
+const STATUS_DOT_COLORS = {
+  running: '#10b981',
+  idle: '#f59e0b',
+  breakdown: '#ef4444',
+  alarm: '#f97316',
+  setting_change: '#8b5cf6',
+  offline: '#6b7280',
+};
+const PULSE_CSS = `@keyframes liveHeartbeat{0%,100%{transform:scale(1)}25%{transform:scale(1.25)}40%{transform:scale(1)}55%{transform:scale(1.15)}70%{transform:scale(1)}}`;
+
+function isValidDate(str) {
+  if (!str || !/^\d{4}-\d{2}-\d{2}$/.test(str)) return false;
+  const [y, m, d] = str.split('-').map(Number);
+  if (m < 1 || m > 12 || d < 1 || d > 31) return false;
+  const date = new Date(y, m - 1, d);
+  return date.getFullYear() === y && date.getMonth() === m - 1 && date.getDate() === d;
+}
 
 function weekRangeEndingToday() {
   const to = new Date();
@@ -44,11 +63,19 @@ export default function Dashboard() {
   const [summary, setSummary] = useState(null);
   const [stations, setStations] = useState([]);
   const [machines, setMachines] = useState([]);
-  const [viewMode, setViewMode] = useState('week');
+  const [viewMode, setViewMode] = useState('day');
   const [missingShifts, setMissingShifts] = useState([]);
   const [defectEdit, setDefectEdit] = useState({ id: null, value: '', note: '' });
   const [defectSaving, setDefectSaving] = useState(false);
-  const [defectLog, setDefectLog] = useState({ id: null, records: [] }); // {id, records[]}
+  const [defectLog, setDefectLog] = useState({ id: null, records: [] });
+  const [kpiDialog, setKpiDialog] = useState({ open: false, loading: false, data: null });
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (currentShift?.id && !filters.shift) {
+      setFilters(f => ({ ...f, shift: currentShift.id }));
+    }
+  }, [currentShift]);
 
   const getStationLabel = (stationId) => {
     const station = stations.find(s => s.id === stationId);
@@ -61,10 +88,23 @@ export default function Dashboard() {
     return machine ? machine.name : `Machine ${machineId}`;
   };
 
+  const openMachineKpi = async (machineId, entryDate, shift) => {
+    if (!machineId || !entryDate || !shift) return;
+    setKpiDialog({ open: true, loading: true, data: null });
+    try {
+      const r = await api.get('/api/machine-kpi/compute', {
+        params: { machine_id: machineId, entry_date: entryDate, shift },
+      });
+      setKpiDialog({ open: true, loading: false, data: r.data });
+    } catch (err) {
+      setKpiDialog({ open: true, loading: false, data: null, error: err.message });
+    }
+  };
+
   const buildParams = useCallback(() => {
     const p = {};
     if (filters.shift) p.shift = filters.shift;
-    if (viewMode === 'day' && filters.entry_date) p.entry_date = filters.entry_date;
+    if ((viewMode === 'day' || viewMode === 'shift') && filters.entry_date) p.entry_date = filters.entry_date;
     if ((viewMode === 'week' || viewMode === 'range') && filters.date_from) p.date_from = filters.date_from;
     if ((viewMode === 'week' || viewMode === 'range') && filters.date_to) p.date_to = filters.date_to;
     if (viewMode === 'month' && filters.month) p.month = filters.month;
@@ -76,22 +116,42 @@ export default function Dashboard() {
   }, [filters, viewMode]);
 
   const fetchData = useCallback(async () => {
+    if ((viewMode === 'day' || viewMode === 'shift') && !isValidDate(filters.entry_date)) return;
+    if ((viewMode === 'week' || viewMode === 'range') && (!isValidDate(filters.date_from) || !isValidDate(filters.date_to))) return;
     try {
       const params = buildParams();
-      const [e, s, p, m] = await Promise.all([
+      const rtParams = {};
+      if (viewMode === 'day' && params.entry_date) rtParams.entry_date = params.entry_date;
+      else rtParams.entry_date = new Date().toISOString().slice(0, 10);
+      if (params.shift) rtParams.shift = params.shift;
+      if (params.station_no) rtParams.station_no = params.station_no;
+      if (params.machine_id) rtParams.machine_id = params.machine_id;
+
+      const [e, s, p, m, rt] = await Promise.all([
         api.get('/api/oee/', { params }),
         api.get('/api/oee/summary', { params }),
         api.get('/api/stations/'),
         api.get('/api/machines/'),
+        api.get('/api/oee/realtime', { params: rtParams }).catch(() => ({ data: [] })),
       ]);
-      setEntries(Array.isArray(e.data) ? e.data : []);
+      const manualEntries = (Array.isArray(e.data) ? e.data : []);
+      const realtimeEntries = (Array.isArray(rt.data) ? rt.data : []);
+
+      const manualKeys = new Set(
+        manualEntries.map(x => `${x.machine_id}_${x.shift}_${x.entry_date}`)
+      );
+      const uniqueRt = realtimeEntries.filter(
+        r => !manualKeys.has(`${r.machine_id}_${r.shift}_${r.entry_date}`)
+      );
+
+      setEntries([...manualEntries, ...uniqueRt]);
       setSummary(s.data || null);
       setStations(Array.isArray(p.data) ? p.data : []);
       setMachines(Array.isArray(m.data) ? m.data : []);
     } catch (err) {
       console.error('Dashboard fetch error:', err);
     }
-  }, [buildParams]);
+  }, [buildParams, viewMode, filters.entry_date, filters.date_from, filters.date_to]);
 
   // Check missing shifts - warn if previous shift data not found in configured days back
   const checkMissingShifts = useCallback(async () => {
@@ -203,6 +263,26 @@ export default function Dashboard() {
     }
   };
 
+  const mergedSummary = useMemo(() => {
+    if (!entries.length) return summary;
+    const allEntries = entries;
+    const n = allEntries.length;
+    if (n === 0) return summary;
+    const avgAr = allEntries.reduce((s, e) => s + safeNum(e.ar), 0) / n;
+    const avgPr = allEntries.reduce((s, e) => s + safeNum(e.pr), 0) / n;
+    const avgQr = allEntries.reduce((s, e) => s + safeNum(e.qr), 0) / n;
+    const avgOee = allEntries.reduce((s, e) => s + safeNum(e.oee), 0) / n;
+    return {
+      avg_ar: parseFloat(avgAr.toFixed(2)),
+      avg_pr: parseFloat(avgPr.toFixed(2)),
+      avg_qr: parseFloat(avgQr.toFixed(2)),
+      avg_oee: parseFloat(avgOee.toFixed(2)),
+      total_actual: allEntries.reduce((s, e) => s + safeNum(e.actual_qty), 0),
+      total_accp: allEntries.reduce((s, e) => s + safeNum(e.accp_qty), 0),
+      total_defect: allEntries.reduce((s, e) => s + safeNum(e.defect_qty), 0),
+    };
+  }, [entries, summary]);
+
   const chartData = entries.map(e => ({
     label: `${e.entry_date} ${e.shift}`,
     AR: safeNum(e.ar),
@@ -224,6 +304,7 @@ export default function Dashboard() {
 
   return (
     <div className={pageClass(t)} style={s.page}>
+      <style>{PULSE_CSS}</style>
       <PageHeader title="PRODUCTION DASHBOARD" onRefresh={fetchData} />
 
       {/* Missing shift alerts */}
@@ -271,8 +352,16 @@ export default function Dashboard() {
         )}
 
         {viewMode === 'day' && (
-          <input style={s.input} type="date" value={filters.entry_date}
-            onChange={e => setFilters(p => ({ ...p, entry_date: e.target.value }))} />
+          <>
+            <input style={s.input} type="date" value={filters.entry_date}
+              onChange={e => setFilters(p => ({ ...p, entry_date: e.target.value }))} />
+            <select style={s.input} value={filters.shift} onChange={e => setFilters(p => ({ ...p, shift: e.target.value }))}>
+              <option value="">All Shifts</option>
+              {config.shifts.filter(sh => sh.enabled).map(sh => (
+                <option key={sh.id} value={sh.id}>{sh.name}</option>
+              ))}
+            </select>
+          </>
         )}
         {(viewMode === 'week' || viewMode === 'range') && (
           <>
@@ -281,15 +370,25 @@ export default function Dashboard() {
             <span style={{ color: t.textDim, fontSize: 13 }}>to</span>
             <input style={s.input} type="date" value={filters.date_to}
               onChange={e => setFilters(p => ({ ...p, date_to: e.target.value }))} />
+            <select style={s.input} value={filters.shift} onChange={e => setFilters(p => ({ ...p, shift: e.target.value }))}>
+              <option value="">All Shifts</option>
+              {config.shifts.filter(sh => sh.enabled).map(sh => (
+                <option key={sh.id} value={sh.id}>{sh.name}</option>
+              ))}
+            </select>
           </>
         )}
         {viewMode === 'shift' && (
-          <select style={s.input} value={filters.shift} onChange={e => setFilters(p => ({ ...p, shift: e.target.value }))}>
-            <option value="">All Shifts</option>
-            {config.shifts.filter(sh => sh.enabled).map(sh => (
-              <option key={sh.id} value={sh.id}>{sh.name}</option>
-            ))}
-          </select>
+          <>
+            <input style={s.input} type="date" value={filters.entry_date}
+              onChange={e => setFilters(p => ({ ...p, entry_date: e.target.value }))} />
+            <select style={s.input} value={filters.shift} onChange={e => setFilters(p => ({ ...p, shift: e.target.value }))}>
+              <option value="">All Shifts</option>
+              {config.shifts.filter(sh => sh.enabled).map(sh => (
+                <option key={sh.id} value={sh.id}>{sh.name}</option>
+              ))}
+            </select>
+          </>
         )}
         {viewMode === 'month' && (
           <select style={s.input} value={filters.month} onChange={e => setFilters(p => ({ ...p, month: e.target.value }))}>
@@ -318,17 +417,17 @@ export default function Dashboard() {
       </div>
 
       {/* KPI Cards */}
-      {summary && (
+      {mergedSummary && (
         <div style={s.kpiRow}>
           {[
-            { label: 'Availability (AR)', value: `${safeNum(summary.avg_ar).toFixed(2)}%`, color: '#0ea5e9' },
-            { label: 'Performance (PR)', value: `${safeNum(summary.avg_pr).toFixed(2)}%`, color: '#8b5cf6' },
-            { label: 'Quality (QR)', value: `${safeNum(summary.avg_qr).toFixed(2)}%`, color: '#10b981' },
-            { label: 'OEE', value: `${safeNum(summary.avg_oee).toFixed(2)}%`,
-              color: safeNum(summary.avg_oee) >= 85 ? '#10b981' : safeNum(summary.avg_oee) >= 65 ? '#f59e0b' : '#ef4444' },
-            { label: 'Total Produced', value: summary.total_actual ?? 0, color: '#64748b' },
-            { label: 'Accepted Qty', value: summary.total_accp ?? 0, color: '#10b981' },
-            { label: 'Defects', value: summary.total_defect ?? 0, color: '#ef4444' },
+            { label: 'Availability (AR)', value: `${safeNum(mergedSummary.avg_ar).toFixed(2)}%`, color: '#0ea5e9' },
+            { label: 'Performance (PR)', value: `${safeNum(mergedSummary.avg_pr).toFixed(2)}%`, color: '#8b5cf6' },
+            { label: 'Quality (QR)', value: `${safeNum(mergedSummary.avg_qr).toFixed(2)}%`, color: '#10b981' },
+            { label: 'OEE', value: `${safeNum(mergedSummary.avg_oee).toFixed(2)}%`,
+              color: safeNum(mergedSummary.avg_oee) >= 85 ? '#10b981' : safeNum(mergedSummary.avg_oee) >= 65 ? '#f59e0b' : '#ef4444' },
+            { label: 'Total Produced', value: mergedSummary.total_actual ?? 0, color: '#64748b' },
+            { label: 'Accepted Qty', value: mergedSummary.total_accp ?? 0, color: '#10b981' },
+            { label: 'Defects', value: mergedSummary.total_defect ?? 0, color: '#ef4444' },
           ].map(k => (
             <div key={k.label} style={{ ...s.kpi, borderTop: `3px solid ${k.color}` }}>
               <div style={{ color: k.color, fontSize: 24, fontWeight: 700 }}>{k.value}</div>
@@ -341,8 +440,18 @@ export default function Dashboard() {
       {/* Charts */}
       <div style={s.charts}>
         <div style={s.chartBox}>
-          <h4 style={s.chartTitle}>OEE Overview</h4>
-          {!summary || chartData.length === 0
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
+            <h4 style={{ ...s.chartTitle, margin: 0 }}>OEE Overview</h4>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
+              {[['Running','running'],['Idle','idle'],['Breakdown','breakdown'],['Alarm','alarm'],['Setting','setting_change'],['Offline','offline']].map(([label, key]) => (
+                <span key={key} style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 11, color: t.textMuted }}>
+                  <span style={{ color: STATUS_DOT_COLORS[key], fontSize: 14, animation: 'liveHeartbeat 1.2s ease-in-out infinite', filter: `drop-shadow(0 0 4px ${STATUS_DOT_COLORS[key]})`, lineHeight: 1 }}>&#x2764;</span>
+                  {label}
+                </span>
+              ))}
+            </div>
+          </div>
+          {!mergedSummary || chartData.length === 0
             ? <div style={s.noData}>No data for selected filters</div>
             : (
               <div style={s.donutRow}>
@@ -350,9 +459,9 @@ export default function Dashboard() {
                   { key: 'avg_ar',  label: 'AR',  color: AR_COLOR },
                   { key: 'avg_pr',  label: 'PR',  color: PR_COLOR },
                   { key: 'avg_qr',  label: 'QR',  color: QR_COLOR },
-                  { key: 'avg_oee', label: 'OEE', color: safeNum(summary.avg_oee) >= 85 ? '#10b981' : safeNum(summary.avg_oee) >= 65 ? '#f59e0b' : '#ef4444' },
+                  { key: 'avg_oee', label: 'OEE', color: safeNum(mergedSummary.avg_oee) >= 85 ? '#10b981' : safeNum(mergedSummary.avg_oee) >= 65 ? '#f59e0b' : '#ef4444' },
                 ].map(({ key, label, color }) => {
-                  const val = safeNum(summary[key]);
+                  const val = safeNum(mergedSummary[key]);
                   return (
                     <div key={label} style={s.donutWrap}>
                       <Donut3D key={`${label}-${val}`} value={val} color={color} trackColor={t.surface2} />
@@ -380,32 +489,66 @@ export default function Dashboard() {
       <div style={s.tableWrap}>
         <table style={s.table}>
           <thead>
-            <tr>{['Date','Station','Machine','Shift','Model / Variant','Current Operation','Next Operation','CT','Avail(min)','Op Time','Possible','Actual','Prod Loss','Accp','Defect','AR%','PR%','QR%','OEE%','QC Edit'].map(h =>
+            <tr>{['Date','Station','Machine','Shift','Work Order','Model / Variant','Current Operation','Next Operation','CT','Avail(min)','Op Time','Plan Qty','Possible','Actual','Prod Loss','Accp','Defect','AR%','PR%','QR%','OEE%','QC Edit'].map(h =>
               <th key={h} style={s.th}>{h}</th>)}</tr>
           </thead>
           <tbody>
             {entries.length === 0 ? (
-              <tr><td colSpan={20} style={{ ...s.td, textAlign: 'center', color: t.textFaint, padding: 24 }}>
+              <tr><td colSpan={22} style={{ ...s.td, textAlign: 'center', color: t.textFaint, padding: 24 }}>
                 No entries found
               </td></tr>
             ) : entries.map(e => {
               const prodLoss = Math.max(0, safeNum(e.possible_qty) - safeNum(e.actual_qty));
               const oee = safeNum(e.oee);
+              const isRealtime = e.source === 'realtime';
               const isEditing = defectEdit.id === e.id;
               const showLog = defectLog.id === e.id;
               return (
                 <Fragment key={e.id}>
                   <tr style={s.tr}>
-                    <td style={s.td}>{e.entry_date}</td>
-                    <td style={s.td}>{getStationLabel(e.station_no)}</td>
-                    <td style={s.td}>{getMachineLabel(e.machine_id)}</td>
+                    <td style={s.td}>
+                      {e.entry_date}
+                      {isRealtime && (() => {
+                        const mach = machines.find(x => x.id === e.machine_id);
+                        const hColor = STATUS_DOT_COLORS[mach?.status] || '#10b981';
+                        return (
+                          <span style={{ marginLeft: 5, color: hColor, fontSize: 18, display: 'inline-block', animation: 'liveHeartbeat 1.2s ease-in-out infinite', filter: `drop-shadow(0 0 6px ${hColor})`, verticalAlign: 'middle' }} title={`Machine: ${mach?.status || 'unknown'}`}>&#x2764;</span>
+                        );
+                      })()}
+                    </td>
+                    <td style={s.td}>{e.station_name || getStationLabel(e.station_no)}</td>
+                    <td style={s.td}>
+                      <span style={{ color: t.accent, cursor: 'pointer', textDecoration: 'underline', textDecorationStyle: 'dotted' }}
+                        title="View Machine KPI"
+                        onClick={() => openMachineKpi(e.machine_id, e.entry_date, e.shift)}>
+                        {e.machine_name || getMachineLabel(e.machine_id)}
+                      </span>
+                    </td>
                     <td style={s.td}>{e.shift}</td>
-                    <td style={s.td}>{e.model_variant || '—'}</td>
+                    <td style={s.td}>
+                      {e.work_order_no ? (
+                        <span style={{ color: '#60a5fa', cursor: 'pointer', textDecoration: 'underline' }}
+                          onClick={() => navigate('/work-orders')}
+                          title="Open Work Orders">
+                          {e.work_order_no}
+                        </span>
+                      ) : '—'}
+                    </td>
+                    <td style={s.td}>
+                      {e.model_variant ? (
+                        <span style={{ color: '#38bdf8', cursor: 'pointer', textDecoration: 'underline', textDecorationStyle: 'dotted' }}
+                          onClick={() => navigate('/work-instructions')}
+                          title="Open Process Control Sheet">
+                          {e.model_variant}
+                        </span>
+                      ) : '—'}
+                    </td>
                     <td style={s.td}>{e.current_operation}</td>
                     <td style={s.td}>{e.next_operation}</td>
                     <td style={s.td}>{formatCtSeconds(sumCt(e.process_time, e.loading_unloading))}</td>
                     <td style={s.td}>{e.available_shift_time}</td>
                     <td style={s.td}>{e.operating_time}</td>
+                    <td style={s.td}>{e.planned_qty != null ? e.planned_qty : '—'}</td>
                     <td style={s.td}>{e.possible_qty}</td>
                     <td style={s.td}>{e.actual_qty}</td>
                     <td style={{ ...s.td, color: prodLoss > 0 ? '#f59e0b' : '#10b981' }}>{prodLoss}</td>
@@ -465,7 +608,7 @@ export default function Dashboard() {
                   {/* QC history expansion row */}
                   {showLog && (
                     <tr key={`log-${e.id}`}>
-                      <td colSpan={20} style={{ padding: '0 8px 12px 8px', background: t.surface2 }}>
+                      <td colSpan={22} style={{ padding: '0 8px 12px 8px', background: t.surface2 }}>
                         <div style={{ padding: '10px 12px', borderRadius: 8, background: t.surface,
                                       border: `1px solid ${t.border}`, marginTop: 4 }}>
                           <div style={{ color: t.accent, fontWeight: 600, fontSize: 12, marginBottom: 8 }}>
@@ -513,6 +656,123 @@ export default function Dashboard() {
           </tbody>
         </table>
       </div>
+
+      {/* Machine KPI Dialog */}
+      {kpiDialog.open && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 9999, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,.55)' }}
+          onClick={() => setKpiDialog({ open: false, loading: false, data: null })}>
+          <div style={{ background: t.surface, borderRadius: 14, width: 620, maxHeight: '85vh', overflowY: 'auto', padding: 0, boxShadow: '0 8px 32px rgba(0,0,0,.35)', color: t.text }}
+            onClick={ev => ev.stopPropagation()}>
+            {kpiDialog.loading ? (
+              <div style={{ padding: 60, textAlign: 'center', color: t.textMuted }}>Loading KPI data...</div>
+            ) : kpiDialog.error ? (
+              <div style={{ padding: 40, textAlign: 'center', color: '#ef4444' }}>Error: {kpiDialog.error}</div>
+            ) : kpiDialog.data ? (() => {
+              const d = kpiDialog.data;
+              const k = d.kpi;
+              const statusColor = STATUS_DOT_COLORS[d.machine_status] || '#6b7280';
+              return (
+                <>
+                  {/* Header with machine info */}
+                  <div style={{ display: 'flex', gap: 16, padding: '20px 24px', borderBottom: `1px solid ${t.border}`, alignItems: 'center' }}>
+                    {d.image_url ? (
+                      <img src={d.image_url} alt={d.machine_name}
+                        style={{ width: 80, height: 80, borderRadius: 10, objectFit: 'cover', border: `2px solid ${statusColor}` }} />
+                    ) : (
+                      <div style={{ width: 80, height: 80, borderRadius: 10, background: t.surface2, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 32, border: `2px solid ${statusColor}` }}>
+                        &#x2699;
+                      </div>
+                    )}
+                    <div style={{ flex: 1 }}>
+                      <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>{d.machine_name}</h2>
+                      <div style={{ fontSize: 13, color: t.textMuted, marginTop: 2 }}>{d.station_name} &middot; {d.machine_type} &middot; {d.make || ''} {d.model_no || ''}</div>
+                      <div style={{ fontSize: 13, color: t.textMuted }}>{d.location}</div>
+                      <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ width: 10, height: 10, borderRadius: '50%', background: statusColor, display: 'inline-block', boxShadow: `0 0 6px ${statusColor}` }} />
+                        <span style={{ fontSize: 13, fontWeight: 600, color: statusColor, textTransform: 'uppercase' }}>{d.machine_status}</span>
+                        {d.is_live && <span style={{ color: statusColor, fontSize: 16, animation: 'liveHeartbeat 1.2s ease-in-out infinite', filter: `drop-shadow(0 0 6px ${statusColor})` }}>&#x2764;</span>}
+                      </div>
+                    </div>
+                    <button onClick={() => setKpiDialog({ open: false, loading: false, data: null })}
+                      style={{ background: 'none', border: 'none', color: t.textMuted, fontSize: 22, cursor: 'pointer', padding: 4 }}>&times;</button>
+                  </div>
+
+                  {/* Context */}
+                  <div style={{ padding: '12px 24px', fontSize: 12, color: t.textMuted, display: 'flex', gap: 16, flexWrap: 'wrap', borderBottom: `1px solid ${t.border}` }}>
+                    <span>Date: <b>{d.entry_date}</b></span>
+                    <span>Shift: <b>{d.shift_name} ({d.shift_start} – {d.shift_end})</b></span>
+                    <span>Part: <b>{d.model_variant || '—'}</b></span>
+                    <span>CT: <b>{d.cycle_time_sec}s</b></span>
+                  </div>
+
+                  {/* OEE Gauge */}
+                  <div style={{ padding: '16px 24px', textAlign: 'center', borderBottom: `1px solid ${t.border}` }}>
+                    <div style={{ fontSize: 12, color: t.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>Overall Equipment Effectiveness</div>
+                    <div style={{ fontSize: 48, fontWeight: 800, color: k.oee >= 85 ? '#10b981' : k.oee >= 60 ? '#f59e0b' : '#ef4444' }}>
+                      {k.oee.toFixed(1)}%
+                    </div>
+                    <div style={{ fontSize: 11, color: t.textMuted }}>AR × PR × QR</div>
+                  </div>
+
+                  {/* KPI Grid */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 1, background: t.border }}>
+                    {[
+                      { label: 'Availability Rate', value: k.ar, color: AR_COLOR, icon: '\u23F1' },
+                      { label: 'Performance Rate', value: k.pr, color: PR_COLOR, icon: '\u26A1' },
+                      { label: 'Quality Rate', value: k.qr, color: QR_COLOR, icon: '\u2705' },
+                      { label: 'Machine Utilization', value: k.machine_utilization, color: '#818cf8', icon: '\u2699' },
+                      { label: 'Production Yield', value: k.production_yield, color: '#34d399', icon: '\u{1F4C8}' },
+                      { label: 'TEEP', value: k.teep, color: '#fb923c', icon: '\u{1F3ED}' },
+                    ].map(({ label, value, color, icon }) => (
+                      <div key={label} style={{ background: t.surface, padding: '14px 16px', textAlign: 'center' }}>
+                        <div style={{ fontSize: 20, marginBottom: 2 }}>{icon}</div>
+                        <div style={{ fontSize: 24, fontWeight: 700, color }}>{value.toFixed(1)}%</div>
+                        <div style={{ fontSize: 11, color: t.textMuted, marginTop: 2 }}>{label}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {/* Production data */}
+                  <div style={{ padding: '16px 24px', fontSize: 13 }}>
+                    <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                      <tbody>
+                        {[
+                          ['Available Time', `${d.available_time_min} min`],
+                          ['Operating Time', `${d.operating_time_min} min`],
+                          ['Downtime', `${d.downtime_min} min`],
+                          ['Actual Production Time', `${d.actual_production_time_min} min`],
+                          ['Planned Qty', d.planned_qty],
+                          ['Expected Qty', d.expected_qty],
+                          ['Actual Qty', d.actual_qty],
+                          ['Good Qty', d.good_qty],
+                          ['Defect Qty', d.defect_qty],
+                          ['Theoretical Qty', d.theoretical_qty],
+                        ].map(([lbl, val]) => (
+                          <tr key={lbl} style={{ borderBottom: `1px solid ${t.border}` }}>
+                            <td style={{ padding: '6px 0', color: t.textMuted }}>{lbl}</td>
+                            <td style={{ padding: '6px 0', textAlign: 'right', fontWeight: 600 }}>{val}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* Formula reference */}
+                  <div style={{ padding: '12px 24px 20px', fontSize: 11, color: t.textFaint, lineHeight: 1.6 }}>
+                    <b>Formulas:</b> AR = (OpTime − Downtime) / OpTime &middot;
+                    PR = ActualOutput / ExpectedOutput &middot;
+                    QR = GoodUnits / TotalUnits &middot;
+                    OEE = AR × PR × QR &middot;
+                    MUR = ActualProdTime / AvailTime &middot;
+                    Yield = ActualOutput / TheoreticalOutput &middot;
+                    TEEP = OEE × MUR
+                  </div>
+                </>
+              );
+            })() : null}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

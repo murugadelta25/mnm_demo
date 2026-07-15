@@ -111,6 +111,10 @@ def list_machines(db: Session = Depends(get_db), _=Depends(get_current_user)):
     machines = db.query(Machine).order_by(Machine.station_id, Machine.id).all()
     result = []
     for m in machines:
+        live_status = _compute_status(m, db)
+        if m.status != live_status:
+            m.status = live_status
+            _log_status(m.id, live_status, "sync", db)
         station = db.query(Station).filter(Station.id == m.station_id).first()
         result.append({
             "id": m.id,
@@ -124,8 +128,9 @@ def list_machines(db: Session = Depends(get_db), _=Depends(get_current_user)):
             "features": m.features,
             "location": m.location,
             "image_url": m.image_url,
-            "status": m.status
+            "status": live_status,
         })
+    db.commit()
     return result
 
 

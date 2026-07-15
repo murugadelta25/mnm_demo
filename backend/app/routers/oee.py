@@ -3,11 +3,16 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import extract, or_
 from typing import Optional
-from datetime import date, datetime
-import csv, io
-from ..models import OEEEntry, OEEDefectLog, get_db, now_ist
+from datetime import date, datetime, timedelta
+import csv, io, json, logging
+from ..models import (
+    OEEEntry, OEEDefectLog, Machine, Station, ProductionPlan,
+    WorkOrder, MachineStatusLog, SiteConfig, get_db, now_ist,
+)
 from ..auth import get_current_user
 from pydantic import BaseModel
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/oee", tags=["oee"])
 
@@ -181,7 +186,32 @@ def get_entries(
             OEEEntry.current_operation.like(like),
             OEEEntry.model_variant.like(like),
         ))
-    return q.order_by(OEEEntry.entry_date.desc(), OEEEntry.shift).all()
+    entries = q.order_by(OEEEntry.entry_date.desc(), OEEEntry.shift).all()
+
+    dates = {e.entry_date for e in entries}
+    plans = []
+    if dates:
+        plans = db.query(ProductionPlan).filter(ProductionPlan.plan_date.in_(dates)).all()
+    wo_ids = {p.work_order_id for p in plans if p.work_order_id}
+    wo_map = {}
+    if wo_ids:
+        wos = db.query(WorkOrder).filter(WorkOrder.id.in_(wo_ids)).all()
+        wo_map = {w.id: w.work_order_no for w in wos}
+
+    plan_wo = {}
+    for p in plans:
+        key = (p.machine_id, str(p.plan_date), p.shift, p.current_operation)
+        if p.work_order_id and p.work_order_id in wo_map:
+            plan_wo[key] = wo_map[p.work_order_id]
+
+    result = []
+    for e in entries:
+        d = {c.name: getattr(e, c.name) for c in e.__table__.columns}
+        key = (e.machine_id, str(e.entry_date), e.shift, e.current_operation)
+        d["work_order_no"] = plan_wo.get(key, "—")
+        d["source"] = "manual"
+        result.append(d)
+    return result
 
 @router.get("/summary")
 def get_summary(
@@ -229,6 +259,193 @@ def get_summary(
         "total_defect": sum(e.defect_qty or 0 for e in entries),
         "count": len(entries)
     }
+
+@router.get("/realtime")
+def realtime_oee(
+    entry_date: Optional[date] = None,
+    shift: Optional[str] = None,
+    station_no: Optional[int] = None,
+    machine_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Compute per-machine OEE from status logs + production plans (real-time).
+
+    Returns entries compatible with the manual OEE data but flagged as
+    ``source: 'realtime'`` so the Dashboard can display both sources.
+    """
+    from .config import DEFAULT_CONFIG, merge_config
+    from .hourly_output import (
+        _break_windows, _build_status_segments,
+        _countable_running_segments, _running_part_threshold_ratio,
+    )
+
+    target_date = entry_date or date.today()
+
+    row = db.query(SiteConfig).first()
+    if row:
+        cfg = merge_config(json.loads(row.config_json))
+    else:
+        cfg = dict(DEFAULT_CONFIG)
+
+    enabled_shifts = [s for s in cfg.get("shifts", []) if s.get("enabled")]
+    if shift:
+        enabled_shifts = [s for s in enabled_shifts if s["id"] == shift]
+    if not enabled_shifts:
+        return []
+
+    plan_q = db.query(ProductionPlan).filter(ProductionPlan.plan_date == target_date)
+    if station_no:
+        plan_q = plan_q.filter(ProductionPlan.station_no == station_no)
+    if machine_id:
+        plan_q = plan_q.filter(ProductionPlan.machine_id == machine_id)
+    all_plans = plan_q.all()
+    if not all_plans:
+        return []
+
+    wo_ids = {p.work_order_id for p in all_plans if p.work_order_id}
+    wo_map = {}
+    if wo_ids:
+        wos = db.query(WorkOrder).filter(WorkOrder.id.in_(wo_ids)).all()
+        wo_map = {w.id: w.work_order_no for w in wos}
+
+    machine_ids = {p.machine_id for p in all_plans if p.machine_id}
+    machines = db.query(Machine).filter(Machine.id.in_(machine_ids)).all() if machine_ids else []
+    machine_map = {m.id: m for m in machines}
+
+    station_ids = {m.station_id for m in machines}
+    stations = db.query(Station).filter(Station.id.in_(station_ids)).all() if station_ids else []
+    station_map = {st.id: st for st in stations}
+
+    threshold_ratio = _running_part_threshold_ratio(cfg)
+
+    results = []
+    for sh in enabled_shifts:
+        sh_id = sh["id"]
+        break_cfg = cfg.get("breaks", {}).get(sh_id, {})
+        breaks = _break_windows(break_cfg)
+
+        sh_start_hm = sh["start"]
+        sh_end_hm = sh["end"]
+        start_h, start_min = map(int, sh_start_hm.split(":"))
+        end_h, end_min = map(int, sh_end_hm.split(":"))
+
+        shift_start = datetime.combine(target_date, datetime.min.time()).replace(
+            hour=start_h, minute=start_min
+        )
+        overnight = (end_h * 60 + end_min) <= (start_h * 60 + start_min)
+        if overnight:
+            shift_end = (datetime.combine(target_date, datetime.min.time()) + timedelta(days=1)).replace(
+                hour=end_h, minute=end_min
+            )
+        else:
+            shift_end = datetime.combine(target_date, datetime.min.time()).replace(
+                hour=end_h, minute=end_min
+            )
+
+        shift_total_mins = (shift_end - shift_start).total_seconds() / 60.0
+        total_break_mins = sum(b["minutes"] for b in breaks)
+        available_mins = shift_total_mins - total_break_mins
+
+        shift_plans = [
+            p for p in all_plans
+            if p.shift == sh_id and p.machine_id is not None
+        ]
+
+        plans_by_machine = {}
+        for p in shift_plans:
+            plans_by_machine.setdefault(p.machine_id, []).append(p)
+
+        now = datetime.now()
+        effective_end = min(shift_end, now)
+
+        for mid, mplans in plans_by_machine.items():
+            m = machine_map.get(mid)
+            if not m:
+                continue
+            st = station_map.get(m.station_id)
+
+            segments = _build_status_segments(db, mid, shift_start, effective_end)
+
+            op_mins = 0.0
+            for seg in segments:
+                if seg["state"] in ("running", "ld_unld"):
+                    lo = max(seg["start"], shift_start)
+                    hi = min(seg["end"], effective_end)
+                    if hi > lo:
+                        op_mins += (hi - lo).total_seconds() / 60.0
+
+            running_segs = [s for s in segments if s["state"] == "running"
+                            and s["start"] >= shift_start and s["start"] < effective_end]
+
+            primary_ct = 0.0
+            for p in mplans:
+                ct = float(p.process_time or 0) + float(p.loading_unloading or 0)
+                if ct > 0:
+                    primary_ct = ct
+                    break
+
+            actual_qty = _countable_running_segments(
+                running_segs, primary_ct if primary_ct > 0 else None, threshold_ratio,
+            )
+
+            total_planned = sum(p.planned_qty or 0 for p in mplans)
+            if primary_ct > 0 and available_mins > 0:
+                possible_qty = int(available_mins * (60.0 / primary_ct))
+            else:
+                possible_qty = total_planned
+
+            expected_qty = min(possible_qty, total_planned) if total_planned > 0 else possible_qty
+
+            ar = round(min(op_mins / available_mins * 100, 100.0), 2) if available_mins > 0 else 0.0
+            pr = round(actual_qty / expected_qty * 100, 2) if expected_qty > 0 else 0.0
+            qr = 100.0
+            oee_val = round(ar * pr * qr / 10000, 2)
+
+            prod_loss = max(0, possible_qty - actual_qty)
+            accp_qty = actual_qty
+
+            wo_no_list = list({wo_map.get(p.work_order_id, "") for p in mplans if p.work_order_id})
+            wo_display = ", ".join(w for w in wo_no_list if w) or "—"
+
+            model_variants = list({(p.model_variant or "").strip() for p in mplans})
+            model_display = ", ".join(v for v in model_variants if v) or "—"
+
+            cur_op = mplans[0].current_operation if mplans else ""
+            next_op = mplans[0].next_operation if mplans else ""
+
+            results.append({
+                "id": f"rt_{mid}_{sh_id}_{target_date.isoformat()}",
+                "source": "realtime",
+                "entry_date": target_date.isoformat(),
+                "station_no": m.station_id,
+                "station_name": st.display_name if st else f"Station {m.station_id}",
+                "machine_id": mid,
+                "machine_name": m.name,
+                "shift": sh_id,
+                "work_order_no": wo_display,
+                "model_variant": model_display,
+                "current_operation": cur_op,
+                "next_operation": next_op,
+                "process_time": float(primary_ct) if primary_ct else 0,
+                "loading_unloading": 0,
+                "cycle_time": float(primary_ct) if primary_ct else 0,
+                "available_shift_time": round(available_mins),
+                "operating_time": round(op_mins),
+                "possible_qty": possible_qty,
+                "actual_qty": actual_qty,
+                "production_loss": prod_loss,
+                "accp_qty": accp_qty,
+                "defect_qty": 0,
+                "ar": ar,
+                "pr": pr,
+                "qr": qr,
+                "oee": oee_val,
+                "planned_qty": total_planned,
+            })
+
+    return results
+
 
 class DefectUpdate(BaseModel):
     defect_qty: int
@@ -352,10 +569,25 @@ def download_xlsx(
         ))
     entries = q.order_by(OEEEntry.entry_date.desc(), OEEEntry.shift).all()
 
-    from ..models import Machine
     station_map = {p.id: (p.display_name or p.name) for p in db.query(Station).all()}
     machine_map = {m.id: m.name for m in db.query(Machine).all()}
     user_map = {u.id: u.username for u in db.query(User).all()}
+
+    dates = {e.entry_date for e in entries}
+    all_plans = db.query(ProductionPlan).filter(ProductionPlan.plan_date.in_(dates)).all() if dates else []
+    wo_ids = {p.work_order_id for p in all_plans if p.work_order_id}
+    wo_map = {w.id: w.work_order_no for w in db.query(WorkOrder).filter(WorkOrder.id.in_(wo_ids)).all()} if wo_ids else {}
+    plan_lookup = {}
+    for p in all_plans:
+        key = (p.machine_id, str(p.plan_date), p.shift, p.current_operation)
+        wo_no = wo_map.get(p.work_order_id, "")
+        existing = plan_lookup.get(key)
+        if not existing:
+            plan_lookup[key] = {"wo": wo_no, "planned": p.planned_qty or 0}
+        else:
+            existing["planned"] += (p.planned_qty or 0)
+            if wo_no and not existing["wo"]:
+                existing["wo"] = wo_no
 
     def fmt_ist(dt_val):
         if not dt_val: return ''
@@ -380,8 +612,9 @@ def download_xlsx(
     # ── OEE sheet ──
     ws_oee = wb.active
     ws_oee.title = "OEE Report"
-    oee_hdrs = ["Date","Station","Machine","Shift","Model / Variant","Current Operation","Next Operation","CT (sec)",
-                "Avail (min)","Op Time (min)","Possible Qty","Actual Qty",
+    oee_hdrs = ["Date","Station","Machine","Shift","Work Order","Model / Variant",
+                "Current Operation","Next Operation","CT (sec)",
+                "Avail (min)","Op Time (min)","Plan Qty","Possible Qty","Actual Qty",
                 "Prod Loss","Accepted Qty","Defect Qty",
                 "AR%","PR%","QR%","OEE%",
                 "AR% (original)","PR% (original)","QR% (original)","OEE% (original)"]
@@ -397,13 +630,15 @@ def download_xlsx(
         pr_raw  = float(e.pr_raw  or 0) if e.pr_raw is not None else None
         qr_raw  = float(e.qr_raw  or 0) if e.qr_raw is not None else None
         oee_raw = float(e.oee_raw or 0) if e.oee_raw is not None else None
+        key = (e.machine_id, str(e.entry_date), e.shift, e.current_operation)
+        pl = plan_lookup.get(key, {})
         ws_oee.append([
             str(e.entry_date), station_map.get(e.station_no, str(e.station_no)),
             machine_map.get(e.machine_id, "") if e.machine_id else "",
-            e.shift, e.model_variant or "",
+            e.shift, pl.get("wo", ""), e.model_variant or "",
             e.current_operation, e.next_operation,
             ct, e.available_shift_time, e.operating_time,
-            e.possible_qty, e.actual_qty, prod_loss,
+            pl.get("planned", ""), e.possible_qty, e.actual_qty, prod_loss,
             e.accp_qty, e.defect_qty,
             ar_val, pr_val, qr_val, oee_val,
             ar_raw  if ar_raw  is not None else "—",
@@ -412,12 +647,11 @@ def download_xlsx(
             oee_raw if oee_raw is not None else "—",
         ])
         ri = ws_oee.max_row
-        ws_oee.cell(ri, 19).font = grn_f if oee_val>=85 else (amb_f if oee_val>=65 else red_f)
-        # Highlight capped cells in amber
-        for col, raw in [(16, ar_raw), (17, pr_raw), (18, qr_raw), (19, oee_raw)]:
+        ws_oee.cell(ri, 21).font = grn_f if oee_val>=85 else (amb_f if oee_val>=65 else red_f)
+        for col, raw in [(18, ar_raw), (19, pr_raw), (20, qr_raw), (21, oee_raw)]:
             if raw is not None:
                 ws_oee.cell(ri, col).font = amb_f
-    for i, w in enumerate([12,14,10,8,16,14,14,10,12,14,12,12,10,12,12,8,8,8,8,14,14,14,14], 1):
+    for i, w in enumerate([12,14,12,8,18,16,14,14,10,12,14,10,12,12,10,12,12,8,8,8,8,14,14,14,14], 1):
         ws_oee.column_dimensions[ws_oee.cell(1,i).column_letter].width = w
 
     # ── QC Logs sheet ──
@@ -536,6 +770,7 @@ def download_csv(
     month: Optional[int] = None,
     year: Optional[int] = None,
     station_no: Optional[int] = None,
+    machine_id: Optional[int] = None,
     db: Session = Depends(get_db),
     _=Depends(get_current_user)
 ):
@@ -545,23 +780,51 @@ def download_csv(
     if month: q = q.filter(extract("month", OEEEntry.entry_date) == month)
     if year: q = q.filter(extract("year", OEEEntry.entry_date) == year)
     if station_no: q = q.filter(OEEEntry.station_no == station_no)
+    if machine_id: q = q.filter(OEEEntry.machine_id == machine_id)
     entries = q.order_by(OEEEntry.entry_date, OEEEntry.shift).all()
+
+    station_map = {s.id: (s.display_name or s.name) for s in db.query(Station).all()}
+    machine_map = {m.id: m.name for m in db.query(Machine).all()}
+    dates = {e.entry_date for e in entries}
+    all_plans = db.query(ProductionPlan).filter(ProductionPlan.plan_date.in_(dates)).all() if dates else []
+    wo_ids = {p.work_order_id for p in all_plans if p.work_order_id}
+    wo_map = {w.id: w.work_order_no for w in db.query(WorkOrder).filter(WorkOrder.id.in_(wo_ids)).all()} if wo_ids else {}
+    plan_lookup = {}
+    for p in all_plans:
+        key = (p.machine_id, str(p.plan_date), p.shift, p.current_operation)
+        wo_no = wo_map.get(p.work_order_id, "")
+        existing = plan_lookup.get(key)
+        if not existing:
+            plan_lookup[key] = {"wo": wo_no, "planned": p.planned_qty or 0}
+        else:
+            existing["planned"] += (p.planned_qty or 0)
+            if wo_no and not existing["wo"]:
+                existing["wo"] = wo_no
+
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["Date","Station","Shift","Model / Variant","Current Operation","Next Operation","CT","Start","Stop","Total Min",
+    writer.writerow(["Date","Station","Machine","Shift","Work Order","Model / Variant",
+                     "Current Operation","Next Operation","CT",
+                     "Start","Stop","Total Min",
                      "Lunch","Tea","TPM","Other Clean","Mgmt Mtg","No Load","New Model","Power Cut",
                      "Planned Maint","No Manpower","Avail Time","Setting","Tool Change","Dim Corr",
-                     "Scrap","Breakdown","Operating Time","Possible Qty","Actual Qty","Accp Qty",
+                     "Scrap","Breakdown","Operating Time","Plan Qty","Possible Qty","Actual Qty","Accp Qty",
                      "Defect Qty","AR%","PR%","QR%","OEE%",
                      "AR% (original)","PR% (original)","QR% (original)","OEE% (original)"])
     for e in entries:
-        writer.writerow([e.entry_date, e.station_no, e.shift, e.model_variant or "", e.current_operation, e.next_operation,
+        key = (e.machine_id, str(e.entry_date), e.shift, e.current_operation)
+        pl = plan_lookup.get(key, {})
+        writer.writerow([e.entry_date, station_map.get(e.station_no, str(e.station_no)),
+                         machine_map.get(e.machine_id, "") if e.machine_id else "",
+                         e.shift, pl.get("wo", ""), e.model_variant or "",
+                         e.current_operation, e.next_operation,
                          (e.process_time or 0)+(e.loading_unloading or 0), e.start_time, e.stop_time,
                          e.total_minutes, e.lunch_break, e.tea_break, e.tpm_cleaning, e.other_cleaning,
                          e.management_meeting, e.no_load, e.new_model_trial, e.power_cut,
                          e.planned_maintenance, e.no_manpower_planned, e.available_shift_time,
                          e.setting_time, e.tool_change, e.dimension_correction, e.scrap_removal,
-                         e.break_down, e.operating_time, e.possible_qty, e.actual_qty, e.accp_qty,
+                         e.break_down, e.operating_time, pl.get("planned", ""),
+                         e.possible_qty, e.actual_qty, e.accp_qty,
                          e.defect_qty, e.ar, e.pr, e.qr, e.oee,
                          float(e.ar_raw  or 0) if e.ar_raw  else "",
                          float(e.pr_raw  or 0) if e.pr_raw  else "",
