@@ -758,14 +758,29 @@ export default function Dashboard() {
                   </div>
 
                   {/* Formula reference */}
-                  <div style={{ padding: '12px 24px 20px', fontSize: 11, color: t.textFaint, lineHeight: 1.6 }}>
-                    <b>Formulas:</b> AR = (OpTime − Downtime) / OpTime &middot;
-                    PR = ActualOutput / ExpectedOutput &middot;
-                    QR = GoodUnits / TotalUnits &middot;
-                    OEE = AR × PR × QR &middot;
-                    MUR = ActualProdTime / AvailTime &middot;
-                    Yield = ActualOutput / TheoreticalOutput &middot;
-                    TEEP = OEE × MUR
+                  <div style={{ padding: '14px 24px 20px' }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color: t.textMuted, marginBottom: 8 }}>Formulas</div>
+                    <div style={{
+                      display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '4px 12px',
+                      fontSize: 12, lineHeight: 1.7, color: t.text,
+                      background: t.surface2, borderRadius: 8, padding: '10px 14px',
+                      border: `1px solid ${t.border}`
+                    }}>
+                      <span style={{ fontWeight: 600, color: t.accent }}>AR</span>
+                      <span>= (OpTime − Downtime) / OpTime</span>
+                      <span style={{ fontWeight: 600, color: t.accent }}>PR</span>
+                      <span>= ActualOutput / ExpectedOutput</span>
+                      <span style={{ fontWeight: 600, color: t.accent }}>QR</span>
+                      <span>= GoodUnits / TotalUnits</span>
+                      <span style={{ fontWeight: 600, color: t.accent }}>OEE</span>
+                      <span>= AR × PR × QR</span>
+                      <span style={{ fontWeight: 600, color: t.accent }}>MUR</span>
+                      <span>= ActualProdTime / AvailTime</span>
+                      <span style={{ fontWeight: 600, color: t.accent }}>Yield</span>
+                      <span>= ActualOutput / TheoreticalOutput</span>
+                      <span style={{ fontWeight: 600, color: t.accent }}>TEEP</span>
+                      <span>= OEE × MUR</span>
+                    </div>
                   </div>
                 </>
               );
