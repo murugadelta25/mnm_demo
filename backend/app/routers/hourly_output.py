@@ -30,6 +30,96 @@ _TIMED_BREAK_DEFAULTS = {
 }
 
 
+def _previous_shift_info(cfg: dict, current_shift_id: str, entry_date: date):
+    """Return (prev_shift_id, prev_date) for the shift immediately before the current one."""
+    shifts = [s for s in cfg.get('shifts', []) if s.get('enabled', True)]
+    ordered = sorted(shifts, key=lambda s: _parse_mins(s['start']))
+    ids = [s['id'] for s in ordered]
+    if current_shift_id not in ids:
+        return None, None
+    idx = ids.index(current_shift_id)
+    if idx == 0:
+        return ids[-1], entry_date - timedelta(days=1)
+    return ids[idx - 1], entry_date
+
+
+def auto_transition_shift_plans(db: Session, entry_date: date, shift_id: str, cfg: dict):
+    """Auto-start plans when the same part continues from the previous shift.
+
+    Rules:
+    - If the previous shift had a running/completed plan with the same
+      model_variant on the same machine, the current shift's pending plan
+      is auto-started (no model-change request needed).
+    - The previous shift's still-running plan is auto-completed.
+    - Works across days (Shift C → next-day Shift A).
+    """
+    prev_shift_id, prev_date = _previous_shift_info(cfg, shift_id, entry_date)
+    if not prev_shift_id:
+        return
+
+    current_plans = (
+        db.query(ProductionPlan)
+        .filter(
+            ProductionPlan.plan_date == entry_date,
+            ProductionPlan.shift == shift_id,
+            ProductionPlan.status == 'pending',
+        )
+        .all()
+    )
+    if not current_plans:
+        return
+
+    changed = False
+    _now = now_ist()
+    for plan in current_plans:
+        if not plan.machine_id or not plan.model_variant:
+            continue
+
+        prev_plan = (
+            db.query(ProductionPlan)
+            .filter(
+                ProductionPlan.machine_id == plan.machine_id,
+                ProductionPlan.plan_date == prev_date,
+                ProductionPlan.shift == prev_shift_id,
+                ProductionPlan.model_variant == plan.model_variant,
+                ProductionPlan.status.in_(['running', 'completed', 'paused']),
+            )
+            .first()
+        )
+        if not prev_plan:
+            continue
+
+        plan.status = 'running'
+        plan.updated_at = _now
+
+        if prev_plan.status in ('running', 'paused'):
+            prev_plan.status = 'completed'
+            prev_plan.updated_at = _now
+
+        conflicting = (
+            db.query(ProductionPlan)
+            .filter(
+                ProductionPlan.machine_id == plan.machine_id,
+                ProductionPlan.id != plan.id,
+                ProductionPlan.plan_date == entry_date,
+                ProductionPlan.shift == shift_id,
+                ProductionPlan.status == 'running',
+            )
+            .all()
+        )
+        for c in conflicting:
+            c.status = 'paused'
+            c.updated_at = _now
+
+        changed = True
+
+    if changed:
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+
+
 def _load_config(db: Session) -> dict:
     row = db.query(SiteConfig).first()
     if not row:
@@ -256,7 +346,7 @@ def _oee_variant(e) -> str:
 
 def _collect_variants(plans: list, oee_entries: list, mcrs: list) -> list:
     variants, seen = [], set()
-    active_plans = [p for p in plans if getattr(p, 'status', None) in ('running', 'completed')]
+    active_plans = [p for p in plans if getattr(p, 'status', None) in ('running', 'completed', 'paused')]
     for p in sorted(active_plans, key=lambda x: (getattr(x, 'priority', None) or 1, x.id)):
         v = _plan_variant(p)
         if v and v not in seen:
@@ -279,9 +369,9 @@ def _collect_variants(plans: list, oee_entries: list, mcrs: list) -> list:
 
 
 def _collect_cycle_times(plans: list, oee_entries: list) -> list:
-    """Cycle times from running/completed plans only; OEE only if no active plan."""
+    """Cycle times from active plans; OEE only if no active plan."""
     cts, seen = [], set()
-    active = [p for p in plans if getattr(p, 'status', None) in ('running', 'completed')]
+    active = [p for p in plans if getattr(p, 'status', None) in ('running', 'completed', 'paused')]
     for p in sorted(active, key=lambda x: (getattr(x, 'priority', None) or 1, x.id)):
         ct = round(_plan_ct(p), 2)
         if ct > 0 and ct not in seen:
@@ -317,9 +407,9 @@ def _production_windows(
             ct = _ct_for_plan_variant(plans, variant) or _float_ct(e.process_time, e.loading_unloading)
             windows.append({'start': ws, 'end': we, 'ct': ct, 'variant': variant})
     else:
-        active = [p for p in plans if getattr(p, 'status', None) in ('running', 'completed')]
+        active = [p for p in plans if getattr(p, 'status', None) in ('running', 'completed', 'paused')]
         if active:
-            completed = [p for p in active if getattr(p, 'status', None) == 'completed']
+            completed = [p for p in active if getattr(p, 'status', None) in ('completed', 'paused')]
             running = [p for p in active if getattr(p, 'status', None) == 'running']
             ordered = sorted(completed, key=lambda x: (getattr(x, 'priority', None) or 1, x.id)) + \
                       sorted(running, key=lambda x: (getattr(x, 'priority', None) or 1, x.id))
@@ -347,7 +437,7 @@ def _effective_ct(windows: list) -> float:
 def _variant_planned_qty(plans: list, variant: str) -> int:
     return sum(
         p.planned_qty or 0 for p in plans
-        if _plan_variant(p) == variant and getattr(p, 'status', None) in ('running', 'completed')
+        if _plan_variant(p) == variant and getattr(p, 'status', None) in ('running', 'completed', 'paused')
     )
 
 
@@ -1027,6 +1117,12 @@ def build_hourly_output(
     cfg = _load_config(db)
     shifts = [s for s in cfg.get('shifts', []) if s.get('enabled', True)]
     shift_def = next((s for s in shifts if s['id'] == shift), None)
+
+    if shift_def:
+        s_start, s_end = _shift_window(entry_date, shift_def)
+        _now = now_ist()
+        if s_start <= _now < s_end:
+            auto_transition_shift_plans(db, entry_date, shift, cfg)
     if not shift_def:
         return {
             'slots': [], 'machines': [], 'scope': scope,
@@ -1096,13 +1192,10 @@ def build_hourly_output(
             slots, shift_start, shift_end, breaks, planned_total, windows,
         )
 
-        # Resolve cycle_profile ONLY for parts that explicitly have interruptions > 0.
-        # For machines running multiple variants, only stitch if ALL active variants
-        # resolve to the same non-None profile — otherwise leave segments raw.
         cycle_profile = None
         active_variants = [
             _plan_variant(p) for p in machine_plans
-            if getattr(p, 'status', None) in ('running', 'completed')
+            if getattr(p, 'status', None) in ('running', 'completed', 'paused')
         ]
         if active_variants:
             profiles = [_get_cycle_profile(db, v) for v in active_variants]

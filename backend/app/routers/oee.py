@@ -278,6 +278,7 @@ def realtime_oee(
     from .hourly_output import (
         _break_windows, _build_status_segments,
         _countable_running_segments, _running_part_threshold_ratio,
+        auto_transition_shift_plans, _shift_window,
     )
 
     target_date = entry_date or date.today()
@@ -293,6 +294,12 @@ def realtime_oee(
         enabled_shifts = [s for s in enabled_shifts if s["id"] == shift]
     if not enabled_shifts:
         return []
+
+    _now = datetime.now()
+    for sh_def in enabled_shifts:
+        s_start, s_end = _shift_window(target_date, sh_def)
+        if s_start <= _now < s_end:
+            auto_transition_shift_plans(db, target_date, sh_def['id'], cfg)
 
     plan_q = db.query(ProductionPlan).filter(ProductionPlan.plan_date == target_date)
     if station_no:

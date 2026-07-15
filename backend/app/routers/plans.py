@@ -291,6 +291,36 @@ def _plan_dict(plan: ProductionPlan, db: Session) -> dict:
     return d
 
 
+def _same_part_in_previous_shift(
+    db: Session,
+    machine_id: int,
+    model_variant: str,
+    plan_date: date,
+    shift_id: str,
+) -> bool:
+    """Check if the same model_variant was running/completed on this machine
+    in the immediately preceding shift (including cross-day C→A)."""
+    from .hourly_output import _load_config, _previous_shift_info
+
+    cfg = _load_config(db)
+    prev_shift_id, prev_date = _previous_shift_info(cfg, shift_id, plan_date)
+    if not prev_shift_id or not prev_date:
+        return False
+
+    prev_plan = (
+        db.query(ProductionPlan)
+        .filter(
+            ProductionPlan.machine_id == machine_id,
+            ProductionPlan.plan_date == prev_date,
+            ProductionPlan.shift == prev_shift_id,
+            ProductionPlan.model_variant == model_variant,
+            ProductionPlan.status.in_(["running", "completed", "paused"]),
+        )
+        .first()
+    )
+    return prev_plan is not None
+
+
 def _previous_model_on_machine(db: Session, machine_id: int, exclude_plan_id: int) -> str:
     prev = (
         db.query(ProductionPlan)
@@ -320,7 +350,6 @@ async def update_status(plan_id: int, data: PlanUpdate, db: Session = Depends(ge
 
     # ── Interlock: pending → running requires model-change approval ──
     if data.status == "running" and plan.status == "pending":
-        # Auto-assign a machine from the station when plan was created as "any machine"
         if not plan.machine_id:
             machine = (
                 db.query(Machine)
@@ -334,6 +363,47 @@ async def update_status(plan_id: int, data: PlanUpdate, db: Session = Depends(ge
                     "No machine found for this station — assign a machine on the plan before starting",
                 )
             plan.machine_id = machine.id
+
+        # Skip model-change interlock when the same part was already running
+        # on this machine in the previous shift (no actual model change needed)
+        same_part_continues = False
+        if plan.machine_id and plan.model_variant:
+            same_part_continues = _same_part_in_previous_shift(
+                db, plan.machine_id, plan.model_variant,
+                plan.plan_date, plan.shift,
+            )
+
+        if same_part_continues:
+            if plan.plan_type != "trial" and plan.machine_id:
+                conflicting = db.query(ProductionPlan).filter(
+                    ProductionPlan.machine_id == plan.machine_id,
+                    ProductionPlan.id != plan.id,
+                    ProductionPlan.status == "running",
+                ).all()
+                for conflict in conflicting:
+                    conflict.status = "paused"
+                    conflict.updated_at = now_ist()
+                    await manager.broadcast({"type": "plan_updated", "plan_id": conflict.id, "status": "paused"})
+
+            plan.status = "running"
+            plan.updated_at = now_ist()
+            machine = db.query(Machine).filter(Machine.id == plan.machine_id).first()
+            if machine and machine.status not in ("breakdown", "offline", "setting_change", "alarm"):
+                machine.status = "running"
+            db.commit()
+            await manager.broadcast({
+                "type": "plan_started", "plan_id": plan_id,
+                "machine_id": plan.machine_id, "station_no": plan.station_no,
+                "current_operation": plan.current_operation, "next_operation": plan.next_operation,
+                "model_variant": plan.model_variant,
+                "process_time": float(plan.process_time) if plan.process_time is not None else None,
+                "loading_unloading": float(plan.loading_unloading) if plan.loading_unloading is not None else None,
+                "shift": plan.shift, "plan_date": str(plan.plan_date),
+            })
+            return {
+                **_plan_dict(plan, db),
+                "message": "Same part continues from previous shift — started without model change",
+            }
 
         existing_pending = (
             db.query(ModelChangeRequest)

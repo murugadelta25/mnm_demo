@@ -14,7 +14,7 @@ from .hourly_output import (
     _break_windows, _build_status_segments, _plan_ct, _plan_variant,
     _cfg_ld_unld_max_sec, _cfg_micro_gap_sec, _get_cycle_profile,
     _running_part_threshold_ratio, _countable_running_segments,
-    _overlap, _parse_mins,
+    _overlap, _parse_mins, auto_transition_shift_plans,
 )
 
 router = APIRouter(prefix="/api/machine-kpi", tags=["machine-kpi"])
@@ -52,7 +52,7 @@ def _compute_kpi(
         ProductionPlan.machine_id == machine.id,
         ProductionPlan.plan_date == entry_date,
         ProductionPlan.shift == shift_id,
-        ProductionPlan.status.in_(['running', 'completed', 'pending']),
+        ProductionPlan.status.in_(['running', 'completed', 'paused', 'pending']),
     ).all()
 
     oee_entries = db.query(OEEEntry).filter(
@@ -64,7 +64,7 @@ def _compute_kpi(
     cycle_profile = None
     active_variants = [
         _plan_variant(p) for p in plans
-        if getattr(p, 'status', None) in ('running', 'completed')
+        if getattr(p, 'status', None) in ('running', 'completed', 'paused')
     ]
     if active_variants:
         profiles = [_get_cycle_profile(db, v) for v in active_variants]
@@ -256,6 +256,14 @@ def compute_machine_kpi(
         raise HTTPException(404, "Machine not found")
 
     cfg = _load_config(db)
+
+    shift_defs = [s for s in cfg.get('shifts', []) if s.get('enabled', True)]
+    sd = next((s for s in shift_defs if s['id'] == shift), None)
+    if sd:
+        s_start, s_end = _shift_window(entry_date, sd)
+        if s_start <= now_ist() < s_end:
+            auto_transition_shift_plans(db, entry_date, shift, cfg)
+
     result = _compute_kpi(db, machine, entry_date, shift, cfg)
     if not result:
         raise HTTPException(400, f"Shift '{shift}' not found in config")
