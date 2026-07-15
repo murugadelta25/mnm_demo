@@ -31,6 +31,7 @@ import QcApprovals from './pages/QcApprovals';
 import PartManagement from './pages/PartManagement';
 import AutoLogin from './pages/AutoLogin';
 import WorkInstructionRevision from './pages/WorkInstructionRevision';
+import DatabaseManagement from './pages/DatabaseManagement';
 
 /** CPLM Root + Outlet pattern — shell wraps all authenticated routes */
 function AuthenticatedShell() {
@@ -75,6 +76,7 @@ function AppRoutes() {
         <Route path="/parts" element={<PartManagement />} />
         <Route path="/wi-revisions" element={<WorkInstructionRevision />} />
         <Route path="/users" element={<UserManagement />} />
+        <Route path="/database-management" element={<DatabaseManagement />} />
         <Route path="*" element={<Navigate to="/dashboard" />} />
       </Route>
       <Route path="*" element={<Navigate to={user ? '/dashboard' : '/login'} />} />

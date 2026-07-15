@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import api from '../api/client';
 import PageHeader from '../components/PageHeader';
 import { useTheme } from '../context/ThemeContext';
@@ -680,6 +680,23 @@ export default function MachineHourlyOutput() {
   useEffect(() => {
     api.get('/api/stations/').then(r => setStations(r.data || [])).catch(() => {});
   }, []);
+
+  // On mount: always reset to current shift + today's date so live data loads
+  // when navigating from another page (persisted state may hold a stale shift)
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    if (mountedRef.current) return;
+    mountedRef.current = true;
+    const liveShift = getCurrentShift(config);
+    if (liveShift) {
+      const liveDate = liveEntryDateForShift(liveShift);
+      setFilters(prev => ({
+        ...prev,
+        shiftId: liveShift.id,
+        entryDate: liveDate,
+      }));
+    }
+  }, [config]);
 
   useEffect(() => {
     const sh = config.shifts.find(s => s.id === shiftId);

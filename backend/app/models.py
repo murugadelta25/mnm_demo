@@ -70,7 +70,7 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String(50), unique=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
-    role = Column(Enum("operator", "supervisor", "maintenance", "admin", "quality"), nullable=False)
+    role = Column(Enum("operator", "supervisor", "maintenance", "admin", "quality", "superadmin"), nullable=False)
 
 class Station(Base):
     __tablename__ = "stations"

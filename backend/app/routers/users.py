@@ -7,7 +7,7 @@ from ..auth import hash_password, get_current_user, require_role
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
-ROLES = ["operator", "supervisor", "maintenance", "admin", "quality"]
+ROLES = ["operator", "supervisor", "maintenance", "admin", "quality", "superadmin"]
 
 class UserCreate(BaseModel):
     username: str
@@ -29,9 +29,11 @@ def list_users(db: Session = Depends(get_db), _=Depends(get_current_user)):
 
 @router.post("/")
 def create_user(data: UserCreate, db: Session = Depends(get_db),
-                _=Depends(require_role("admin"))):
+                current=Depends(require_role("admin"))):
     if data.role not in ROLES:
         raise HTTPException(400, f"role must be one of {ROLES}")
+    if data.role == "superadmin" and current.role != "superadmin":
+        raise HTTPException(403, "Only superadmin can create superadmin users")
     if db.query(User).filter(User.username == data.username).first():
         raise HTTPException(400, "Username already exists")
     if len(data.password) < 4:
@@ -48,12 +50,15 @@ def update_user(user_id: int, data: UserUpdate, db: Session = Depends(get_db),
     u = db.query(User).filter(User.id == user_id).first()
     if not u:
         raise HTTPException(404, "User not found")
-    # Prevent admin from removing their own admin role
-    if u.id == current.id and data.role and data.role != "admin":
+    if u.id == current.id and data.role and data.role != current.role:
         raise HTTPException(400, "Cannot change your own role")
     if data.role:
         if data.role not in ROLES:
             raise HTTPException(400, f"role must be one of {ROLES}")
+        if data.role == "superadmin" and current.role != "superadmin":
+            raise HTTPException(403, "Only superadmin can assign superadmin role")
+        if u.role == "superadmin" and current.role != "superadmin":
+            raise HTTPException(403, "Only superadmin can modify superadmin users")
         u.role = data.role
     if data.password:
         if len(data.password) < 4:

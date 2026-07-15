@@ -79,6 +79,46 @@ def _scan_deviation_breaches():
         db.close()
 
 
+def _run_archive_backup():
+    """Periodic job — create scheduled database backup."""
+    from .archive_service import run_scheduled_backup
+    run_scheduled_backup()
+
+
+def reload_archive_schedule(db: Session):
+    """Add or remove the archive backup job based on site_config.backup settings."""
+    import json as _json
+    from .models import SiteConfig
+
+    job_id = "archive_backup"
+
+    try:
+        row = db.query(SiteConfig).first()
+        cfg = _json.loads(row.config_json) if row else {}
+        backup_cfg = cfg.get("backup", {})
+    except Exception:
+        backup_cfg = {}
+
+    enabled = backup_cfg.get("enabled", False)
+    interval_days = backup_cfg.get("interval_days", 15)
+
+    existing = scheduler.get_job(job_id)
+    if existing:
+        existing.remove()
+
+    if enabled:
+        scheduler.add_job(
+            _run_archive_backup,
+            trigger='interval',
+            days=interval_days,
+            id=job_id,
+            replace_existing=True,
+        )
+        print(f"[Scheduler] Archive backup every {interval_days} day(s)")
+    else:
+        print("[Scheduler] Archive backup disabled")
+
+
 def reload_schedules(db: Session):
     """Remove all existing jobs and re-add from DB"""
     from .models import EmailSchedule
@@ -107,6 +147,8 @@ def reload_schedules(db: Session):
             replace_existing=True,
         )
         print("[Scheduler] Deviation breach scan every 5 minutes")
+
+    reload_archive_schedule(db)
 
 def start_scheduler(db: Session = None):
     if not scheduler.running:

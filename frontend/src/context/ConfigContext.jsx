@@ -29,7 +29,13 @@ const DEFAULT_CONFIG = {
       other_cleaning: 0, management_meeting: 0,
     },
   },
-  checkDataDaysBack: 1
+  checkDataDaysBack: 1,
+  backup: {
+    enabled: false,
+    interval_days: 15,
+    max_backups: 10,
+    last_backup_at: null,
+  },
 };
 
 export function getCurrentShift(config) {

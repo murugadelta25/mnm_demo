@@ -5,10 +5,11 @@ import { useTheme } from '../context/ThemeContext';
 import { pageClass } from '../themes/tileHelpers';
 import PageHeader from '../components/PageHeader';
 
-const ROLES = ['admin', 'supervisor', 'operator', 'maintenance', 'quality'];
+const ROLES = ['superadmin', 'admin', 'supervisor', 'operator', 'maintenance', 'quality'];
 
 const ROLE_CFG = {
-  admin:       { color: '#ef4444', label: 'Admin',       icon: '⚙', desc: 'Full access to all features' },
+  superadmin:  { color: '#dc2626', label: 'Super Admin', icon: '🛡', desc: 'Full access + factory setup, data backup & archive' },
+  admin:       { color: '#ef4444', label: 'Admin',       icon: '⚙', desc: 'Full access to all features except factory setup & backup' },
   supervisor:  { color: '#f59e0b', label: 'Supervisor',  icon: '📋', desc: 'Planning, data entry, QC incharge approval' },
   operator:    { color: '#0ea5e9', label: 'Operator',    icon: '🔧', desc: 'Data entry, raise breakdown tickets, QC operator' },
   maintenance: { color: '#10b981', label: 'Maintenance', icon: '🛠', desc: 'Acknowledge and resolve breakdown tickets' },

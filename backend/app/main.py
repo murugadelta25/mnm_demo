@@ -18,6 +18,7 @@ from .routers import notifications as notifications_router
 from .routers import platform as platform_router
 from .routers import features as features_router
 from .routers import machine_kpi as machine_kpi_router
+from .routers import archive as archive_router
 from .ws_manager import manager
 from sqlalchemy import text, inspect
 from sqlalchemy.orm import Session
@@ -115,8 +116,47 @@ def _ensure_deviation_alert_table():
         print(f"[WARN] deviation_alert_log bootstrap failed: {exc}")
 
 
+def _ensure_superadmin_role():
+    """Add 'superadmin' to the users.role ENUM and bootstrap the first superadmin."""
+    from .models import User, SessionLocal
+    try:
+        insp = inspect(engine)
+        if not insp.has_table("users"):
+            return
+        cols = insp.get_columns("users")
+        role_col = next((c for c in cols if c["name"] == "role"), None)
+        if not role_col:
+            return
+        role_type = role_col.get("type")
+        enums = getattr(role_type, "enums", None)
+        if enums and "superadmin" not in enums:
+            with engine.begin() as conn:
+                conn.execute(text(
+                    "ALTER TABLE users MODIFY COLUMN role "
+                    "ENUM('operator','supervisor','maintenance','admin','quality','superadmin') NOT NULL"
+                ))
+            print("[OK] users.role ENUM updated — added 'superadmin'")
+    except Exception as exc:
+        print(f"[WARN] superadmin role migration skipped: {exc}")
+        return
+
+    try:
+        db = SessionLocal()
+        existing = db.query(User).filter(User.role == "superadmin").first()
+        if not existing:
+            first_admin = db.query(User).filter(User.role == "admin").first()
+            if first_admin:
+                first_admin.role = "superadmin"
+                db.commit()
+                print(f"[OK] Promoted '{first_admin.username}' to superadmin (first-time bootstrap)")
+        db.close()
+    except Exception as exc:
+        print(f"[WARN] superadmin bootstrap skipped: {exc}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _ensure_superadmin_role()
     _ensure_work_instruction_tables()
     _ensure_deviation_alert_table()
     try:
@@ -157,6 +197,7 @@ app.include_router(notifications_router.router)
 app.include_router(platform_router.router)
 app.include_router(features_router.router)
 app.include_router(machine_kpi_router.router)
+app.include_router(archive_router.router)
 
 # Serve uploaded machine images — pathlib works on both Windows and Linux
 STATIC_DIR = Path(__file__).parent.parent / "static"

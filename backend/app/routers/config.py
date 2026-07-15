@@ -69,6 +69,12 @@ DEFAULT_CONFIG = {
         "faviconFactoryId": None,
         "factories": [],
     },
+    "backup": {
+        "enabled": False,
+        "interval_days": 15,
+        "max_backups": 10,
+        "last_backup_at": None,
+    },
 }
 
 class ConfigPayload(BaseModel):
@@ -103,6 +109,9 @@ def merge_config(stored: dict) -> dict:
     hourly = stored.get("hourly_output") or {}
     default_hourly = DEFAULT_CONFIG["hourly_output"]
     merged["hourly_output"] = {**default_hourly, **hourly}
+    backup = stored.get("backup") or {}
+    default_backup = DEFAULT_CONFIG["backup"]
+    merged["backup"] = {**default_backup, **backup}
     return merged
 
 

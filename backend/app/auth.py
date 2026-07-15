@@ -44,7 +44,19 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 
 def require_role(*roles):
     def checker(current_user: User = Depends(get_current_user)):
-        if current_user.role not in roles:
+        allowed = set(roles)
+        if "admin" in allowed:
+            allowed.add("superadmin")
+        if current_user.role not in allowed:
             raise HTTPException(status_code=403, detail="Insufficient permissions")
+        return current_user
+    return checker
+
+
+def require_superadmin():
+    """Strict superadmin-only access — admin is NOT sufficient."""
+    def checker(current_user: User = Depends(get_current_user)):
+        if current_user.role != "superadmin":
+            raise HTTPException(status_code=403, detail="Superadmin access required")
         return current_user
     return checker
