@@ -520,11 +520,12 @@ export default function LossTracker() {
         }
       });
 
-      // unaccounted = elapsed time so far minus known durations (not full shift)
+      const knownMs = ALL_ST.filter(k => k !== '_unaccounted' && k !== '_remaining').reduce((s, k) => s + acc[k], 0);
       const baseMs = pageTab === 'live' ? elapsedMs : shiftDurMs;
-      const knownMs = ALL_ST.filter(k => k !== '_unaccounted').reduce((s, k) => s + acc[k], 0);
       acc._unaccounted = Math.max(0, baseMs - knownMs);
       cnt._unaccounted = 0;
+      acc._remaining = Math.max(0, shiftDurMs - elapsedMs);
+      cnt._remaining = 0;
 
       const dateLabel = istDateStr(win.wStart);
 
@@ -1310,7 +1311,10 @@ export default function LossTracker() {
               )}
             </div>
             <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-                {tileDefs.map(({ key, label, color, bg, border, glow, colorMuted }) => (
+                {tileDefs.map(({ key, label, color, bg, border, glow, colorMuted }) => {
+                  const isLive = !notStarted && pageTab === 'live';
+                  if (key === '_remaining' && !isLive) return null;
+                  return (
                   <div
                     key={key}
                     style={{
@@ -1357,7 +1361,20 @@ export default function LossTracker() {
                       {toHM(acc[key])}
                     </span>
 
-                    {key !== '_unaccounted' && (
+                    {key === '_remaining' ? (
+                      <span
+                        style={{
+                          fontSize: 10,
+                          color: colorMuted,
+                          fontWeight: 600,
+                          fontVariantNumeric: 'tabular-nums',
+                          textShadow: tileTextShadow,
+                          lineHeight: 1.4,
+                        }}
+                      >
+                        {toHM(elapsedMs)} / {toHM(shiftDurMs)}
+                      </span>
+                    ) : key !== '_unaccounted' ? (
                       <span
                         style={{
                           fontSize: 11,
@@ -1369,9 +1386,10 @@ export default function LossTracker() {
                       >
                         {cnt[key] || 0} {cnt[key] === 1 ? 'event' : 'Event'}
                       </span>
-                    )}
+                    ) : null}
                   </div>
-                ))}
+                  );
+                })}
               </div>
 
           </div>

@@ -11,6 +11,7 @@ const LABELS = {
   alarm: 'Alarm',
   offline: 'Offline',
   _unaccounted: 'Unaccounted',
+  _remaining: 'Remaining',
 };
 
 function entry(color, bg, border, glow = null, colorMuted = null) {
@@ -33,6 +34,7 @@ const PALETTES = {
     offline: entry('#e8f4fc', 'rgba(203, 213, 225, 0.22)', 'rgba(203, 213, 225, 0.65)', 'rgba(203, 213, 225, 0.15)', '#cbd5e1'),
     setting_change: entry('#93c5fd', 'rgba(96, 165, 250, 0.18)', 'rgba(96, 165, 250, 0.55)', 'rgba(96, 165, 250, 0.1)'),
     _unaccounted: entry('#fdba74', 'rgba(251, 146, 60, 0.2)', 'rgba(251, 146, 60, 0.55)', 'rgba(251, 146, 60, 0.1)'),
+    _remaining: entry('#38bdf8', 'rgba(56, 189, 248, 0.15)', 'rgba(56, 189, 248, 0.45)', 'rgba(56, 189, 248, 0.08)'),
   },
   dark: {
     running: entry('#34d399', 'rgba(16, 185, 129, 0.18)', 'rgba(16, 185, 129, 0.5)', 'rgba(16, 185, 129, 0.1)'),
@@ -43,6 +45,7 @@ const PALETTES = {
     offline: entry('#cbd5e1', 'rgba(148, 163, 184, 0.2)', 'rgba(148, 163, 184, 0.55)', 'rgba(148, 163, 184, 0.12)', '#94a3b8'),
     setting_change: entry('#60a5fa', 'rgba(59, 130, 246, 0.18)', 'rgba(59, 130, 246, 0.5)', 'rgba(59, 130, 246, 0.1)'),
     _unaccounted: entry('#fb923c', 'rgba(248, 137, 46, 0.2)', 'rgba(248, 137, 46, 0.5)', 'rgba(248, 137, 46, 0.1)'),
+    _remaining: entry('#38bdf8', 'rgba(56, 189, 248, 0.15)', 'rgba(56, 189, 248, 0.45)', 'rgba(56, 189, 248, 0.08)'),
   },
   light: {
     running: entry('#059669', 'rgba(16, 185, 129, 0.12)', 'rgba(16, 185, 129, 0.45)', null, '#047857'),
@@ -53,6 +56,7 @@ const PALETTES = {
     offline: entry('#475569', 'rgba(71, 85, 105, 0.12)', 'rgba(71, 85, 105, 0.4)', null, '#334155'),
     setting_change: entry('#2563eb', 'rgba(59, 130, 246, 0.12)', 'rgba(59, 130, 246, 0.45)', null, '#1d4ed8'),
     _unaccounted: entry('#ea580c', 'rgba(248, 137, 46, 0.14)', 'rgba(248, 137, 46, 0.45)', null, '#c2410c'),
+    _remaining: entry('#0284c7', 'rgba(2, 132, 199, 0.1)', 'rgba(2, 132, 199, 0.35)', null, '#0369a1'),
   },
 };
 
@@ -90,6 +94,7 @@ const TILE_KEYS = [
   'offline',
   'setting_change',
   '_unaccounted',
+  '_remaining',
 ];
 
 const FILTER_KEYS = ['idle', 'breakdown', 'alarm', 'offline', 'setting_change'];
