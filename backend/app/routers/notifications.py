@@ -1,8 +1,8 @@
 """In-app notification feed for header bell (alerts, approvals, warnings)."""
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 from datetime import datetime, timedelta
-import json
 import pytz
 
 from ..models import (
@@ -26,6 +26,74 @@ def _iso(val):
     if hasattr(val, "isoformat"):
         return val.isoformat()
     return str(val)
+
+
+def _append_spc_notifications(db: Session, items: list) -> None:
+    """Add SPC / QC parameter-deviation alerts for recent and active reports."""
+    from .qc_inspection import _report_out, _spc_warnings_for_report, ACTIVE_STATUSES
+
+    cutoff = _now() - timedelta(hours=48)
+    today = _now().date()
+    date_from = today - timedelta(days=1)
+
+    recent_reports = (
+        db.query(QcInspectionReport)
+        .filter(
+            or_(
+                QcInspectionReport.submitted_at >= cutoff,
+                QcInspectionReport.inspection_date >= date_from,
+                QcInspectionReport.status.in_(ACTIVE_STATUSES),
+            )
+        )
+        .order_by(QcInspectionReport.submitted_at.desc())
+        .limit(60)
+        .all()
+    )
+
+    seen = set()
+    for report in recent_reports:
+        if report.id in seen:
+            continue
+        seen.add(report.id)
+        try:
+            # Full report payload is required — hour slots / approval drive SPC points
+            out = _report_out(report, db)
+            warnings = _spc_warnings_for_report(out, db)
+            if not warnings:
+                continue
+            body = "; ".join(
+                f"{w.get('parameter', '')}: {w.get('message', '')}" for w in warnings[:3]
+            ) + (f" (+{len(warnings) - 3} more)" if len(warnings) > 3 else "")
+            machine = (
+                db.query(Machine).filter(Machine.id == report.machine_id).first()
+                if report.machine_id else None
+            )
+            mname = (
+                (machine.name if machine else None)
+                or report.machine_name
+                or "Machine"
+            )
+            items.append({
+                "id": f"spc-{report.id}",
+                "kind": "spc_alert",
+                "severity": "alert",
+                "title": (
+                    f"SPC Alert — {report.article_no or 'QC'} · {mname} "
+                    f"(Shift {report.shift or '—'})"
+                ),
+                "body": body,
+                "path": "/qc-approvals",
+                "created_at": _iso(report.submitted_at) or _iso(report.inspection_date),
+                "meta": {
+                    "report_id": report.id,
+                    "machine_id": report.machine_id,
+                    "warning_count": len(warnings),
+                    "status": report.status,
+                },
+            })
+        except Exception as exc:
+            print(f"[Notifications] SPC alert skipped for report {report.id}: {exc}")
+            continue
 
 
 @router.get("/")
@@ -135,49 +203,9 @@ def list_notifications(db: Session = Depends(get_db), user=Depends(get_current_u
                 "meta": {"plan_id": plan.id},
             })
 
-    # Sort newest first
-    items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    # SPC / QC parameter deviations
+    _append_spc_notifications(db, items)
 
-    # SPC alerts from recent QC inspection reports (last 24h)
-    cutoff = _now() - timedelta(hours=24)
-    recent_reports = (
-        db.query(QcInspectionReport)
-        .filter(QcInspectionReport.submitted_at >= cutoff)
-        .order_by(QcInspectionReport.submitted_at.desc())
-        .limit(30)
-        .all()
-    )
-    for report in recent_reports:
-        try:
-            from ..routers.qc_inspection import _spc_warnings_for_report
-            out = {
-                "part_id": report.part_id,
-                "article_no": report.article_no,
-                "readings": json.loads(report.readings_json or "[]"),
-            }
-            warnings = _spc_warnings_for_report(out, db)
-            if not warnings:
-                continue
-            body = "; ".join(
-                f"{w.get('parameter', '')}: {w.get('message', '')}" for w in warnings[:3]
-            ) + (f" (+{len(warnings)-3} more)" if len(warnings) > 3 else "")
-            items.append({
-                "id": f"spc-{report.id}",
-                "kind": "spc_alert",
-                "severity": "alert",
-                "title": f"SPC Alert — {report.article_no or 'QC Report'} (Shift {report.shift})",
-                "body": body,
-                "path": "/qc-approvals",
-                "created_at": _iso(report.submitted_at),
-                "meta": {
-                    "report_id": report.id,
-                    "warning_count": len(warnings),
-                },
-            })
-        except Exception:
-            continue
-
-    # Re-sort after adding SPC items
     items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
 
     return {

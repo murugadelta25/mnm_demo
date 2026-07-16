@@ -637,7 +637,7 @@ function PerformanceLegend({ palette, t }) {
 }
 
 export default function MachineHourlyOutput() {
-  const { config } = useConfig();
+  const { config, ready: configReady } = useConfig();
   const { theme: t } = useTheme();
   const isDark = t.isDark ?? false;
   const palette = useMemo(() => buildPalette(t, isDark), [t, isDark]);
@@ -681,23 +681,24 @@ export default function MachineHourlyOutput() {
     api.get('/api/stations/').then(r => setStations(r.data || [])).catch(() => {});
   }, []);
 
-  // On mount: always reset to current shift + today's date so live data loads
-  // when navigating from another page (persisted state may hold a stale shift)
-  const mountedRef = useRef(false);
+  // After site config loads, reset once to current shift + live entry date.
+  // Do not use the first mount with DEFAULT_CONFIG (wrong shift windows).
+  const liveAppliedRef = useRef(false);
   useEffect(() => {
-    if (mountedRef.current) return;
-    mountedRef.current = true;
-    const liveShift = getCurrentShift(config);
-    if (liveShift) {
-      const liveDate = liveEntryDateForShift(liveShift);
-      setFilters(prev => ({
-        ...prev,
-        shiftId: liveShift.id,
-        entryDate: liveDate,
-      }));
+    if (!configReady) {
+      liveAppliedRef.current = false;
+      return;
     }
-  }, [config]);
-
+    if (liveAppliedRef.current) return;
+    liveAppliedRef.current = true;
+    const liveShift = getCurrentShift(config);
+    if (!liveShift) return;
+    setFilters(prev => ({
+      ...prev,
+      shiftId: liveShift.id,
+      entryDate: liveEntryDateForShift(liveShift),
+    }));
+  }, [configReady, config]);
   useEffect(() => {
     const sh = config.shifts.find(s => s.id === shiftId);
     if (!sh) return;

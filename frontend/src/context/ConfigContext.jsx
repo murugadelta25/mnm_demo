@@ -61,14 +61,22 @@ export function timeToMinutes(start, end) {
   return diff;
 }
 
-const ConfigContext = createContext({ config: DEFAULT_CONFIG, reload: () => {} });
+const ConfigContext = createContext({ config: DEFAULT_CONFIG, ready: false, reload: () => {} });
 
 export function ConfigProvider({ children }) {
   const { user } = useAuth();
   const [config, setConfig] = useState(DEFAULT_CONFIG);
+  const [ready, setReady] = useState(false);
 
   const reload = useCallback(() => {
-    api.get('/api/config/').then(r => setConfig(r.data)).catch(() => {});
+    return api.get('/api/config/')
+      .then(r => {
+        setConfig(r.data);
+        setReady(true);
+      })
+      .catch(() => {
+        setReady(true);
+      });
   }, []);
 
   useEffect(() => {
@@ -90,13 +98,15 @@ export function ConfigProvider({ children }) {
   // Fetch config when user logs in, reset to default on logout
   useEffect(() => {
     if (user) {
+      setReady(false);
       reload();
     } else {
       setConfig(DEFAULT_CONFIG);
+      setReady(false);
     }
   }, [user, reload]);
 
-  return <ConfigContext.Provider value={{ config, reload }}>{children}</ConfigContext.Provider>;
+  return <ConfigContext.Provider value={{ config, ready, reload }}>{children}</ConfigContext.Provider>;
 }
 
 export function useConfig() {

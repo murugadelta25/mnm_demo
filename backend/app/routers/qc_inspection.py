@@ -8,6 +8,7 @@ import json
 
 from ..models import QcInspectionReport, User, Machine, Station, PartQcParameter, get_db, now_ist
 from ..auth import get_current_user, require_role
+from ..ws_manager import manager
 from ..qc_shift_utils import (
     build_hour_slots,
     ensure_approval_structure,
@@ -185,6 +186,25 @@ def _spc_warnings_for_report(out: dict, db: Session) -> List[dict]:
     return build_spc_payload(enriched).get("warnings") or []
 
 
+async def _broadcast_spc_if_needed(report: QcInspectionReport, db: Session) -> None:
+    """Notify header bell clients when SPC deviations are present on a report."""
+    try:
+        out = _report_out(report, db)
+        warnings = _spc_warnings_for_report(out, db)
+        if not warnings:
+            return
+        await manager.broadcast({
+            "type": "spc_alert",
+            "report_id": report.id,
+            "machine_id": report.machine_id,
+            "article_no": report.article_no,
+            "shift": report.shift,
+            "warning_count": len(warnings),
+        })
+    except Exception as exc:
+        print(f"[QC] SPC broadcast failed: {exc}")
+
+
 def _apply_submit_fields(
     report: QcInspectionReport, data: QcInspectionSubmit, user: User, db: Session,
 ) -> None:
@@ -348,7 +368,7 @@ def get_active_report(
 
 
 @router.put("/draft")
-def save_draft(
+async def save_draft(
     data: QcInspectionSubmit,
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
@@ -408,7 +428,11 @@ def save_draft(
     report.submitted_at = ts
     db.commit()
     db.refresh(report)
-    return _report_out(report, db)
+    out = _report_out(report, db)
+    out["spc_warnings"] = _spc_warnings_for_report(out, db)
+    if out["spc_warnings"]:
+        await _broadcast_spc_if_needed(report, db)
+    return out
 
 
 def _do_submit_instance(report: QcInspectionReport, body: InstanceAction, user: User, db: Session):
@@ -438,7 +462,7 @@ def _do_submit_instance(report: QcInspectionReport, body: InstanceAction, user: 
 
 
 @router.post("/")
-def submit_operator_report(
+async def submit_operator_report(
     data: QcInspectionSubmit,
     db: Session = Depends(get_db),
     user=Depends(get_current_user),
@@ -454,11 +478,20 @@ def submit_operator_report(
         raise HTTPException(400, "No hourly instance is available to submit right now")
     body = InstanceAction(instance_key=inst_key, readings=data.readings)
     report = _do_submit_instance(report, body, user, db)
-    return _report_out(report, db)
+    out = _report_out(report, db)
+    out["spc_warnings"] = _spc_warnings_for_report(out, db)
+    if out["spc_warnings"]:
+        await _broadcast_spc_if_needed(report, db)
+    await manager.broadcast({
+        "type": "qc_report_submitted",
+        "report_id": report.id,
+        "machine_id": report.machine_id,
+    })
+    return out
 
 
 @router.post("/{report_id}/submit-instance")
-def submit_instance(
+async def submit_instance(
     report_id: int,
     body: InstanceAction,
     db: Session = Depends(get_db),
@@ -469,8 +502,16 @@ def submit_instance(
     if not report:
         raise HTTPException(404, "Report not found")
     report = _do_submit_instance(report, body, user, db)
-    return _report_out(report, db)
-
+    out = _report_out(report, db)
+    out["spc_warnings"] = _spc_warnings_for_report(out, db)
+    if out["spc_warnings"]:
+        await _broadcast_spc_if_needed(report, db)
+    await manager.broadcast({
+        "type": "qc_report_submitted",
+        "report_id": report.id,
+        "machine_id": report.machine_id,
+    })
+    return out
 
 @router.post("/{report_id}/approve-inspector")
 def approve_inspector(

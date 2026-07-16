@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo, Fragment } from 'react';
+import { useState, useEffect, useCallback, useMemo, Fragment, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../api/client';
 import { useWebSocket } from '../api/useWebSocket';
@@ -48,8 +48,9 @@ function weekRangeEndingToday() {
 function safeNum(v) { const n = parseFloat(v); return isNaN(n) ? 0 : n; }
 
 export default function Dashboard() {
-  const { config } = useConfig();
+  const { config, ready: configReady } = useConfig();
   const currentShift = useMemo(() => getCurrentShift(config), [config]);
+  const shiftOverrideRef = useRef(false);
 
   const [filters, setFilters] = useState(() => {
     const wr = weekRangeEndingToday();
@@ -71,12 +72,24 @@ export default function Dashboard() {
   const [kpiDialog, setKpiDialog] = useState({ open: false, loading: false, data: null });
   const navigate = useNavigate();
 
+  // After site config loads, default to today + current shift + all stations/machines.
+  // Avoid applying DEFAULT_CONFIG (wrong shift windows) before API config arrives.
   useEffect(() => {
-    if (currentShift?.id && !filters.shift) {
-      setFilters(f => ({ ...f, shift: currentShift.id }));
-    }
-  }, [currentShift]);
+    if (!configReady || shiftOverrideRef.current) return;
+    setViewMode('day');
+    setFilters(f => ({
+      ...f,
+      shift: currentShift?.id || '',
+      entry_date: todayStr(),
+      station_no: '',
+      machine_id: '',
+    }));
+  }, [configReady, currentShift?.id]);
 
+  const setShiftFilter = (shift) => {
+    shiftOverrideRef.current = true;
+    setFilters(p => ({ ...p, shift }));
+  };
   const getStationLabel = (stationId) => {
     const station = stations.find(s => s.id === stationId);
     return station ? (station.display_name || station.name || `Station ${station.id}`) : stationId;
@@ -355,7 +368,7 @@ export default function Dashboard() {
           <>
             <input style={s.input} type="date" value={filters.entry_date}
               onChange={e => setFilters(p => ({ ...p, entry_date: e.target.value }))} />
-            <select style={s.input} value={filters.shift} onChange={e => setFilters(p => ({ ...p, shift: e.target.value }))}>
+            <select style={s.input} value={filters.shift} onChange={e => setShiftFilter(e.target.value)}>
               <option value="">All Shifts</option>
               {config.shifts.filter(sh => sh.enabled).map(sh => (
                 <option key={sh.id} value={sh.id}>{sh.name}</option>
@@ -370,7 +383,7 @@ export default function Dashboard() {
             <span style={{ color: t.textDim, fontSize: 13 }}>to</span>
             <input style={s.input} type="date" value={filters.date_to}
               onChange={e => setFilters(p => ({ ...p, date_to: e.target.value }))} />
-            <select style={s.input} value={filters.shift} onChange={e => setFilters(p => ({ ...p, shift: e.target.value }))}>
+            <select style={s.input} value={filters.shift} onChange={e => setShiftFilter(e.target.value)}>
               <option value="">All Shifts</option>
               {config.shifts.filter(sh => sh.enabled).map(sh => (
                 <option key={sh.id} value={sh.id}>{sh.name}</option>
@@ -382,7 +395,7 @@ export default function Dashboard() {
           <>
             <input style={s.input} type="date" value={filters.entry_date}
               onChange={e => setFilters(p => ({ ...p, entry_date: e.target.value }))} />
-            <select style={s.input} value={filters.shift} onChange={e => setFilters(p => ({ ...p, shift: e.target.value }))}>
+            <select style={s.input} value={filters.shift} onChange={e => setShiftFilter(e.target.value)}>
               <option value="">All Shifts</option>
               {config.shifts.filter(sh => sh.enabled).map(sh => (
                 <option key={sh.id} value={sh.id}>{sh.name}</option>

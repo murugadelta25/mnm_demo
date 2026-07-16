@@ -205,7 +205,7 @@ export default function NotificationBell() {
                     <span style={{ fontSize: 14, lineHeight: 1.2 }}>{SEV_ICON[item.severity] || '•'}</span>
                     <div style={{ minWidth: 0, flex: 1 }}>
                       <div style={{ fontSize: 12, fontWeight: 700, color, marginBottom: 2 }}>
-                        {item.title}
+                        {item.kind === 'spc_alert' ? '⚠ ' : ''}{item.title}
                       </div>
                       <div style={{ fontSize: 12, color: t.text, lineHeight: 1.35 }}>
                         {item.body}
