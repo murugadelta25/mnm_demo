@@ -356,7 +356,7 @@ export default function LossTracker() {
     // For overnight shifts fetch histoDate + nextDay to cover post-midnight portion
     const dateFrom = histoDate;
     const dateTo   = isOvernight ? fmt(nextDay) : histoDate;
-    const params = { limit: 5000, date_from: dateFrom, date_to: dateTo };
+    const params = { limit: 5000, date_from: dateFrom, date_to: dateTo, include_plan_metrics: true };
     if (stitchEnabled && stitchVariant) {
       params.stitch = true;
       params.model_variant = stitchVariant;
@@ -641,7 +641,14 @@ export default function LossTracker() {
     const avg = arr => arr.length
       ? Math.round(arr.reduce((s, r) => s + r.durationMs / 1000, 0) / arr.length) : 0;
     const pickStatus = r => (isStitchedView && r.status === 'running' && r.is_stitched ? 'running' : r.effStatus);
-    const countableRun = r => pickStatus(r) === 'running' && (runThreshMs <= 0 || r.durationMs >= runThreshMs);
+    const countableRun = (r) => {
+      if (pickStatus(r) !== 'running') return false;
+      if (threshPct <= 0) return true;
+      if (typeof r.running_completion_pct === 'number') {
+        return r.running_completion_pct >= threshPct;
+      }
+      return runThreshMs <= 0 || r.durationMs >= runThreshMs;
+    };
     return {
       bars,
       runAvg:  avg(shiftRows.filter(r => countableRun(r))),
@@ -692,7 +699,7 @@ export default function LossTracker() {
   }, [stationId, machines]);
 
   const buildStatusLogParams = useCallback((extra = {}) => {
-    const params = { limit: 5000, ...extra };
+    const params = { limit: 5000, include_plan_metrics: true, ...extra };
     if (stitchEnabled && stitchVariant) {
       params.stitch = true;
       params.model_variant = stitchVariant;
@@ -926,7 +933,14 @@ export default function LossTracker() {
               <tbody>
                 {displayRows.map((log) => {
                   const st = statusStyles[log.effStatus] || statusStyles[log.status] || { color: t.textMuted, bg: 'transparent', label: log.status };
-                  const pct = Math.min((log.durationMs / maxMs) * 100, 100);
+                  const completionPct = log.effStatus === 'running'
+                    ? log.running_completion_pct
+                    : log.effStatus === 'ld/unld'
+                      ? log.ld_unld_completion_pct
+                      : null;
+                  const pct = Number.isFinite(completionPct)
+                    ? Math.max(0, Math.min(completionPct, 100))
+                    : Math.min((log.durationMs / maxMs) * 100, 100);
                   const rowBg = log.breached
                     ? (log.deviation_reason ? st.bg : '#ef444415')
                     : REASON_STATUSES.includes(log.status) ? st.bg : 'transparent';

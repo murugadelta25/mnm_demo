@@ -4,7 +4,7 @@ from typing import Optional, List
 from pydantic import BaseModel
 from pathlib import Path
 import shutil, uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from ..models import Machine, Station, BreakdownTicket, ProductionPlan, ModelChangeRequest, MachineStatusLog, get_db, now_ist
 from ..auth import get_current_user, require_role
 from ..upload_limits import MAX_IMAGE_BYTES, save_upload_limited
@@ -88,6 +88,53 @@ def _log_status(machine_id: int, status: str, source: str, db: Session):
     except Exception as exc:
         print(f"[DeviationAlert] status hook failed: {exc}")
     return entry
+
+
+def _resolve_shift_at_ts(ts: datetime, cfg: dict):
+    """Resolve shift id and logical entry_date for a timestamp."""
+    from .hourly_output import _parse_mins
+
+    shifts = [s for s in (cfg.get("shifts") or []) if s.get("enabled", True)]
+    if not shifts:
+        shifts = [
+            {"id": "A", "start": "08:00", "end": "20:00", "enabled": True},
+            {"id": "B", "start": "20:00", "end": "08:00", "enabled": True},
+        ]
+
+    hhmm = ts.hour * 60 + ts.minute
+    for sh in shifts:
+        start_m = _parse_mins(sh.get("start", "08:00"))
+        end_m = _parse_mins(sh.get("end", "20:00"))
+        overnight = end_m <= start_m
+        in_shift = (
+            (not overnight and start_m <= hhmm < end_m)
+            or (overnight and (hhmm >= start_m or hhmm < end_m))
+        )
+        if not in_shift:
+            continue
+        entry_date = ts.date()
+        if overnight and hhmm < end_m:
+            entry_date = entry_date - timedelta(days=1)
+        return sh.get("id", "A"), entry_date
+
+    first = shifts[0]
+    return first.get("id", "A"), ts.date()
+
+
+def _pick_plan_for_segment(db: Session, machine_id: int, changed_at: datetime, cfg: dict):
+    """Pick the best matching production plan for one status segment."""
+    shift_id, entry_date = _resolve_shift_at_ts(changed_at, cfg)
+    plans = db.query(ProductionPlan).filter(
+        ProductionPlan.machine_id == machine_id,
+        ProductionPlan.plan_date == entry_date,
+        ProductionPlan.shift == shift_id,
+        ProductionPlan.status.in_(["running", "completed", "pending", "paused"]),
+    ).order_by(ProductionPlan.priority, ProductionPlan.id).all()
+    if not plans:
+        return None
+    status_rank = {"running": 0, "completed": 1, "pending": 2, "paused": 3}
+    plans.sort(key=lambda p: (status_rank.get(p.status, 9), p.priority or 9999, p.id))
+    return plans[0]
 
 class ReasonUpdate(BaseModel):
     reason: str
@@ -273,9 +320,12 @@ def get_status_log(
     date_to: str = None,
     stitch: bool = False,
     model_variant: str = None,
+    include_plan_metrics: bool = False,
     db: Session = Depends(get_db),
     _=Depends(get_current_user)
 ):
+    from .hourly_output import _load_config
+
     from datetime import datetime as dt
     q = db.query(MachineStatusLog).filter(MachineStatusLog.machine_id == machine_id)
     if date_from:
@@ -291,14 +341,38 @@ def get_status_log(
             pass
     logs = q.order_by(MachineStatusLog.changed_at.desc()).limit(limit).all()
     result = []
+    cfg = _load_config(db) if include_plan_metrics else {}
+    hourly_cfg = cfg.get("hourly_output") if include_plan_metrics else {}
+    ld_unld_max_sec = int((hourly_cfg or {}).get("ld_unld_max_sec", 60))
+
     for i, l in enumerate(logs):
-        result.append({
+        end_dt = logs[i - 1].changed_at if i > 0 else None
+        duration_sec = max(0.0, (end_dt - l.changed_at).total_seconds()) if end_dt else 0.0
+        row = {
             "id": l.id, "status": l.status,
             "changed_at": l.changed_at.strftime('%Y-%m-%dT%H:%M:%S'),
-            "end_time": logs[i - 1].changed_at.strftime('%Y-%m-%dT%H:%M:%S') if i > 0 else None,
+            "end_time": end_dt.strftime('%Y-%m-%dT%H:%M:%S') if end_dt else None,
             "source": l.source,
             "deviation_reason": l.deviation_reason or "",
-        })
+        }
+        if include_plan_metrics:
+            plan = _pick_plan_for_segment(db, machine_id, l.changed_at, cfg)
+            process_time_sec = float(plan.process_time or 0) if plan else 0.0
+            loading_unloading_sec = float(plan.loading_unloading or 0) if plan else 0.0
+            is_ld_unld = l.status == "idle" and 0 < duration_sec < ld_unld_max_sec
+            row["process_time_sec"] = process_time_sec
+            row["loading_unloading_sec"] = loading_unloading_sec
+            row["running_completion_pct"] = (
+                round(min(100.0, (duration_sec / process_time_sec) * 100), 2)
+                if l.status == "running" and process_time_sec > 0 and duration_sec > 0
+                else None
+            )
+            row["ld_unld_completion_pct"] = (
+                round(min(100.0, (duration_sec / loading_unloading_sec) * 100), 2)
+                if is_ld_unld and loading_unloading_sec > 0
+                else None
+            )
+        result.append(row)
 
     if stitch and model_variant:
         try:
