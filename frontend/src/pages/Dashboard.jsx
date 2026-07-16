@@ -433,10 +433,10 @@ export default function Dashboard() {
       {mergedSummary && (
         <div style={s.kpiRow}>
           {[
-            { label: 'Availability (AR)', value: `${safeNum(mergedSummary.avg_ar).toFixed(2)}%`, color: '#0ea5e9' },
-            { label: 'Performance (PR)', value: `${safeNum(mergedSummary.avg_pr).toFixed(2)}%`, color: '#8b5cf6' },
-            { label: 'Quality (QR)', value: `${safeNum(mergedSummary.avg_qr).toFixed(2)}%`, color: '#10b981' },
-            { label: 'OEE', value: `${safeNum(mergedSummary.avg_oee).toFixed(2)}%`,
+            { label: 'Availability (AR)', value: `${Math.round(safeNum(mergedSummary.avg_ar))}%`, color: '#0ea5e9' },
+            { label: 'Performance (PR)', value: `${Math.round(safeNum(mergedSummary.avg_pr))}%`, color: '#8b5cf6' },
+            { label: 'Quality (QR)', value: `${Math.round(safeNum(mergedSummary.avg_qr))}%`, color: '#10b981' },
+            { label: 'OEE', value: `${Math.round(safeNum(mergedSummary.avg_oee))}%`,
               color: safeNum(mergedSummary.avg_oee) >= 85 ? '#10b981' : safeNum(mergedSummary.avg_oee) >= 65 ? '#f59e0b' : '#ef4444' },
             { label: 'Total Produced', value: mergedSummary.total_actual ?? 0, color: '#64748b' },
             { label: 'Accepted Qty', value: mergedSummary.total_accp ?? 0, color: '#10b981' },
@@ -479,7 +479,7 @@ export default function Dashboard() {
                     <div key={label} style={s.donutWrap}>
                       <Donut3D key={`${label}-${val}`} value={val} color={color} trackColor={t.surface2} />
                       <div style={s.donutCenter}>
-                        <span style={{ color, fontSize: 22, fontWeight: 700, lineHeight: 1.1 }}>{val.toFixed(1)}%</span>
+                        <span style={{ color, fontSize: 22, fontWeight: 700, lineHeight: 1.1 }}>{Math.round(val)}%</span>
                         <span style={{ color: t.textDim, fontSize: 14, fontWeight: 600, marginTop: 2 }}>{label}</span>
                       </div>
                     </div>
@@ -595,11 +595,11 @@ export default function Dashboard() {
                         <span>{e.defect_qty}</span>
                       )}
                     </td>
-                    <td style={s.td}>{safeNum(e.ar).toFixed(2)}%</td>
-                    <td style={s.td}>{safeNum(e.pr).toFixed(2)}%</td>
-                    <td style={s.td}>{safeNum(e.qr).toFixed(2)}%</td>
+                    <td style={s.td}>{Math.round(safeNum(e.ar))}%</td>
+                    <td style={s.td}>{Math.round(safeNum(e.pr))}%</td>
+                    <td style={s.td}>{Math.round(safeNum(e.qr))}%</td>
                     <td style={{ ...s.td, fontWeight: 700, color: oee >= 85 ? '#10b981' : oee >= 65 ? '#f59e0b' : '#ef4444' }}>
-                      {oee.toFixed(2)}%
+                      {Math.round(oee)}%
                     </td>
                     {/* QC Edit column */}
                     <td style={{ ...s.td, whiteSpace: 'nowrap' }}>
@@ -647,12 +647,12 @@ export default function Dashboard() {
                                     <td style={{ padding: '5px 8px', borderBottom: `1px solid ${t.border}`, color: t.text }}>{l.updated_by}</td>
                                     <td style={{ padding: '5px 8px', borderBottom: `1px solid ${t.border}`, color: '#ef4444' }}>{l.before_defect_qty}</td>
                                     <td style={{ padding: '5px 8px', borderBottom: `1px solid ${t.border}`, color: t.text }}>{l.before_accp_qty}</td>
-                                    <td style={{ padding: '5px 8px', borderBottom: `1px solid ${t.border}`, color: t.textMuted }}>{l.before_qr.toFixed(2)}%</td>
-                                    <td style={{ padding: '5px 8px', borderBottom: `1px solid ${t.border}`, color: l.before_oee >= 85 ? '#10b981' : l.before_oee >= 65 ? '#f59e0b' : '#ef4444', fontWeight: 600 }}>{l.before_oee.toFixed(2)}%</td>
+                                    <td style={{ padding: '5px 8px', borderBottom: `1px solid ${t.border}`, color: t.textMuted }}>{Math.round(l.before_qr)}%</td>
+                                    <td style={{ padding: '5px 8px', borderBottom: `1px solid ${t.border}`, color: l.before_oee >= 85 ? '#10b981' : l.before_oee >= 65 ? '#f59e0b' : '#ef4444', fontWeight: 600 }}>{Math.round(l.before_oee)}%</td>
                                     <td style={{ padding: '5px 8px', borderBottom: `1px solid ${t.border}`, color: '#10b981' }}>{l.after_defect_qty}</td>
                                     <td style={{ padding: '5px 8px', borderBottom: `1px solid ${t.border}`, color: t.text }}>{l.after_accp_qty}</td>
-                                    <td style={{ padding: '5px 8px', borderBottom: `1px solid ${t.border}`, color: t.textMuted }}>{l.after_qr.toFixed(2)}%</td>
-                                    <td style={{ padding: '5px 8px', borderBottom: `1px solid ${t.border}`, color: l.after_oee >= 85 ? '#10b981' : l.after_oee >= 65 ? '#f59e0b' : '#ef4444', fontWeight: 700 }}>{l.after_oee.toFixed(2)}%</td>
+                                    <td style={{ padding: '5px 8px', borderBottom: `1px solid ${t.border}`, color: t.textMuted }}>{Math.round(l.after_qr)}%</td>
+                                    <td style={{ padding: '5px 8px', borderBottom: `1px solid ${t.border}`, color: l.after_oee >= 85 ? '#10b981' : l.after_oee >= 65 ? '#f59e0b' : '#ef4444', fontWeight: 700 }}>{Math.round(l.after_oee)}%</td>
                                     <td style={{ padding: '5px 8px', borderBottom: `1px solid ${t.border}`, color: t.textMuted }}>{l.note || '—'}</td>
                                   </tr>
                                 ))}
@@ -722,7 +722,7 @@ export default function Dashboard() {
                   <div style={{ padding: '16px 24px', textAlign: 'center', borderBottom: `1px solid ${t.border}` }}>
                     <div style={{ fontSize: 12, color: t.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>Overall Equipment Effectiveness</div>
                     <div style={{ fontSize: 48, fontWeight: 800, color: k.oee >= 85 ? '#10b981' : k.oee >= 60 ? '#f59e0b' : '#ef4444' }}>
-                      {k.oee.toFixed(1)}%
+                      {Math.round(k.oee)}%
                     </div>
                     <div style={{ fontSize: 11, color: t.textMuted }}>AR × PR × QR</div>
                   </div>
@@ -739,7 +739,7 @@ export default function Dashboard() {
                     ].map(({ label, value, color, icon }) => (
                       <div key={label} style={{ background: t.surface, padding: '14px 16px', textAlign: 'center' }}>
                         <div style={{ fontSize: 20, marginBottom: 2 }}>{icon}</div>
-                        <div style={{ fontSize: 24, fontWeight: 700, color }}>{value.toFixed(1)}%</div>
+                        <div style={{ fontSize: 24, fontWeight: 700, color }}>{Math.round(value)}%</div>
                         <div style={{ fontSize: 11, color: t.textMuted, marginTop: 2 }}>{label}</div>
                       </div>
                     ))}
