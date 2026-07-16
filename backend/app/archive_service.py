@@ -16,7 +16,7 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -25,6 +25,7 @@ from .models import SessionLocal, engine
 
 BACKUP_DIR = Path(__file__).resolve().parent.parent / "backups"
 BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+_DB_CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "database" / "db.config.json"
 
 TABLES_TO_BACKUP = [
     "stations", "machines", "users", "site_config",
@@ -40,7 +41,28 @@ TABLES_TO_BACKUP = [
 
 
 def _parse_db_url() -> dict:
-    """Extract host, port, user, password, dbname from DATABASE_URL."""
+    """Extract host, port, user, password, dbname from DATABASE_URL / db.config.json.
+
+    Passwords in DATABASE_URL are URL-encoded by DbConfig.ps1 (EscapeDataString).
+    They must be unquoted before passing to mysqldump — SQLAlchemy does this
+    automatically, but urlparse alone does not.
+    """
+    # Prefer plain credentials from db.config.json when available
+    if _DB_CONFIG_PATH.exists():
+        try:
+            with open(_DB_CONFIG_PATH, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            if cfg.get("database") and cfg.get("password") is not None:
+                return {
+                    "host": cfg.get("host") or "localhost",
+                    "port": int(cfg.get("port") or 3306),
+                    "user": cfg.get("user") or "root",
+                    "password": str(cfg.get("password") or ""),
+                    "database": str(cfg["database"]),
+                }
+        except Exception:
+            pass
+
     raw = os.getenv("DATABASE_URL", "")
     if not raw:
         raise RuntimeError("DATABASE_URL not set")
@@ -48,8 +70,8 @@ def _parse_db_url() -> dict:
     return {
         "host": parsed.hostname or "localhost",
         "port": parsed.port or 3306,
-        "user": parsed.username or "root",
-        "password": parsed.password or "",
+        "user": unquote(parsed.username or "root"),
+        "password": unquote(parsed.password or ""),
         "database": (parsed.path or "").lstrip("/"),
     }
 
@@ -87,11 +109,37 @@ def create_backup(method: str = "auto", triggered_by: str = "manual") -> dict:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     if method == "auto":
-        method = "sql" if _mysqldump_available() else "json"
+        if _mysqldump_available():
+            try:
+                return _backup_sql(ts, triggered_by)
+            except Exception as exc:
+                print(f"[Archive] mysqldump failed, falling back to JSON: {exc}")
+                return _backup_json(ts, triggered_by)
+        return _backup_json(ts, triggered_by)
 
     if method == "sql":
         return _backup_sql(ts, triggered_by)
     return _backup_json(ts, triggered_by)
+
+
+def _write_mysql_defaults(db_info: dict) -> Path:
+    """Write a temporary my.cnf so password is not passed on the command line."""
+    import tempfile
+    # Use 127.0.0.1 instead of localhost to force TCP (avoids Unix socket auth issues)
+    host = db_info["host"]
+    if host in ("localhost", "::1"):
+        host = "127.0.0.1"
+    fd, path = tempfile.mkstemp(prefix="pms_mysql_", suffix=".cnf")
+    os.close(fd)
+    content = (
+        "[client]\n"
+        f"host={host}\n"
+        f"port={db_info['port']}\n"
+        f"user={db_info['user']}\n"
+        f"password={db_info['password']}\n"
+    )
+    Path(path).write_text(content, encoding="utf-8")
+    return Path(path)
 
 
 def _backup_sql(ts: str, triggered_by: str) -> dict:
@@ -99,28 +147,30 @@ def _backup_sql(ts: str, triggered_by: str) -> dict:
     db_info = _parse_db_url()
     filename = f"pms_backup_{ts}.sql.gz"
     filepath = BACKUP_DIR / filename
+    defaults_file = _write_mysql_defaults(db_info)
 
-    env = os.environ.copy()
-    env["MYSQL_PWD"] = db_info["password"]
+    try:
+        cmd = [
+            "mysqldump",
+            f"--defaults-extra-file={defaults_file}",
+            "--single-transaction",
+            "--routines",
+            "--triggers",
+            "--add-drop-table",
+            db_info["database"],
+        ]
 
-    cmd = [
-        "mysqldump",
-        f"--host={db_info['host']}",
-        f"--port={db_info['port']}",
-        f"--user={db_info['user']}",
-        "--single-transaction",
-        "--routines",
-        "--triggers",
-        "--add-drop-table",
-        db_info["database"],
-    ]
+        proc = subprocess.run(cmd, capture_output=True, timeout=300)
+        if proc.returncode != 0:
+            raise RuntimeError(f"mysqldump failed: {proc.stderr.decode('utf-8', errors='replace')}")
 
-    proc = subprocess.run(cmd, capture_output=True, timeout=300, env=env)
-    if proc.returncode != 0:
-        raise RuntimeError(f"mysqldump failed: {proc.stderr.decode('utf-8', errors='replace')}")
-
-    with gzip.open(filepath, "wb") as f:
-        f.write(proc.stdout)
+        with gzip.open(filepath, "wb") as f:
+            f.write(proc.stdout)
+    finally:
+        try:
+            defaults_file.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     meta = _build_meta(filename, filepath, "sql", triggered_by)
     _write_meta(filename, meta)
@@ -250,25 +300,28 @@ def _restore_sql(filepath: Path) -> dict:
         raise RuntimeError("mysql CLI not found — cannot restore SQL backup")
 
     db_info = _parse_db_url()
-    env = os.environ.copy()
-    env["MYSQL_PWD"] = db_info["password"]
+    defaults_file = _write_mysql_defaults(db_info)
 
-    with gzip.open(filepath, "rb") as f:
-        sql_data = f.read()
+    try:
+        with gzip.open(filepath, "rb") as f:
+            sql_data = f.read()
 
-    cmd = [
-        "mysql",
-        f"--host={db_info['host']}",
-        f"--port={db_info['port']}",
-        f"--user={db_info['user']}",
-        db_info["database"],
-    ]
+        cmd = [
+            "mysql",
+            f"--defaults-extra-file={defaults_file}",
+            db_info["database"],
+        ]
 
-    proc = subprocess.run(
-        cmd, input=sql_data, capture_output=True, timeout=600, env=env,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"mysql restore failed: {proc.stderr.decode('utf-8', errors='replace')}")
+        proc = subprocess.run(
+            cmd, input=sql_data, capture_output=True, timeout=600,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"mysql restore failed: {proc.stderr.decode('utf-8', errors='replace')}")
+    finally:
+        try:
+            defaults_file.unlink(missing_ok=True)
+        except Exception:
+            pass
 
     return {
         "status": "restored",
