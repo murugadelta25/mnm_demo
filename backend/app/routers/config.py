@@ -161,13 +161,49 @@ def get_config(db: Session = Depends(get_db), _=Depends(get_current_user)):
 
 @router.put("/")
 def save_config(payload: ConfigPayload, db: Session = Depends(get_db), _=Depends(require_role("admin"))):
+    """Persist site config while preserving runtime keys omitted by the UI.
+
+    Loss Tracker thresholds (and similar nested settings) live in the same
+    SiteConfig blob. Configuration page drafts may not include them — never
+    wipe stored values just because the payload left a key out.
+    """
     row = db.query(SiteConfig).first()
+    existing = {}
+    if row and row.config_json:
+        try:
+            existing = json.loads(row.config_json) or {}
+        except Exception:
+            existing = {}
+
+    incoming = dict(payload.config or {})
+    # Keys that must survive if the client omits or sends an empty object
+    preserve_keys = (
+        "loss_tracker_limits",
+        "deviation_escalation",
+        "hourly_output",
+        "factory",
+        "backup",
+        "featureModules",
+    )
+    for key in preserve_keys:
+        if key not in incoming or incoming.get(key) in (None, {}):
+            if key in existing and existing[key] not in (None, {}):
+                incoming[key] = existing[key]
+
+    # Nested merge for loss_tracker_limits so partial updates keep other statuses
+    if isinstance(incoming.get("loss_tracker_limits"), dict) and isinstance(existing.get("loss_tracker_limits"), dict):
+        incoming["loss_tracker_limits"] = {
+            **DEFAULT_CONFIG["loss_tracker_limits"],
+            **existing["loss_tracker_limits"],
+            **incoming["loss_tracker_limits"],
+        }
+
     if row:
-        row.config_json = json.dumps(payload.config)
+        row.config_json = json.dumps(incoming)
     else:
-        db.add(SiteConfig(config_json=json.dumps(payload.config)))
+        db.add(SiteConfig(config_json=json.dumps(incoming)))
     db.commit()
-    return payload.config
+    return merge_config(incoming)
 
 
 @router.post("/factory-logo")

@@ -221,13 +221,17 @@ export default function LossTracker() {
   const [showSettings, setShowSettings] = useState(false);
   const [editLimits, setEditLimits]   = useState(() => Object.fromEntries(Object.entries(loadLimits()).map(([k,v]) => [k, String(v)])));
 
-  // Load thresholds from backend on mount (overrides localStorage if available)
+  // Load thresholds from backend on mount (source of truth — survives code pull)
   useEffect(() => {
     api.get('/api/deviation-alerts/limits').then(r => {
       const merged = { ...DEFAULT_LIMITS_MIN, ...r.data };
-      setLimitsMin(merged);
-      setEditLimits(merged);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
+      // Coerce to numbers (API may return floats)
+      const numeric = Object.fromEntries(
+        Object.entries(merged).map(([k, v]) => [k, Math.max(0.01, Number(v) || DEFAULT_LIMITS_MIN[k] || 1)])
+      );
+      setLimitsMin(numeric);
+      setEditLimits(Object.fromEntries(Object.entries(numeric).map(([k, v]) => [k, String(v)])));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(numeric));
     }).catch(() => {}); // fallback to localStorage already set via useState
   }, []);
 
@@ -1135,12 +1139,23 @@ export default function LossTracker() {
             })
           );
           try {
-            await api.put('/api/deviation-alerts/limits', validated);
-          } catch { /* ignore — still save locally */ }
-          setLimitsMin(validated);
-          setEditLimits(Object.fromEntries(Object.entries(validated).map(([k, v]) => [k, String(v)])));
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(validated));
-          setShowSettings(false);
+            const { data } = await api.put('/api/deviation-alerts/limits', validated);
+            const saved = { ...validated, ...(data || {}) };
+            const numeric = Object.fromEntries(
+              Object.entries(saved).map(([k, v]) => [k, Math.max(0.01, Number(v) || validated[k])])
+            );
+            setLimitsMin(numeric);
+            setEditLimits(Object.fromEntries(Object.entries(numeric).map(([k, v]) => [k, String(v)])));
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(numeric));
+            setShowSettings(false);
+          } catch (e) {
+            const detail = e?.response?.data?.detail;
+            window.alert(
+              typeof detail === 'string'
+                ? `Failed to save thresholds: ${detail}`
+                : 'Failed to save thresholds to the server. Check you are logged in as admin/supervisor and try again — local preview was not kept as the source of truth.'
+            );
+          }
         };
         return (
           <div style={{ background: t.surface, border: `1px solid ${t.border}`, borderRadius: 10,

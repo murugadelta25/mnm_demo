@@ -46,14 +46,24 @@ DEFAULT_ESCALATION_CONFIG = {
 
 
 def get_limits_min(db: Session) -> dict:
-    """Return thresholds from DB (SiteConfig), falling back to DEFAULT_LIMITS_MIN."""
+    """Return thresholds from DB (SiteConfig), falling back to DEFAULT_LIMITS_MIN.
+
+    Values are kept as floats so decimal-minute thresholds (e.g. 1.5) survive reload.
+    """
     try:
         from .routers.config import _load_config
         cfg = _load_config(db)
         stored = cfg.get('loss_tracker_limits') or {}
-        return {k: int(stored.get(k, DEFAULT_LIMITS_MIN[k])) for k in DEFAULT_LIMITS_MIN}
+        out = {}
+        for k in DEFAULT_LIMITS_MIN:
+            raw = stored.get(k, DEFAULT_LIMITS_MIN[k])
+            try:
+                out[k] = float(raw)
+            except (TypeError, ValueError):
+                out[k] = float(DEFAULT_LIMITS_MIN[k])
+        return out
     except Exception:
-        return dict(DEFAULT_LIMITS_MIN)
+        return {k: float(v) for k, v in DEFAULT_LIMITS_MIN.items()}
 
 
 def _limit_sec(status: str, db: Session = None) -> Optional[int]:

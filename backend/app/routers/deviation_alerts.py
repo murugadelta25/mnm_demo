@@ -113,17 +113,27 @@ def save_deviation_limits(
     db: Session = Depends(get_db),
     _=Depends(require_role("admin", "supervisor")),
 ):
+    """Save Loss Tracker thresholds into SiteConfig (survives code pull / restart)."""
     import json
     from ..routers.config import _load_config, DEFAULT_CONFIG
     row = db.query(SiteConfig).first()
-    cfg = _load_config(db) if row else dict(DEFAULT_CONFIG)
-    cfg['loss_tracker_limits'] = payload.model_dump()
+    # Prefer raw stored JSON so we don't inflate unrelated defaults into the blob
+    if row and row.config_json:
+        try:
+            cfg = json.loads(row.config_json) or {}
+        except Exception:
+            cfg = _load_config(db)
+    else:
+        cfg = dict(DEFAULT_CONFIG)
+
+    limits = {k: float(v) for k, v in payload.model_dump().items()}
+    cfg['loss_tracker_limits'] = limits
     if row:
         row.config_json = json.dumps(cfg)
     else:
         db.add(SiteConfig(config_json=json.dumps(cfg)))
     db.commit()
-    return cfg['loss_tracker_limits']
+    return limits
 
 
 @router.put("/escalation")

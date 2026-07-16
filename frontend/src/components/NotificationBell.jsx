@@ -16,14 +16,43 @@ const SEV_ICON = {
   info: 'ℹ',
 };
 
+const BELL_SHAKE_CSS = `
+@keyframes pms-bell-shake {
+  0%, 100% { transform: rotate(0deg); }
+  8%  { transform: rotate(14deg); }
+  16% { transform: rotate(-14deg); }
+  24% { transform: rotate(12deg); }
+  32% { transform: rotate(-12deg); }
+  40% { transform: rotate(8deg); }
+  48% { transform: rotate(-8deg); }
+  56%, 100% { transform: rotate(0deg); }
+}
+@keyframes pms-bell-burst {
+  0%   { transform: rotate(0deg) scale(1); }
+  12%  { transform: rotate(18deg) scale(1.12); }
+  24%  { transform: rotate(-18deg) scale(1.12); }
+  36%  { transform: rotate(14deg) scale(1.08); }
+  48%  { transform: rotate(-14deg) scale(1.08); }
+  60%  { transform: rotate(8deg) scale(1.04); }
+  72%  { transform: rotate(-8deg) scale(1.02); }
+  100% { transform: rotate(0deg) scale(1); }
+}
+@keyframes pms-badge-pulse {
+  0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(239,68,68,0.45); }
+  50% { transform: scale(1.08); box-shadow: 0 0 0 4px rgba(239,68,68,0); }
+}
+`;
+
 export default function NotificationBell() {
   const { theme: t } = useTheme();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState([]);
   const [unread, setUnread] = useState(0);
+  const [burst, setBurst] = useState(false);
   const panelRef = useRef(null);
   const btnRef = useRef(null);
+  const prevUnreadRef = useRef(0);
 
   const load = useCallback(async () => {
     if (!localStorage.getItem('token')) return;
@@ -35,6 +64,18 @@ export default function NotificationBell() {
       /* keep previous list on transient errors */
     }
   }, []);
+
+  // Stronger shake when unread count increases
+  useEffect(() => {
+    if (unread > prevUnreadRef.current && unread > 0) {
+      setBurst(true);
+      const id = window.setTimeout(() => setBurst(false), 700);
+      prevUnreadRef.current = unread;
+      return () => window.clearTimeout(id);
+    }
+    prevUnreadRef.current = unread;
+    return undefined;
+  }, [unread]);
 
   useEffect(() => {
     if (!localStorage.getItem('token')) return undefined;
@@ -79,12 +120,15 @@ export default function NotificationBell() {
     if (item?.path) navigate(item.path);
   };
 
+  const shouldShake = unread > 0 && !open;
+
   return (
     <div style={{ position: 'relative', flexShrink: 0 }}>
+      <style>{BELL_SHAKE_CSS}</style>
       <button
         ref={btnRef}
         type="button"
-        title="Notifications"
+        title={unread > 0 ? `${unread} notification${unread === 1 ? '' : 's'}` : 'Notifications'}
         onClick={() => {
           setOpen((v) => !v);
           if (!open) load();
@@ -105,7 +149,20 @@ export default function NotificationBell() {
           padding: 0,
         }}
       >
-        🔔
+        <span
+          aria-hidden="true"
+          style={{
+            display: 'inline-block',
+            transformOrigin: 'top center',
+            animation: burst
+              ? 'pms-bell-burst 0.65s ease-in-out'
+              : shouldShake
+                ? 'pms-bell-shake 2.6s ease-in-out infinite'
+                : 'none',
+          }}
+        >
+          🔔
+        </span>
         {unread > 0 && (
           <span
             style={{
@@ -124,6 +181,7 @@ export default function NotificationBell() {
               justifyContent: 'center',
               padding: '0 4px',
               lineHeight: 1,
+              animation: shouldShake ? 'pms-badge-pulse 2.6s ease-in-out infinite' : 'none',
             }}
           >
             {unread > 99 ? '99+' : unread}

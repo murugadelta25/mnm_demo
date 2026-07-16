@@ -56,7 +56,30 @@ export default function Configuration() {
 
   const saveConfig = async () => {
     try {
-      await api.put('/api/config/', { config });
+      // Always re-fetch server config so Loss Tracker thresholds (and similar
+      // nested keys not edited on this page) are not wiped by a stale draft.
+      let preserved = {};
+      try {
+        const { data: latest } = await api.get('/api/config/');
+        preserved = {
+          loss_tracker_limits: latest?.loss_tracker_limits,
+          deviation_escalation: latest?.deviation_escalation,
+          factory: config.factory ?? latest?.factory,
+          hourly_output: config.hourly_output ?? latest?.hourly_output,
+          backup: config.backup ?? latest?.backup,
+        };
+      } catch { /* proceed with local config */ }
+
+      const payload = {
+        ...config,
+        ...(preserved.loss_tracker_limits ? { loss_tracker_limits: preserved.loss_tracker_limits } : {}),
+        ...(preserved.deviation_escalation ? { deviation_escalation: preserved.deviation_escalation } : {}),
+        ...(preserved.factory ? { factory: preserved.factory } : {}),
+        ...(preserved.hourly_output != null ? { hourly_output: preserved.hourly_output } : {}),
+        ...(preserved.backup ? { backup: preserved.backup } : {}),
+      };
+
+      await api.put('/api/config/', { config: payload });
       clearDraft(DRAFT_KEYS.configuration);
       reload();
       setSaved(true);
