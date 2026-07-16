@@ -23,7 +23,7 @@ function CustomTooltip({ active, payload, label }) {
       {p?.raw_value && <div>Reading: {p.raw_value}</div>}
       {p?.in_spec != null && (
         <div style={{ color: p.in_spec ? DOT_IN_SPEC : DOT_DEVIATED, fontWeight: 700 }}>
-          {p.in_spec ? '✓ In spec' : '✗ Deviated — out of tolerance'}
+          {p.in_spec ? `✓ In spec — ${p.value}` : `✗ Deviated — out of tolerance (${p.value})`}
         </div>
       )}
     </div>

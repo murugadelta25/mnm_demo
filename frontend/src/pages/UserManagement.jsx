@@ -80,7 +80,8 @@ export default function UserManagement() {
     e.preventDefault();
     try {
       if (editId) {
-        const payload = { role: form.role };
+        const payload = {};
+        if (editId !== me?.id) payload.role = form.role;
         if (form.password) payload.password = form.password;
         await api.put(`/api/users/${editId}`, payload);
         flash('✅ User updated');
@@ -204,12 +205,16 @@ export default function UserManagement() {
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                 <label style={s.label}>Role *</label>
-                <select style={s.inp} value={form.role}
+                <select style={{ ...s.inp, background: editId === me?.id ? t.surface2 : t.inp }}
+                  value={form.role} disabled={editId === me?.id}
                   onChange={e => setForm(p => ({ ...p, role: e.target.value }))}>
                   {ROLES.map(r => (
                     <option key={r} value={r}>{ROLE_CFG[r].icon} {ROLE_CFG[r].label}</option>
                   ))}
                 </select>
+                {editId === me?.id && (
+                  <span style={{ color: t.textFaint, fontSize: 10 }}>Cannot change your own role</span>
+                )}
               </div>
               <button style={s.submitBtn} type="submit">
                 {editId ? '💾 Save Changes' : '✓ Create User'}

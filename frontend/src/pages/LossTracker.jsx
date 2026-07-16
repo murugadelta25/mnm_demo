@@ -44,6 +44,29 @@ function loadLimits() {
   } catch { return { ...DEFAULT_LIMITS_MIN }; }
 }
 
+// Parse a threshold input string → decimal minutes
+// Accepts: "1.5", "1m 30s", "1:30", "90s", "90"
+function parseThresholdInput(raw) {
+  const s = String(raw || '').trim();
+  // mm:ss format
+  const colonMatch = s.match(/^(\d+):(\d{1,2})$/);
+  if (colonMatch) return parseInt(colonMatch[1]) + parseInt(colonMatch[2]) / 60;
+  // "Xm Ys" or "Xm" or "Ys"
+  const minsMatch = s.match(/(?:(\d+(?:\.\d+)?)\s*m)?\s*(?:(\d+(?:\.\d+)?)\s*s)?/);
+  if (minsMatch && (minsMatch[1] || minsMatch[2])) {
+    return (parseFloat(minsMatch[1] || 0)) + (parseFloat(minsMatch[2] || 0) / 60);
+  }
+  const n = parseFloat(s);
+  return isNaN(n) ? 1 : n;
+}
+
+function formatThresholdDisplay(minutes) {
+  const m = Math.floor(minutes);
+  const s = Math.round((minutes - m) * 60);
+  if (s === 0) return `${m}m`;
+  return `${m}m ${s}s`;
+}
+
 const REASON_STATUSES  = ['idle', 'breakdown', 'alarm', 'offline', 'setting_change'];
 const SUMMARY_STATUSES = ['idle', 'breakdown', 'alarm', 'offline', 'setting_change'];
 
@@ -196,7 +219,7 @@ export default function LossTracker() {
   // threshold config
   const [limitsMin, setLimitsMin]     = useState(loadLimits);
   const [showSettings, setShowSettings] = useState(false);
-  const [editLimits, setEditLimits]   = useState(loadLimits);
+  const [editLimits, setEditLimits]   = useState(() => Object.fromEntries(Object.entries(loadLimits()).map(([k,v]) => [k, String(v)])));
 
   // Load thresholds from backend on mount (overrides localStorage if available)
   useEffect(() => {
@@ -1066,7 +1089,7 @@ export default function LossTracker() {
                 border: `1px solid ${showPareto ? '#f59e0b' : t.border}`, fontWeight: 600,
               }}>Pareto</button>
             <button
-              onClick={() => { setShowSettings(v => !v); setEditLimits({ ...limitsMin }); }}
+              onClick={() => { setShowSettings(v => !v); setEditLimits(Object.fromEntries(Object.entries(limitsMin).map(([k,v]) => [k, String(v)]))); }}
               style={{
                 padding: '6px 12px', borderRadius: 6, fontSize: 13, cursor: 'pointer',
                 background: showSettings ? t.accent : t.surface2,
@@ -1092,13 +1115,16 @@ export default function LossTracker() {
         };
         const saveSettings = async () => {
           const validated = Object.fromEntries(
-            Object.entries(editLimits).map(([k, v]) => [k, Math.max(1, parseInt(v) || 1)])
+            Object.entries(editLimits).map(([k, v]) => {
+              const parsed = parseThresholdInput(v);
+              return [k, Math.max(0.01, parsed)];
+            })
           );
           try {
             await api.put('/api/deviation-alerts/limits', validated);
           } catch { /* ignore — still save locally */ }
           setLimitsMin(validated);
-          setEditLimits(validated);
+          setEditLimits(Object.fromEntries(Object.entries(validated).map(([k, v]) => [k, String(v)])));
           localStorage.setItem(STORAGE_KEY, JSON.stringify(validated));
           setShowSettings(false);
         };
@@ -1107,25 +1133,32 @@ export default function LossTracker() {
                         padding: 16, marginBottom: 16 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
               <h4 style={{ color: t.accent, margin: 0, fontSize: 14 }}>Threshold Configuration</h4>
-              <span style={{ color: t.textFaint, fontSize: 11 }}>Values in minutes</span>
+              <span style={{ color: t.textFaint, fontSize: 11 }}>
+                Enter as decimal minutes (e.g. <b>1.5</b>), mm:ss (e.g. <b>1:30</b>), or with units (e.g. <b>1m 28s</b>)
+              </span>
             </div>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginBottom: 14 }}>
               {SUMMARY_STATUSES.map(s => {
                 const st = statusStyles[s];
+                const parsed = parseThresholdInput(editLimits[s]);
+                const isValid = !isNaN(parsed) && parsed > 0;
                 return (
-                  <div key={s} style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 140 }}>
+                  <div key={s} style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 150 }}>
                     <label style={{ fontSize: 11, fontWeight: 600, color: st.color }}>
                       <span style={{ display: 'inline-block', width: 8, height: 8, borderRadius: '50%',
                                      background: st.color, marginRight: 5 }} />
-                      {LABELS[s]} (min)
+                      {LABELS[s]}
                     </label>
-                    <input type="number" min="1"
-                      style={{ ...inp, width: 80, borderColor: st.color + '88' }}
+                    <input
+                      style={{ ...inp, width: 110, borderColor: isValid ? st.color + '88' : '#ef4444' }}
                       value={editLimits[s]}
+                      placeholder="e.g. 1.5 or 1:30"
                       onChange={e => setEditLimits(p => ({ ...p, [s]: e.target.value }))}
                     />
-                    <span style={{ fontSize: 10, color: t.textFaint }}>
-                      Current: <b style={{ color: st.color }}>{limitsMin[s]} min</b>
+                    <span style={{ fontSize: 10, color: isValid ? t.textFaint : '#ef4444' }}>
+                      {isValid
+                        ? <>= <b style={{ color: st.color }}>{formatThresholdDisplay(parsed)}</b> · current: <b style={{ color: st.color }}>{formatThresholdDisplay(limitsMin[s])}</b></>
+                        : 'Invalid — use e.g. 1.5 or 1:30 or 1m 28s'}
                     </span>
                   </div>
                 );
@@ -1137,7 +1170,7 @@ export default function LossTracker() {
                          borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}>
                 Save Thresholds
               </button>
-              <button onClick={() => setEditLimits({ ...DEFAULT_LIMITS_MIN })}
+              <button onClick={() => setEditLimits(Object.fromEntries(Object.entries(DEFAULT_LIMITS_MIN).map(([k,v]) => [k, String(v)])))}
                 style={{ padding: '7px 16px', background: t.surface2, color: t.textMuted,
                          border: `1px solid ${t.border}`, borderRadius: 6, cursor: 'pointer', fontSize: 13 }}>
                 Reset to Defaults

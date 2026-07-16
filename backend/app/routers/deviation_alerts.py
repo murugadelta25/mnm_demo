@@ -39,11 +39,11 @@ class EscalationConfigIn(BaseModel):
 
 
 class LimitsIn(BaseModel):
-    idle: int = 1
-    breakdown: int = 90
-    alarm: int = 30
-    offline: int = 30
-    setting_change: int = 120
+    idle: float = 1.0
+    breakdown: float = 90.0
+    alarm: float = 30.0
+    offline: float = 30.0
+    setting_change: float = 120.0
 
 
 @router.get("/")

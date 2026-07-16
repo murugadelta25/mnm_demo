@@ -57,6 +57,8 @@ export default function NotificationBell() {
       'plan_updated',
       'plan_started',
       'machine_status_updated',
+      'spc_alert',
+      'qc_report_submitted',
     ].includes(type)) {
       load();
     }
