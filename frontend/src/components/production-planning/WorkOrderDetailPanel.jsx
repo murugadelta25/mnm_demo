@@ -1,6 +1,12 @@
+import { useState } from 'react';
 import { surfaceClass } from '../../themes/tileHelpers';
 
-export default function WorkOrderDetailPanel({ t, detail, loading, onClose, upcomingPlans, scheduleOnly }) {
+export default function WorkOrderDetailPanel({
+  t, detail, loading, onClose, upcomingPlans, scheduleOnly, onSaveActual,
+}) {
+  const [actualEdit, setActualEdit] = useState({ id: null, qty: '' });
+  const [saving, setSaving] = useState(false);
+
   if (!loading && !detail) return null;
 
   const table = { width: '100%', borderCollapse: 'collapse', fontSize: 12 };
@@ -9,6 +15,22 @@ export default function WorkOrderDetailPanel({ t, detail, loading, onClose, upco
   };
   const td = {
     padding: '8px', borderBottom: `1px solid ${t.border}`, color: t.textMuted, whiteSpace: 'nowrap',
+  };
+  const miniBtn = {
+    padding: '2px 8px', border: 'none', borderRadius: 4, cursor: 'pointer', color: '#fff', fontSize: 12,
+  };
+
+  const saveActual = async (planId) => {
+    if (!onSaveActual) return;
+    const qty = parseInt(actualEdit.qty, 10);
+    if (Number.isNaN(qty) || qty < 0) return;
+    setSaving(true);
+    try {
+      await onSaveActual(planId, qty);
+      setActualEdit({ id: null, qty: '' });
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -105,6 +127,9 @@ export default function WorkOrderDetailPanel({ t, detail, loading, onClose, upco
           )}
 
           <h5 style={{ color: t.accent, fontSize: 13, margin: '0 0 8px' }}>Production Track Record</h5>
+          <p style={{ color: t.textDim, fontSize: 11, margin: '0 0 8px' }}>
+            Actual updates automatically from machine running count. Click a value to edit manually.
+          </p>
           <div style={{ overflowX: 'auto', maxHeight: 360 }}>
             <table style={table}>
               <thead>
@@ -115,17 +140,64 @@ export default function WorkOrderDetailPanel({ t, detail, loading, onClose, upco
                 </tr>
               </thead>
               <tbody>
-                {(detail.records || []).map((r) => (
-                  <tr key={r.plan_id}>
-                    <td style={td}>{r.run_date}</td>
-                    <td style={td}>{r.shift}</td>
-                    <td style={td}>{r.machine_name}</td>
-                    <td style={td}>{r.planned_qty}</td>
-                    <td style={td}>{r.actual_qty}</td>
-                    <td style={td}>{r.complete_pct}%</td>
-                    <td style={td}>{r.status}</td>
-                  </tr>
-                ))}
+                {(detail.records || []).map((r) => {
+                  const pct = r.complete_pct ?? (
+                    r.planned_qty > 0 ? Math.round((r.actual_qty / r.planned_qty) * 1000) / 10 : 0
+                  );
+                  const editing = actualEdit.id === r.plan_id;
+                  return (
+                    <tr key={r.plan_id}>
+                      <td style={td}>{r.run_date}</td>
+                      <td style={td}>{r.shift}</td>
+                      <td style={td}>{r.machine_name}</td>
+                      <td style={td}>{r.planned_qty}</td>
+                      <td style={td}>
+                        {editing ? (
+                          <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                            <input
+                              type="number"
+                              min="0"
+                              value={actualEdit.qty}
+                              disabled={saving}
+                              onChange={(e) => setActualEdit((v) => ({ ...v, qty: e.target.value }))}
+                              style={{
+                                width: 70, padding: '3px 6px', borderRadius: 4,
+                                border: `1px solid ${t.border}`, background: t.inp, color: t.text, fontSize: 12,
+                              }}
+                            />
+                            <button
+                              type="button"
+                              disabled={saving}
+                              style={{ ...miniBtn, background: t.brand }}
+                              onClick={() => saveActual(r.plan_id)}
+                            >✓</button>
+                            <button
+                              type="button"
+                              disabled={saving}
+                              style={{ ...miniBtn, background: t.textFaint }}
+                              onClick={() => setActualEdit({ id: null, qty: '' })}
+                            >✕</button>
+                          </div>
+                        ) : (
+                          <span
+                            title={onSaveActual ? 'Click to edit actual qty' : undefined}
+                            style={{
+                              cursor: onSaveActual ? 'pointer' : 'default',
+                              color: t.text,
+                              fontWeight: 600,
+                              borderBottom: onSaveActual ? `1px dashed ${t.border}` : 'none',
+                            }}
+                            onClick={() => onSaveActual && setActualEdit({ id: r.plan_id, qty: String(r.actual_qty ?? 0) })}
+                          >
+                            {r.actual_qty}
+                          </span>
+                        )}
+                      </td>
+                      <td style={td}>{pct}%</td>
+                      <td style={td}>{r.status}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
             {!detail.records?.length && (

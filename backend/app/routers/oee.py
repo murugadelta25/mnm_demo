@@ -279,6 +279,7 @@ def realtime_oee(
         _break_windows, _build_status_segments,
         _countable_running_segments, _running_part_threshold_ratio,
         auto_transition_shift_plans, _shift_window,
+        sync_plan_actuals_from_status_logs,
     )
 
     target_date = entry_date or date.today()
@@ -300,6 +301,15 @@ def realtime_oee(
         s_start, s_end = _shift_window(target_date, sh_def)
         if s_start <= _now < s_end:
             auto_transition_shift_plans(db, target_date, sh_def['id'], cfg)
+
+    # Persist dashboard Actual into production_plans so WO / Planning stay current
+    sync_plan_actuals_from_status_logs(
+        db,
+        entry_date=target_date,
+        machine_id=machine_id,
+        shift=shift,
+        commit=True,
+    )
 
     plan_q = db.query(ProductionPlan).filter(ProductionPlan.plan_date == target_date)
     if station_no:

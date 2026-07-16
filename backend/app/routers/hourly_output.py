@@ -983,6 +983,140 @@ def _countable_running_segments(segments: list, process_time_sec: Optional[float
     return sum(1 for seg in segments if seg.get('state') == 'running' and seg.get('seconds', 0) >= threshold_sec)
 
 
+def sync_plan_actuals_from_status_logs(
+    db: Session,
+    *,
+    entry_date: Optional[date] = None,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    machine_id: Optional[int] = None,
+    shift: Optional[str] = None,
+    commit: bool = True,
+) -> int:
+    """Write dashboard-style countable running parts into production_plans.actual_qty.
+
+    Dashboard OEE computes Actual from status logs but does not persist it.
+    Work orders and planning screens read plan.actual_qty, so keep them in sync.
+
+    Auto-sync uses max(existing, computed) so a higher manual edit is preserved
+    until machine count catches up. Returns number of plans updated.
+    """
+    cfg = _load_config(db)
+    shifts = [s for s in cfg.get('shifts', []) if s.get('enabled', True)]
+    if not shifts:
+        return 0
+    shift_map = {s['id']: s for s in shifts}
+    if shift and shift not in shift_map:
+        return 0
+
+    q = db.query(ProductionPlan).filter(
+        ProductionPlan.machine_id.isnot(None),
+        ProductionPlan.status.in_(['running', 'completed', 'paused']),
+    )
+    if entry_date:
+        q = q.filter(ProductionPlan.plan_date == entry_date)
+    if date_from:
+        q = q.filter(ProductionPlan.plan_date >= date_from)
+    if date_to:
+        q = q.filter(ProductionPlan.plan_date <= date_to)
+    if machine_id:
+        q = q.filter(ProductionPlan.machine_id == machine_id)
+    if shift:
+        q = q.filter(ProductionPlan.shift == shift)
+
+    plans = q.all()
+    if not plans:
+        return 0
+
+    # Cap sync window to recent days for unbounded list calls
+    if not entry_date and not date_from and not date_to:
+        today = now_ist().date()
+        plans = [p for p in plans if p.plan_date and p.plan_date >= today - timedelta(days=7)]
+        if not plans:
+            return 0
+
+    threshold_ratio = _running_part_threshold_ratio(cfg)
+    ld_max = _cfg_ld_unld_max_sec(cfg)
+    micro_gap = _cfg_micro_gap_sec(cfg)
+
+    groups = {}
+    for p in plans:
+        key = (p.machine_id, p.plan_date, p.shift)
+        groups.setdefault(key, []).append(p)
+
+    status_rank = {'running': 0, 'paused': 1, 'completed': 2}
+    updated = 0
+    touched_wo_ids = set()
+    _now = now_ist()
+
+    for (mid, pdate, sh_id), group in groups.items():
+        sh_def = shift_map.get(sh_id)
+        if not sh_def or not pdate:
+            continue
+
+        shift_start, shift_end = _shift_window(pdate, sh_def)
+        effective_end = _effective_shift_end(shift_start, shift_end)
+        if effective_end <= shift_start:
+            continue
+
+        group.sort(key=lambda p: (status_rank.get(p.status, 9), p.priority or 9999, p.id))
+        target = group[0]
+
+        ct = _plan_ct(target)
+        if ct <= 0:
+            for p in group:
+                ct = _plan_ct(p)
+                if ct > 0:
+                    break
+
+        profile = _get_cycle_profile(db, getattr(target, 'model_variant', None) or '')
+        segments = _build_status_segments(
+            db, mid, shift_start, effective_end,
+            cycle_profile=profile,
+            ld_unld_max_sec=ld_max,
+            micro_gap_sec=micro_gap,
+        )
+        running_segs = [
+            s for s in segments
+            if s.get('state') == 'running'
+            and s['start'] >= shift_start
+            and s['start'] < effective_end
+        ]
+        computed = _countable_running_segments(
+            running_segs, ct if ct > 0 else None, threshold_ratio,
+        )
+
+        new_actual = max(int(target.actual_qty or 0), int(computed or 0))
+        if new_actual != int(target.actual_qty or 0):
+            target.actual_qty = new_actual
+            target.updated_at = _now
+            updated += 1
+            if target.work_order_id:
+                touched_wo_ids.add(target.work_order_id)
+
+            # Auto-complete when machine count reaches planned qty
+            if (
+                target.status == 'running'
+                and target.planned_qty
+                and new_actual >= target.planned_qty
+            ):
+                target.status = 'completed'
+
+    if touched_wo_ids:
+        from .work_orders import sync_work_order_after_plan_change
+        for wo_id in touched_wo_ids:
+            sync_work_order_after_plan_change(db, wo_id)
+
+    if updated and commit:
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            return 0
+
+    return updated
+
+
 def _stitch_segments(segments: list, profile: Optional[dict]) -> list:
     """Merge multi-segment cycles. Returns segments unchanged when profile is
     None or interruptions <= 0 — so normal parts are never affected.

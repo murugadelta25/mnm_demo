@@ -215,6 +215,26 @@ def get_plans(
     if date_to:    q = q.filter(ProductionPlan.plan_date <= date_to)
     if status:     q = q.filter(ProductionPlan.status == status)
     plans = q.order_by(ProductionPlan.plan_date, ProductionPlan.shift, ProductionPlan.priority).all()
+
+    # Keep plan.actual_qty aligned with dashboard running-part count
+    try:
+        from .hourly_output import sync_plan_actuals_from_status_logs
+        sync_kwargs = {"commit": True}
+        if plan_date:
+            sync_kwargs["entry_date"] = plan_date
+        else:
+            if date_from or week_start:
+                sync_kwargs["date_from"] = date_from or week_start
+            if date_to or week_end:
+                sync_kwargs["date_to"] = date_to or week_end
+        if shift:
+            sync_kwargs["shift"] = shift
+        sync_plan_actuals_from_status_logs(db, **sync_kwargs)
+        # Re-query so response reflects synced actuals
+        plans = q.order_by(ProductionPlan.plan_date, ProductionPlan.shift, ProductionPlan.priority).all()
+    except Exception as exc:
+        print(f"[Plans] actual sync skipped: {exc}")
+
     return [_plan_dict(p, db) for p in plans]
 
 @router.get("/summary")
@@ -241,6 +261,24 @@ def get_summary(
     if week_end:   q = q.filter(ProductionPlan.plan_date <= week_end)
     if date_from:  q = q.filter(ProductionPlan.plan_date >= date_from)
     if date_to:    q = q.filter(ProductionPlan.plan_date <= date_to)
+
+    # Sync running-part counts into plan.actual_qty so tiles match dashboard
+    try:
+        from .hourly_output import sync_plan_actuals_from_status_logs
+        sync_kwargs = {"commit": True}
+        if plan_date:
+            sync_kwargs["entry_date"] = plan_date
+        else:
+            if date_from or week_start:
+                sync_kwargs["date_from"] = date_from or week_start
+            if date_to or week_end:
+                sync_kwargs["date_to"] = date_to or week_end
+        if shift:
+            sync_kwargs["shift"] = shift
+        sync_plan_actuals_from_status_logs(db, **sync_kwargs)
+    except Exception as exc:
+        print(f"[Plans] summary actual sync skipped: {exc}")
+
     plans = q.all()
     total_planned = sum(p.planned_qty for p in plans)
     total_actual  = sum(p.actual_qty  for p in plans)

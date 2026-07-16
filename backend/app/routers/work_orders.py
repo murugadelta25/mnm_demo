@@ -246,6 +246,19 @@ def list_work_orders(
     else:
         q = _apply_wo_date_range(q, date_from, date_to)
     orders = q.order_by(WorkOrder.start_date.desc(), WorkOrder.id.desc()).all()
+
+    # Sync plan actuals from machine running count before rolling up WO completed qty
+    try:
+        from .hourly_output import sync_plan_actuals_from_status_logs
+        sync_plan_actuals_from_status_logs(
+            db,
+            date_from=date_from,
+            date_to=date_to,
+            commit=True,
+        )
+    except Exception as exc:
+        print(f"[WorkOrders] actual sync skipped: {exc}")
+
     for wo in orders:
         _sync_wo_status(db, wo.id)
     db.commit()
@@ -696,6 +709,16 @@ def get_work_order(wo_id: int, db: Session = Depends(get_db), _=Depends(get_curr
     wo = db.query(WorkOrder).filter(WorkOrder.id == wo_id).first()
     if not wo:
         raise HTTPException(404, "Work order not found")
+    try:
+        from .hourly_output import sync_plan_actuals_from_status_logs
+        sync_plan_actuals_from_status_logs(
+            db,
+            date_from=wo.start_date,
+            date_to=wo.end_date or now_ist().date(),
+            commit=True,
+        )
+    except Exception as exc:
+        print(f"[WorkOrders] detail actual sync skipped: {exc}")
     return _serialize_wo(db, wo, include_plans=True)
 
 
@@ -704,6 +727,16 @@ def track_record(wo_id: int, db: Session = Depends(get_db), _=Depends(get_curren
     wo = db.query(WorkOrder).filter(WorkOrder.id == wo_id).first()
     if not wo:
         raise HTTPException(404, "Work order not found")
+    try:
+        from .hourly_output import sync_plan_actuals_from_status_logs
+        sync_plan_actuals_from_status_logs(
+            db,
+            date_from=wo.start_date,
+            date_to=wo.end_date or now_ist().date(),
+            commit=True,
+        )
+    except Exception as exc:
+        print(f"[WorkOrders] track-record actual sync skipped: {exc}")
     plans = db.query(ProductionPlan).filter(
         ProductionPlan.work_order_id == wo_id,
     ).order_by(ProductionPlan.plan_date.desc(), ProductionPlan.shift).all()

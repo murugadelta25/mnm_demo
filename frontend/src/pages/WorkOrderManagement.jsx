@@ -236,6 +236,19 @@ export default function WorkOrderManagement() {
     toggleWorkOrder(id);
   };
 
+  const savePlanActual = async (planId, qty) => {
+    try {
+      await api.patch(`/api/plans/${planId}/actual`, { actual_qty: qty, source: 'manual' });
+      setMsg('✅ Actual qty updated');
+      setTimeout(() => setMsg(''), 3000);
+      await fetchList();
+      if (selectedId) await fetchDetail(selectedId);
+    } catch (err) {
+      setMsg('❌ ' + (err.response?.data?.detail || err.message));
+      throw err;
+    }
+  };
+
   const exportReport = async () => {
     try {
       const r = await api.post('/api/work-orders/export', {
@@ -444,6 +457,7 @@ export default function WorkOrderManagement() {
               upcomingPlans={upcomingPlans}
               scheduleOnly={scheduleOnly}
               onClose={() => selectWorkOrder(null)}
+              onSaveActual={savePlanActual}
             />
           )}
         </div>
