@@ -47,6 +47,59 @@ function weekRangeEndingToday() {
 
 function safeNum(v) { const n = parseFloat(v); return isNaN(n) ? 0 : n; }
 
+function monthDateRange(month, year) {
+  const y = parseInt(year, 10) || new Date().getFullYear();
+  const m = parseInt(month, 10);
+  if (!m || m < 1 || m > 12) return null;
+  const from = new Date(y, m - 1, 1);
+  const lastDay = new Date(y, m, 0);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const to = (y === today.getFullYear() && m === today.getMonth() + 1 && lastDay > today)
+    ? today
+    : lastDay;
+  return {
+    date_from: from.toISOString().slice(0, 10),
+    date_to: to.toISOString().slice(0, 10),
+  };
+}
+
+function buildRealtimeParams(viewMode, params, filters) {
+  const rtParams = {};
+  if ((viewMode === 'day' || viewMode === 'shift') && params.entry_date) {
+    rtParams.entry_date = params.entry_date;
+  } else if ((viewMode === 'week' || viewMode === 'range') && params.date_from && params.date_to) {
+    rtParams.date_from = params.date_from;
+    rtParams.date_to = params.date_to;
+  } else if (viewMode === 'month' && filters.month) {
+    const range = monthDateRange(filters.month, filters.year);
+    if (range) {
+      rtParams.date_from = range.date_from;
+      rtParams.date_to = range.date_to;
+    } else {
+      rtParams.entry_date = todayStr();
+    }
+  } else {
+    rtParams.entry_date = todayStr();
+  }
+  if (params.shift) rtParams.shift = params.shift;
+  if (params.station_no) rtParams.station_no = params.station_no;
+  if (params.machine_id) rtParams.machine_id = params.machine_id;
+  return rtParams;
+}
+
+function matchesSearch(entry, term) {
+  if (!term) return true;
+  const needle = term.toLowerCase();
+  const fields = [
+    entry.current_operation,
+    entry.model_variant,
+    entry.machine_name,
+    entry.work_order_no,
+  ];
+  return fields.some((field) => (field || '').toLowerCase().includes(needle));
+}
+
 export default function Dashboard() {
   const { config, ready: configReady } = useConfig();
   const currentShift = useMemo(() => getCurrentShift(config), [config]);
@@ -133,18 +186,8 @@ export default function Dashboard() {
     if ((viewMode === 'week' || viewMode === 'range') && (!isValidDate(filters.date_from) || !isValidDate(filters.date_to))) return;
     try {
       const params = buildParams();
-      const rtParams = {};
-      if ((viewMode === 'day' || viewMode === 'shift') && params.entry_date) {
-        rtParams.entry_date = params.entry_date;
-      } else if ((viewMode === 'week' || viewMode === 'range') && params.date_from && params.date_to) {
-        rtParams.date_from = params.date_from;
-        rtParams.date_to = params.date_to;
-      } else {
-        rtParams.entry_date = new Date().toISOString().slice(0, 10);
-      }
-      if (params.shift) rtParams.shift = params.shift;
-      if (params.station_no) rtParams.station_no = params.station_no;
-      if (params.machine_id) rtParams.machine_id = params.machine_id;
+      const rtParams = buildRealtimeParams(viewMode, params, filters);
+      const searchTerm = params.search || '';
 
       const [e, s, p, m, rt] = await Promise.all([
         api.get('/api/oee/', { params }),
@@ -154,7 +197,8 @@ export default function Dashboard() {
         api.get('/api/oee/realtime', { params: rtParams }).catch(() => ({ data: [] })),
       ]);
       const manualEntries = (Array.isArray(e.data) ? e.data : []);
-      const realtimeEntries = (Array.isArray(rt.data) ? rt.data : []);
+      const realtimeEntries = (Array.isArray(rt.data) ? rt.data : [])
+        .filter((row) => matchesSearch(row, searchTerm));
 
       const manualKeys = new Set(
         manualEntries.map(x => `${x.machine_id}_${x.shift}_${x.entry_date}`)
@@ -170,7 +214,7 @@ export default function Dashboard() {
     } catch (err) {
       console.error('Dashboard fetch error:', err);
     }
-  }, [buildParams, viewMode, filters.entry_date, filters.date_from, filters.date_to]);
+  }, [buildParams, viewMode, filters.entry_date, filters.date_from, filters.date_to, filters.month, filters.year]);
 
   // Check missing shifts - warn if previous shift data not found in configured days back
   const checkMissingShifts = useCallback(async () => {
@@ -574,7 +618,7 @@ export default function Dashboard() {
                     <td style={s.td}>{e.accp_qty}</td>
                     {/* Defect — editable inline */}
                     <td style={{ ...s.td, color: safeNum(e.defect_qty) > 0 ? '#ef4444' : '#10b981' }}>
-                      {isEditing ? (
+                      {!isRealtime && isEditing ? (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 180 }}>
                           <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
                             <input type="number" min="0" max={e.actual_qty}
@@ -607,21 +651,25 @@ export default function Dashboard() {
                     <td style={{ ...s.td, fontWeight: 700, color: oee >= 85 ? '#10b981' : oee >= 65 ? '#f59e0b' : '#ef4444' }}>
                       {Math.round(oee)}%
                     </td>
-                    {/* QC Edit column */}
+                    {/* QC Edit column — manual entries only */}
                     <td style={{ ...s.td, whiteSpace: 'nowrap' }}>
-                      <div style={{ display: 'flex', gap: 4 }}>
-                        {!isEditing && (
-                          <button onClick={() => setDefectEdit({ id: e.id, value: String(e.defect_qty || 0), note: '' })}
-                            style={{ padding: '3px 8px', background: '#f59e0b', color: '#fff', border: 'none',
-                                     borderRadius: 4, cursor: 'pointer', fontSize: 11, fontWeight: 600 }}
-                            title="Update defect qty after QC">✏ QC</button>
-                        )}
-                        <button onClick={() => loadDefectLog(e.id)}
-                          style={{ padding: '3px 8px', background: showLog ? t.accent : t.surface2,
-                                   color: showLog ? '#fff' : t.textMuted, border: 'none',
-                                   borderRadius: 4, cursor: 'pointer', fontSize: 11 }}
-                          title="View QC history">{showLog ? '▲ Hide' : '📋 Log'}</button>
-                      </div>
+                      {isRealtime ? (
+                        <span style={{ color: t.textFaint, fontSize: 11 }}>Live</span>
+                      ) : (
+                        <div style={{ display: 'flex', gap: 4 }}>
+                          {!isEditing && (
+                            <button onClick={() => setDefectEdit({ id: e.id, value: String(e.defect_qty || 0), note: '' })}
+                              style={{ padding: '3px 8px', background: '#f59e0b', color: '#fff', border: 'none',
+                                       borderRadius: 4, cursor: 'pointer', fontSize: 11, fontWeight: 600 }}
+                              title="Update defect qty after QC">✏ QC</button>
+                          )}
+                          <button onClick={() => loadDefectLog(e.id)}
+                            style={{ padding: '3px 8px', background: showLog ? t.accent : t.surface2,
+                                     color: showLog ? '#fff' : t.textMuted, border: 'none',
+                                     borderRadius: 4, cursor: 'pointer', fontSize: 11 }}
+                            title="View QC history">{showLog ? '▲ Hide' : '📋 Log'}</button>
+                        </div>
+                      )}
                     </td>
                   </tr>
                   {/* QC history expansion row */}
