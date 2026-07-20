@@ -59,11 +59,32 @@ export default function WorkOrderTrackRecord({ t, workOrderId, onClose }) {
             {wo.spares_tools?.length > 0 && (
               <div style={{ marginBottom: 16, padding: 10, background: t.surface2, borderRadius: 8, fontSize: 12 }}>
                 <div style={{ color: t.textDim, marginBottom: 6 }}>Spares / Tools</div>
-                {wo.spares_tools.map((s, i) => (
-                  <div key={i} style={{ color: t.textMuted }}>
-                    {s.name}{s.qty != null ? ` — ${s.qty} ${s.unit || 'pcs'}` : ''}
-                  </div>
-                ))}
+                <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+                  <thead>
+                    <tr>
+                      {['Name', 'Tool No', 'Stock', 'Required', 'Remaining'].map((h) => (
+                        <th key={h} style={{ textAlign: 'left', padding: '4px 6px', color: t.textDim, fontWeight: 500 }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {wo.spares_tools.map((s, i) => (
+                      <tr key={i}>
+                        <td style={{ padding: '4px 6px', color: t.textMuted }}>{s.name}</td>
+                        <td style={{ padding: '4px 6px', color: t.textMuted }}>{s.tool_no || '—'}</td>
+                        <td style={{ padding: '4px 6px', color: t.textMuted }}>{s.stock_available != null ? s.stock_available : '—'}</td>
+                        <td style={{ padding: '4px 6px', color: t.textMuted }}>{s.qty != null ? `${s.qty} ${s.unit || 'pcs'}` : '—'}</td>
+                        <td style={{
+                          padding: '4px 6px',
+                          fontWeight: 600,
+                          color: s.remaining_qty != null && s.remaining_qty < 0 ? '#ef4444' : t.textMuted,
+                        }}>
+                          {s.remaining_qty != null ? s.remaining_qty : '—'}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
 

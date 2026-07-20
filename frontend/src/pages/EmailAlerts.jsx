@@ -12,12 +12,13 @@ const REPORT_OPTIONS = [
   { key: 'maintenance',  label: 'Maintenance' },
   { key: 'data_entry',   label: 'Data Entry' },
   { key: 'loss_tracker', label: 'LOSS TRACKER' },
+  { key: 'tools',        label: 'Tool Management' },
   { key: 'deviation_alerts', label: 'Deviation Alerts (real-time)' },
 ];
 const REPORT_DEFAULTS_BY_NAME = {
-  management: ['oee','planning','breakdown','maintenance','deviation_alerts'],
-  production:  ['oee','planning','breakdown','deviation_alerts'],
-  maintenance: ['breakdown','maintenance','deviation_alerts'],
+  management: ['oee','planning','breakdown','maintenance','tools','deviation_alerts'],
+  production:  ['oee','planning','breakdown','tools','deviation_alerts'],
+  maintenance: ['breakdown','maintenance','tools','deviation_alerts'],
 };
 
 const GROUP_COLORS = { production: '#0ea5e9', maintenance: '#f59e0b', management: '#8b5cf6' };

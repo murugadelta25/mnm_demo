@@ -100,6 +100,7 @@ export default function NotificationBell() {
       'machine_status_updated',
       'spc_alert',
       'qc_report_submitted',
+      'tool_alert',
     ].includes(type)) {
       load();
     }

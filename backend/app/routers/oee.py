@@ -260,35 +260,23 @@ def get_summary(
         "count": len(entries)
     }
 
-@router.get("/realtime")
-def realtime_oee(
-    entry_date: Optional[date] = None,
+def _compute_realtime_oee_for_date(
+    db: Session,
+    target_date: date,
+    cfg: dict,
+    *,
     shift: Optional[str] = None,
     station_no: Optional[int] = None,
     machine_id: Optional[int] = None,
-    db: Session = Depends(get_db),
-    _=Depends(get_current_user),
-):
-    """Compute per-machine OEE from status logs + production plans (real-time).
-
-    Returns entries compatible with the manual OEE data but flagged as
-    ``source: 'realtime'`` so the Dashboard can display both sources.
-    """
-    from .config import DEFAULT_CONFIG, merge_config
+    sync_actuals: bool = False,
+) -> list:
+    """Compute per-machine realtime OEE rows for a single plan date."""
     from .hourly_output import (
         _break_windows, _build_status_segments,
         _countable_running_segments, _running_part_threshold_ratio,
         auto_transition_shift_plans, _shift_window,
         sync_plan_actuals_from_status_logs,
     )
-
-    target_date = entry_date or date.today()
-
-    row = db.query(SiteConfig).first()
-    if row:
-        cfg = merge_config(json.loads(row.config_json))
-    else:
-        cfg = dict(DEFAULT_CONFIG)
 
     enabled_shifts = [s for s in cfg.get("shifts", []) if s.get("enabled")]
     if shift:
@@ -297,19 +285,19 @@ def realtime_oee(
         return []
 
     _now = datetime.now()
-    for sh_def in enabled_shifts:
-        s_start, s_end = _shift_window(target_date, sh_def)
-        if s_start <= _now < s_end:
-            auto_transition_shift_plans(db, target_date, sh_def['id'], cfg)
+    if sync_actuals:
+        for sh_def in enabled_shifts:
+            s_start, s_end = _shift_window(target_date, sh_def)
+            if s_start <= _now < s_end:
+                auto_transition_shift_plans(db, target_date, sh_def['id'], cfg)
 
-    # Persist dashboard Actual into production_plans so WO / Planning stay current
-    sync_plan_actuals_from_status_logs(
-        db,
-        entry_date=target_date,
-        machine_id=machine_id,
-        shift=shift,
-        commit=True,
-    )
+        sync_plan_actuals_from_status_logs(
+            db,
+            entry_date=target_date,
+            machine_id=machine_id,
+            shift=shift,
+            commit=True,
+        )
 
     plan_q = db.query(ProductionPlan).filter(ProductionPlan.plan_date == target_date)
     if station_no:
@@ -460,6 +448,58 @@ def realtime_oee(
                 "oee": oee_val,
                 "planned_qty": total_planned,
             })
+
+    return results
+
+
+@router.get("/realtime")
+def realtime_oee(
+    entry_date: Optional[date] = None,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    shift: Optional[str] = None,
+    station_no: Optional[int] = None,
+    machine_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Compute per-machine OEE from status logs + production plans (real-time).
+
+    Returns entries compatible with the manual OEE data but flagged as
+    ``source: 'realtime'`` so the Dashboard can display both sources.
+    """
+    from .config import DEFAULT_CONFIG, merge_config
+
+    row = db.query(SiteConfig).first()
+    if row:
+        cfg = merge_config(json.loads(row.config_json))
+    else:
+        cfg = dict(DEFAULT_CONFIG)
+
+    today = date.today()
+    target_dates: list[date] = []
+
+    if date_from and date_to:
+        if date_from > date_to:
+            date_from, date_to = date_to, date_from
+        cursor = date_from
+        while cursor <= date_to:
+            target_dates.append(cursor)
+            cursor += timedelta(days=1)
+    else:
+        target_dates = [entry_date or today]
+
+    results = []
+    for target_date in target_dates:
+        results.extend(_compute_realtime_oee_for_date(
+            db,
+            target_date,
+            cfg,
+            shift=shift,
+            station_no=station_no,
+            machine_id=machine_id,
+            sync_actuals=(target_date == today),
+        ))
 
     return results
 

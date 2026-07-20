@@ -30,6 +30,7 @@ _DB_CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "database" / "
 TABLES_TO_BACKUP = [
     "stations", "machines", "users", "site_config",
     "parts", "part_documents", "part_document_history", "part_qc_parameters",
+    "tool_stocks", "tool_events", "tool_alerts",
     "work_orders", "production_plans", "oee_entries", "oee_defect_log",
     "model_change_requests", "breakdown_tickets",
     "machine_status_log", "machine_kpi_log",

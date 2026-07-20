@@ -11,6 +11,7 @@ from .routers import users as users_router
 from .routers import config as config_router
 from .routers import hourly_output as hourly_output_router
 from .routers import parts as parts_router
+from .routers import tools as tools_router
 from .routers import operator_dashboard as operator_dashboard_router
 from .routers import qc_inspection as qc_inspection_router
 from .routers import deviation_alerts as deviation_alerts_router
@@ -92,6 +93,11 @@ def _ensure_work_instruction_tables():
         _run_migrate("part_process_sheet", process_sheet_migrate)
     except Exception as exc:
         print(f"[WARN] part_process_sheet import failed: {exc}")
+    try:
+        from migrate_tool_stocks import main as tool_stocks_migrate
+        _run_migrate("tool_stocks", tool_stocks_migrate)
+    except Exception as exc:
+        print(f"[WARN] tool_stocks import failed: {exc}")
 
 
 def _ensure_deviation_alert_table():
@@ -190,6 +196,7 @@ app.include_router(users_router.router)
 app.include_router(config_router.router)
 app.include_router(hourly_output_router.router)
 app.include_router(parts_router.router)
+app.include_router(tools_router.router)
 app.include_router(operator_dashboard_router.router)
 app.include_router(qc_inspection_router.router)
 app.include_router(deviation_alerts_router.router)

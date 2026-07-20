@@ -24,6 +24,10 @@ class SpareToolItem(BaseModel):
     qty: Optional[float] = None
     unit: Optional[str] = "pcs"
     notes: Optional[str] = None
+    tool_no: Optional[str] = None
+    stock_available: Optional[float] = None
+    remaining_qty: Optional[float] = None
+    source: Optional[str] = None  # "part" | "manual"
 
 
 class WorkOrderCreate(BaseModel):

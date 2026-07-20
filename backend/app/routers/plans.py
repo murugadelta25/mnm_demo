@@ -36,6 +36,7 @@ class PlanCreate(BaseModel):
     priority: int = 1
     plan_type: str = "scheduled"
     notes: Optional[str] = None
+    tool_shortage_ack: bool = False  # planner ack when forecast requires it
 
 class PlanUpdate(BaseModel):
     planned_qty: Optional[int] = None
@@ -166,8 +167,42 @@ async def create_plan(data: PlanCreate, db: Session = Depends(get_db),
                 f"Planned qty exceeds work order remaining capacity ({remaining} pcs left to plan)",
             )
 
+        # Tool stock / life forecast — notify planner; require ack if short / near EOL
+        from ..tool_service import build_forecast, log_event, find_tool
+        forecast = build_forecast(db, work_order_id=data.work_order_id, planned_qty=total_new)
+        if forecast.get("blocks_plan"):
+            raise HTTPException(status_code=409, detail={
+                "code": "tool_eol_blocked",
+                "message": forecast.get("message"),
+                "forecast": forecast,
+            })
+        if forecast.get("requires_ack") and not data.tool_shortage_ack:
+            raise HTTPException(status_code=409, detail={
+                "code": "tool_forecast_ack_required",
+                "message": forecast.get("message"),
+                "forecast": forecast,
+            })
+        if data.tool_shortage_ack and forecast.get("requires_ack"):
+            from ..models import ToolStock
+            for trow in forecast.get("tools") or []:
+                if not trow.get("requires_ack"):
+                    continue
+                tool = None
+                if trow.get("tool_id"):
+                    tool = db.query(ToolStock).filter(ToolStock.id == trow["tool_id"]).first()
+                if not tool:
+                    tool = find_tool(db, tool_code=trow.get("tool_code"), tool_name=trow.get("tool_name"))
+                if tool:
+                    log_event(
+                        db, tool, "forecast_ack",
+                        user_id=user.id,
+                        work_order_id=data.work_order_id,
+                        notes=f"Planner acknowledged forecast: {trow.get('message')}",
+                        acknowledged_by=user.id,
+                    )
+
     created = []
-    base = data.model_dump(exclude={"end_date", "shifts"})
+    base = data.model_dump(exclude={"end_date", "shifts", "tool_shortage_ack"})
     for i in range(delta):
         for shift in shifts:
             day_data = {**base, "plan_date": start + timedelta(days=i), "shift": shift}
@@ -585,10 +620,11 @@ async def update_status(plan_id: int, data: PlanUpdate, db: Session = Depends(ge
 
 @router.patch("/{plan_id}/actual")
 async def update_actual_qty(plan_id: int, data: ActualQtyUpdate, db: Session = Depends(get_db),
-                             _=Depends(get_current_user)):
+                             user=Depends(get_current_user)):
     """Called by manual entry, MQTT bridge, Modbus bridge, or OPC-UA bridge"""
     plan = db.query(ProductionPlan).filter(ProductionPlan.id == plan_id).first()
     if not plan: raise HTTPException(404, "Plan not found")
+    prev_actual = int(plan.actual_qty or 0)
     plan.actual_qty = data.actual_qty
     plan.updated_at = now_ist()
     if data.actual_qty >= plan.planned_qty and plan.status == "running":
@@ -596,6 +632,11 @@ async def update_actual_qty(plan_id: int, data: ActualQtyUpdate, db: Session = D
         plan.status = "completed"
         machine = db.query(Machine).filter(Machine.id == plan.machine_id).first()
         if machine: machine.status = "idle"
+    try:
+        from ..tool_service import apply_consumption_safe
+        apply_consumption_safe(db, plan, prev_actual, data.actual_qty, user_id=getattr(user, "id", None))
+    except Exception as exc:
+        print(f"[WARN] tool consumption skipped: {exc}")
     sync_work_order_after_plan_change(db, plan.work_order_id)
     db.commit()
     await manager.broadcast({

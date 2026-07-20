@@ -206,6 +206,36 @@ def list_notifications(db: Session = Depends(get_db), user=Depends(get_current_u
     # SPC / QC parameter deviations
     _append_spc_notifications(db, items)
 
+    # Tool low-stock / near-EOL (skip suppressed)
+    try:
+        from ..models import ToolAlert, ToolStock
+        tool_alerts = (
+            db.query(ToolAlert)
+            .filter(ToolAlert.acknowledged == 0, ToolAlert.suppressed == 0)
+            .order_by(ToolAlert.created_at.desc())
+            .limit(40)
+            .all()
+        )
+        tool_ids = {a.tool_id for a in tool_alerts}
+        tools = {
+            t.id: t for t in db.query(ToolStock).filter(ToolStock.id.in_(tool_ids or {-1})).all()
+        } if tool_ids else {}
+        for a in tool_alerts:
+            tool = tools.get(a.tool_id)
+            items.append({
+                "id": f"tool-alert-{a.id}",
+                "kind": "tool_alert",
+                "severity": a.severity if a.severity in ("alert", "warning", "info") else "warning",
+                "title": f"Tool {a.alert_type.replace('_', ' ').title()}"
+                         + (f" — {tool.tool_code}" if tool else ""),
+                "body": a.message,
+                "path": "/tools",
+                "created_at": _iso(a.created_at),
+                "meta": {"alert_id": a.id, "tool_id": a.tool_id, "alert_type": a.alert_type},
+            })
+    except Exception as exc:
+        print(f"[Notifications] tool alerts skipped: {exc}")
+
     items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
 
     return {

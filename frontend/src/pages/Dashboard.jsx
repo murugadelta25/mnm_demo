@@ -134,8 +134,14 @@ export default function Dashboard() {
     try {
       const params = buildParams();
       const rtParams = {};
-      if (viewMode === 'day' && params.entry_date) rtParams.entry_date = params.entry_date;
-      else rtParams.entry_date = new Date().toISOString().slice(0, 10);
+      if ((viewMode === 'day' || viewMode === 'shift') && params.entry_date) {
+        rtParams.entry_date = params.entry_date;
+      } else if ((viewMode === 'week' || viewMode === 'range') && params.date_from && params.date_to) {
+        rtParams.date_from = params.date_from;
+        rtParams.date_to = params.date_to;
+      } else {
+        rtParams.entry_date = new Date().toISOString().slice(0, 10);
+      }
       if (params.shift) rtParams.shift = params.shift;
       if (params.station_no) rtParams.station_no = params.station_no;
       if (params.machine_id) rtParams.machine_id = params.machine_id;

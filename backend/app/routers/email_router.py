@@ -43,11 +43,11 @@ class ScheduleIn(BaseModel):
     active: int = 1
 
 REPORT_DEFAULTS = {
-    "management": "oee,planning,breakdown,maintenance,deviation_alerts",
-    "production":  "oee,planning,breakdown,deviation_alerts",
-    "maintenance": "breakdown,maintenance,deviation_alerts",
+    "management": "oee,planning,breakdown,maintenance,tools,deviation_alerts",
+    "production":  "oee,planning,breakdown,tools,deviation_alerts",
+    "maintenance": "breakdown,maintenance,tools,deviation_alerts",
 }
-ALL_REPORTS = ["oee", "planning", "breakdown", "maintenance", "data_entry", "loss_tracker", "deviation_alerts"]
+ALL_REPORTS = ["oee", "planning", "breakdown", "maintenance", "data_entry", "loss_tracker", "tools", "deviation_alerts"]
 
 class GroupIn(BaseModel):
     name: str
@@ -1037,6 +1037,133 @@ def build_loss_tracker_xlsx(db: Session, report_date=None) -> bytes:
     return buf.getvalue()
 
 
+def build_tools_xlsx(db: Session, report_date=None) -> bytes:
+    """Tool inventory, life status, open alerts, and recent consumption history."""
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from ..models import ToolStock, ToolAlert, ToolEvent, WorkOrder, Machine
+    from ..tool_service import serialize_tool, refresh_tool_status
+
+    wb = openpyxl.Workbook()
+    hdr_fill = PatternFill("solid", fgColor="1E3A5F")
+    hdr_font = Font(bold=True, color="FFFFFF")
+    warn_fill = PatternFill("solid", fgColor="FEF3C7")
+    alert_fill = PatternFill("solid", fgColor="FEE2E2")
+
+    # ── Inventory ──
+    ws = wb.active
+    ws.title = "Tool Inventory"
+    inv_headers = [
+        "Tool Code", "Tool Name", "Stock", "Min Stock", "Below Min", "Unit",
+        "Life Used", "Set Life", "Life %", "Status", "Cycles/Part",
+        "Source", "SAP Material", "QR Code", "Last Synced", "Notes", "Active",
+    ]
+    ws.append(inv_headers)
+    for col, _ in enumerate(inv_headers, 1):
+        cell = ws.cell(1, col)
+        cell.fill = hdr_fill
+        cell.font = hdr_font
+        cell.alignment = Alignment(horizontal="center")
+
+    tools = db.query(ToolStock).order_by(ToolStock.tool_code).all()
+    for tool in tools:
+        refresh_tool_status(tool)
+        row = serialize_tool(tool)
+        values = [
+            row["tool_code"], row["tool_name"], row["stock_qty"], row["min_stock"],
+            "YES" if row["below_min"] else "NO", row["unit"],
+            row["cycles_used"], row["life_cycles_limit"] or "",
+            row["life_used_pct"] if row["life_used_pct"] is not None else "",
+            row["tool_status"], row["cycles_per_part"],
+            row["stock_source"], row["sap_material_no"] or "",
+            row["qr_code"] or row["tool_code"],
+            row["last_synced_at"] or "", row["notes"] or "",
+            "Yes" if row["active"] else "No",
+        ]
+        ws.append(values)
+        r_idx = ws.max_row
+        if row["below_min"] or row["tool_status"] in ("eol", "blocked"):
+            for c in range(1, len(inv_headers) + 1):
+                ws.cell(r_idx, c).fill = alert_fill
+        elif row["tool_status"] in ("near_eol", "correction_ack"):
+            for c in range(1, len(inv_headers) + 1):
+                ws.cell(r_idx, c).fill = warn_fill
+
+    for col in ws.columns:
+        ws.column_dimensions[col[0].column_letter].width = 14
+
+    # ── Open Alerts ──
+    ws_a = wb.create_sheet("Open Alerts")
+    alert_headers = ["Alert ID", "Tool Code", "Tool Name", "Type", "Severity", "Message", "Suppressed", "Acknowledged", "Created At"]
+    ws_a.append(alert_headers)
+    for col, _ in enumerate(alert_headers, 1):
+        cell = ws_a.cell(1, col)
+        cell.fill = hdr_fill
+        cell.font = hdr_font
+    tool_map = {t.id: t for t in tools}
+    alerts = (
+        db.query(ToolAlert)
+        .filter(ToolAlert.acknowledged == 0)
+        .order_by(ToolAlert.created_at.desc())
+        .limit(500)
+        .all()
+    )
+    for a in alerts:
+        t = tool_map.get(a.tool_id)
+        ws_a.append([
+            a.id,
+            t.tool_code if t else "",
+            t.tool_name if t else "",
+            a.alert_type,
+            a.severity,
+            a.message,
+            "Yes" if a.suppressed else "No",
+            "Yes" if a.acknowledged else "No",
+            str(a.created_at or ""),
+        ])
+    for col in ws_a.columns:
+        ws_a.column_dimensions[col[0].column_letter].width = 16
+
+    # ── Recent Events ──
+    ws_e = wb.create_sheet("Life & Consumption")
+    ev_headers = [
+        "When", "Tool Code", "Event", "Qty Δ", "Cycles Before", "Cycles After", "Cycles Δ",
+        "Work Order", "Plan ID", "Machine", "Location", "Notes", "QR Scanned", "QR Suppressed",
+    ]
+    ws_e.append(ev_headers)
+    for col, _ in enumerate(ev_headers, 1):
+        cell = ws_e.cell(1, col)
+        cell.fill = hdr_fill
+        cell.font = hdr_font
+    events = db.query(ToolEvent).order_by(ToolEvent.created_at.desc()).limit(1000).all()
+    machines = {m.id: m.name for m in db.query(Machine).all()}
+    wo_map = {w.id: w.work_order_no for w in db.query(WorkOrder).all()}
+    for e in events:
+        t = tool_map.get(e.tool_id)
+        ws_e.append([
+            str(e.created_at or ""),
+            t.tool_code if t else "",
+            e.event_type,
+            float(e.qty_delta) if e.qty_delta is not None else "",
+            float(e.cycles_before) if e.cycles_before is not None else "",
+            float(e.cycles_after) if e.cycles_after is not None else "",
+            float(e.cycles_delta) if e.cycles_delta is not None else "",
+            wo_map.get(e.work_order_id, ""),
+            e.plan_id or "",
+            machines.get(e.machine_id, ""),
+            e.location or "",
+            e.notes or "",
+            "Yes" if e.qr_scanned else "No",
+            "Yes" if e.qr_suppressed else "No",
+        ])
+    for col in ws_e.columns:
+        ws_e.column_dimensions[col[0].column_letter].width = 14
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def build_attachments_for_report_types(report_types: str, db: Session, report_date=None) -> dict:
     rts = [r.strip() for r in report_types.split(",")]
     attachments = {}
@@ -1046,6 +1173,7 @@ def build_attachments_for_report_types(report_types: str, db: Session, report_da
     if "maintenance" in rts: attachments["maintenance_report.xlsx"] = build_maintenance_xlsx(db)
     if "data_entry"    in rts: attachments["data_entry_report.xlsx"]    = build_data_entry_xlsx(db, report_date)
     if "loss_tracker"  in rts: attachments["loss_tracker_report.xlsx"]  = build_loss_tracker_xlsx(db, report_date)
+    if "tools"         in rts: attachments["tool_management_report.xlsx"] = build_tools_xlsx(db, report_date)
     return attachments
 
 def do_send(cfg, to_list: List[str], subject: str, body: str,

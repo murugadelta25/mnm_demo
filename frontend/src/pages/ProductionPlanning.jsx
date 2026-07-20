@@ -128,6 +128,8 @@ export default function ProductionPlanning() {
   const [planSearch, setPlanSearch] = useState('');
   const [actualEdit, setActualEdit] = useState({ id: null, qty: '' });
   const [msg, setMsg] = useState('');
+  const [toolForecast, setToolForecast] = useState(null);
+  const [pendingPlanPayload, setPendingPlanPayload] = useState(null);
 
   // Default form shift from Configuration (enabled shifts)
   useEffect(() => {
@@ -309,17 +311,11 @@ export default function ProductionPlanning() {
       // Handle different plan modes
       if (form.plan_mode === 'single') {
         payload.plan_date = form.plan_date;
-        const r = await api.post('/api/plans/', payload);
-        const count = Array.isArray(r.data) ? r.data.length : 1;
-        setMsg(`✅ Plan created for ${form.plan_date} · ${count} slot(s) · ${shiftLabel}`);
       } else if (form.plan_mode === 'weekly') {
         payload.plan_date = form.start_date;
         const end = new Date(form.start_date);
         end.setDate(end.getDate() + 6);
         payload.end_date = end.toISOString().split('T')[0];
-        const r = await api.post('/api/plans/', payload);
-        const count = Array.isArray(r.data) ? r.data.length : 1;
-        setMsg(`✅ Weekly plan created · ${count} slot(s) · ${shiftLabel}`);
       } else if (form.plan_mode === 'monthly') {
         const start = new Date(form.start_date);
         payload.plan_date = form.start_date;
@@ -328,23 +324,88 @@ export default function ProductionPlanning() {
         const daysInMonth = new Date(year, month + 1, 0).getDate();
         const end = new Date(year, month, daysInMonth);
         payload.end_date = end.toISOString().split('T')[0];
-        const r = await api.post('/api/plans/', payload);
-        const count = Array.isArray(r.data) ? r.data.length : 1;
-        setMsg(`✅ Monthly plan created · ${count} slot(s) · ${shiftLabel}`);
       } else if (form.plan_mode === 'custom_range') {
         payload.plan_date = form.start_date;
         payload.end_date = form.end_date;
-        const r = await api.post('/api/plans/', payload);
-        const count = Array.isArray(r.data) ? r.data.length : 1;
-        setMsg(`✅ Plan created · ${count} slot(s) · ${shiftLabel}`);
       }
-      
+
+      const r = await api.post('/api/plans/', payload);
+      const count = Array.isArray(r.data) ? r.data.length : 1;
+      setMsg(`✅ Plan created · ${count} slot(s) · ${shiftLabel}`);
       setForm(INIT_FORM);
       setShowForm(false);
+      setToolForecast(null);
+      setPendingPlanPayload(null);
       fetchAll();
-    } catch (err) { 
-      const errMsg = err.response?.data?.detail || err.response?.data?.message || err.message;
-      setMsg('❌ Error: ' + errMsg); 
+    } catch (err) {
+      const detail = err.response?.data?.detail;
+      if (err.response?.status === 409 && detail && typeof detail === 'object') {
+        if (detail.code === 'tool_eol_blocked') {
+          setToolForecast(detail.forecast || null);
+          setPendingPlanPayload(null);
+          setMsg(`❌ ${detail.message || 'Tool end-of-life blocks planning — correct or replace in Tool Management'}`);
+          return;
+        }
+        if (detail.code === 'tool_forecast_ack_required') {
+          // Rebuild payload for ack retry
+          const shifts = resolveFormShifts(form, enabledShifts);
+          let payload = {
+            machine_id: form.machine_id === '' ? null : parseInt(form.machine_id),
+            work_order_id: form.work_order_id ? parseInt(form.work_order_id, 10) : null,
+            process_time: parseCtSeconds(form.process_time),
+            loading_unloading: parseCtSeconds(form.loading_unloading),
+            planned_qty: parseInt(form.planned_qty),
+            priority: parseInt(form.priority),
+            shift: shifts[0],
+            shifts,
+            station_no: parseInt(form.station_no),
+            current_operation: form.current_operation,
+            next_operation: form.next_operation,
+            model_variant: form.model_variant || null,
+            plan_type: form.plan_type,
+            notes: form.notes,
+            tool_shortage_ack: true,
+          };
+          if (form.plan_mode === 'single') payload.plan_date = form.plan_date;
+          else if (form.plan_mode === 'weekly') {
+            payload.plan_date = form.start_date;
+            const end = new Date(form.start_date);
+            end.setDate(end.getDate() + 6);
+            payload.end_date = end.toISOString().split('T')[0];
+          } else if (form.plan_mode === 'monthly') {
+            const start = new Date(form.start_date);
+            payload.plan_date = form.start_date;
+            const daysInMonth = new Date(start.getFullYear(), start.getMonth() + 1, 0).getDate();
+            payload.end_date = new Date(start.getFullYear(), start.getMonth(), daysInMonth).toISOString().split('T')[0];
+          } else {
+            payload.plan_date = form.start_date;
+            payload.end_date = form.end_date;
+          }
+          setToolForecast(detail.forecast || null);
+          setPendingPlanPayload(payload);
+          setMsg('⚠ Tool forecast requires planner acknowledgment');
+          return;
+        }
+      }
+      const errMsg = (typeof detail === 'string' ? detail : detail?.message) || err.response?.data?.message || err.message;
+      setMsg('❌ Error: ' + errMsg);
+    }
+  };
+
+  const confirmToolForecastAck = async () => {
+    if (!pendingPlanPayload) return;
+    try {
+      const r = await api.post('/api/plans/', pendingPlanPayload);
+      const count = Array.isArray(r.data) ? r.data.length : 1;
+      setMsg(`✅ Plan created with tool forecast acknowledgment · ${count} slot(s)`);
+      setForm(INIT_FORM);
+      setShowForm(false);
+      setToolForecast(null);
+      setPendingPlanPayload(null);
+      fetchAll();
+    } catch (err) {
+      const detail = err.response?.data?.detail;
+      setMsg('❌ ' + ((typeof detail === 'string' ? detail : detail?.message) || err.message));
     }
   };
 
@@ -664,7 +725,7 @@ export default function ProductionPlanning() {
   const s = getStyles(t);
 
   const msgIsError = msg.startsWith('❌') || msg.toLowerCase().includes('error');
-  const msgIsWait = msg.startsWith('⏳');
+  const msgIsWait = msg.startsWith('⏳') || msg.startsWith('⚠');
 
   return (
     <div className={pageClass(t)} style={{ padding: 20, background: t.bg, minHeight: 'calc(100vh - 52px)', color: t.text, transition: 'background 0.2s, color 0.2s' }}>
@@ -730,6 +791,65 @@ export default function ProductionPlanning() {
           >
             ✕
           </button>
+        </div>
+      )}
+
+      {toolForecast && (
+        <div style={{
+          marginBottom: 16, padding: 16, borderRadius: 12,
+          background: t.surface, border: `1px solid ${pendingPlanPayload ? '#f59e0b' : '#ef4444'}`,
+        }}>
+          <div style={{ fontWeight: 700, color: pendingPlanPayload ? '#f59e0b' : '#ef4444', marginBottom: 8 }}>
+            Tool Forecast — {toolForecast.work_order_no || 'Work Order'}
+          </div>
+          <div style={{ fontSize: 12, color: t.textDim, marginBottom: 10 }}>{toolForecast.message}</div>
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr>
+                  {['Tool', 'Stock', 'Required', 'Remaining', 'Life', 'Status', 'Note'].map((h) => (
+                    <th key={h} style={{ textAlign: 'left', padding: '6px 8px', color: t.textDim }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {(toolForecast.tools || []).map((row, i) => (
+                  <tr key={i} style={{ borderTop: `1px solid ${t.border}` }}>
+                    <td style={{ padding: '6px 8px' }}>{row.tool_code || row.tool_name || '—'}</td>
+                    <td style={{ padding: '6px 8px' }}>{row.stock_available ?? '—'}</td>
+                    <td style={{ padding: '6px 8px' }}>{row.required_qty ?? '—'}</td>
+                    <td style={{
+                      padding: '6px 8px',
+                      color: row.remaining_after != null && row.remaining_after < 0 ? '#ef4444' : undefined,
+                      fontWeight: 600,
+                    }}>{row.remaining_after ?? '—'}</td>
+                    <td style={{ padding: '6px 8px' }}>
+                      {row.life_cycles_limit
+                        ? `${row.cycles_used}/${row.life_cycles_limit} → ${row.projected_cycles_after ?? '—'}`
+                        : '—'}
+                    </td>
+                    <td style={{ padding: '6px 8px' }}>{row.tool_status || row.status || '—'}</td>
+                    <td style={{ padding: '6px 8px', color: t.textMuted }}>{row.message}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+            {pendingPlanPayload && (
+              <button type="button" onClick={confirmToolForecastAck}
+                style={{ padding: '8px 16px', background: '#f59e0b', color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 700 }}>
+                Acknowledge & Plan Anyway
+              </button>
+            )}
+            <Link to="/tools" style={{ padding: '8px 16px', background: t.surface2, color: t.accent, border: `1px solid ${t.border}`, borderRadius: 8, textDecoration: 'none', fontWeight: 600 }}>
+              Open Tool Management
+            </Link>
+            <button type="button" onClick={() => { setToolForecast(null); setPendingPlanPayload(null); }}
+              style={{ padding: '8px 16px', background: t.surface2, color: t.text, border: `1px solid ${t.border}`, borderRadius: 8, cursor: 'pointer' }}>
+              Dismiss
+            </button>
+          </div>
         </div>
       )}
 

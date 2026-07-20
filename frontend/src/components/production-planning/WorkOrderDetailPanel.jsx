@@ -1,11 +1,26 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { surfaceClass } from '../../themes/tileHelpers';
+import api from '../../api/client';
 
 export default function WorkOrderDetailPanel({
   t, detail, loading, onClose, upcomingPlans, scheduleOnly, onSaveActual,
 }) {
   const [actualEdit, setActualEdit] = useState({ id: null, qty: '' });
   const [saving, setSaving] = useState(false);
+  const [toolMonitor, setToolMonitor] = useState(null);
+
+  const woId = detail?.work_order?.id;
+  useEffect(() => {
+    if (!woId) {
+      setToolMonitor(null);
+      return undefined;
+    }
+    let cancelled = false;
+    api.get(`/api/tools/work-order/${woId}/monitor`)
+      .then((r) => { if (!cancelled) setToolMonitor(r.data); })
+      .catch(() => { if (!cancelled) setToolMonitor(null); });
+    return () => { cancelled = true; };
+  }, [woId]);
 
   if (!loading && !detail) return null;
 
@@ -72,9 +87,66 @@ export default function WorkOrderDetailPanel({
             {detail.work_order?.spares_tools?.length > 0 && (
               <div style={{ marginTop: 6 }}>
                 <strong>Spares / Tools:</strong>
-                {detail.work_order.spares_tools.map((s, i) => (
-                  <div key={i}>· {s.name}{s.qty != null ? ` — ${s.qty} ${s.unit || 'pcs'}` : ''}</div>
-                ))}
+                <div style={{ overflowX: 'auto', marginTop: 4 }}>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+                    <thead>
+                      <tr>
+                        {['Name', 'Tool No', 'Stock', 'Required', 'Remaining', 'Life', 'Status', 'Unit'].map((h) => (
+                          <th key={h} style={{ textAlign: 'left', padding: '4px 6px', color: t.textDim }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(toolMonitor?.tools?.length
+                        ? toolMonitor.tools
+                        : detail.work_order.spares_tools.map((s) => ({
+                          tool_name: s.name,
+                          tool_code: s.tool_no,
+                          stock_available: s.stock_available,
+                          required_qty: s.qty,
+                          remaining_after: s.remaining_qty,
+                          unit: s.unit,
+                        }))
+                      ).map((s, i) => (
+                        <tr key={i}>
+                          <td style={{ padding: '4px 6px' }}>{s.tool_name || s.name || '—'}</td>
+                          <td style={{ padding: '4px 6px' }}>{s.tool_code || s.tool_no || '—'}</td>
+                          <td style={{ padding: '4px 6px' }}>{s.stock_available != null ? s.stock_available : '—'}</td>
+                          <td style={{ padding: '4px 6px' }}>{s.required_qty != null ? s.required_qty : (s.qty ?? '—')}</td>
+                          <td style={{
+                            padding: '4px 6px',
+                            color: (s.remaining_after ?? s.remaining_qty) != null && (s.remaining_after ?? s.remaining_qty) < 0 ? '#ef4444' : undefined,
+                            fontWeight: 600,
+                          }}>
+                            {s.remaining_after != null ? s.remaining_after : (s.remaining_qty ?? '—')}
+                          </td>
+                          <td style={{ padding: '4px 6px' }}>
+                            {s.life_cycles_limit
+                              ? `${s.cycles_used ?? 0}/${s.life_cycles_limit} (${s.life_used_pct ?? 0}%)`
+                              : '—'}
+                          </td>
+                          <td style={{ padding: '4px 6px' }}>{s.tool_status || '—'}</td>
+                          <td style={{ padding: '4px 6px' }}>{s.unit || 'pcs'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                {toolMonitor?.history?.length > 0 && (
+                  <div style={{ marginTop: 8 }}>
+                    <strong>Tool usage history</strong>
+                    <div style={{ maxHeight: 140, overflow: 'auto', marginTop: 4 }}>
+                      {toolMonitor.history.slice(0, 20).map((e) => (
+                        <div key={e.id} style={{ fontSize: 11, color: t.textMuted, padding: '2px 0' }}>
+                          {e.event_type}
+                          {e.cycles_delta != null ? ` · Δ${e.cycles_delta} cycles` : ''}
+                          {e.location ? ` · ${e.location}` : ''}
+                          {e.notes ? ` — ${e.notes}` : ''}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>

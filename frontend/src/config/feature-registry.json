@@ -139,6 +139,13 @@
           "roles": ["admin", "superadmin", "supervisor"]
         },
         {
+          "id": "settings.tools",
+          "label": "Tool Management",
+          "path": "/tools",
+          "navIcon": "tools",
+          "roles": ["admin", "superadmin", "supervisor"]
+        },
+        {
           "id": "settings.wi_revisions",
           "label": "WI Revisions",
           "path": "/wi-revisions",

@@ -477,3 +477,67 @@ class MachineKpiLog(Base):
     teep = Column(Float)
     computed_at = Column(DateTime, nullable=False)
     source = Column(String(20), default="auto")
+
+
+class ToolStock(Base):
+    """Tool / spare inventory — manual stock or synced from SAP."""
+    __tablename__ = "tool_stocks"
+    id = Column(Integer, primary_key=True, index=True)
+    tool_code = Column(String(100), unique=True, nullable=False)
+    tool_name = Column(String(255), nullable=False)
+    unit = Column(String(20), default="pcs")
+    stock_qty = Column(Numeric(12, 2), default=0)
+    min_stock = Column(Numeric(12, 2), default=0)
+    sap_material_no = Column(String(100))
+    stock_source = Column(Enum("manual", "sap"), default="manual")
+    last_synced_at = Column(DateTime)
+    # Life / monitoring
+    life_cycles_limit = Column(Integer)  # e.g. 50000, 100000
+    cycles_used = Column(Numeric(14, 2), default=0)
+    life_warning_pct = Column(Integer, default=90)
+    cycles_per_part = Column(Numeric(10, 4), default=1)
+    tool_status = Column(String(30), default="ok")  # ok | near_eol | eol | correction_ack | blocked
+    qr_code = Column(String(100))  # mapped for future QR scan; scan suppressed for now
+    notes = Column(Text)
+    active = Column(Integer, default=1)
+    created_at = Column(TIMESTAMP)
+    updated_at = Column(TIMESTAMP)
+
+
+class ToolEvent(Base):
+    """Tool life / consumption / correction / replacement history."""
+    __tablename__ = "tool_events"
+    id = Column(Integer, primary_key=True, index=True)
+    tool_id = Column(Integer, ForeignKey("tool_stocks.id"), nullable=False, index=True)
+    event_type = Column(String(40), nullable=False)
+    qty_delta = Column(Numeric(12, 2))
+    cycles_before = Column(Numeric(14, 2))
+    cycles_after = Column(Numeric(14, 2))
+    cycles_delta = Column(Numeric(14, 2))
+    work_order_id = Column(Integer, ForeignKey("work_orders.id"))
+    plan_id = Column(Integer, ForeignKey("production_plans.id"))
+    part_id = Column(Integer, ForeignKey("parts.id"))
+    machine_id = Column(Integer, ForeignKey("machines.id"))
+    location = Column(String(255))
+    notes = Column(Text)
+    acknowledged_by = Column(Integer, ForeignKey("users.id"))
+    qr_scanned = Column(Integer, default=0)
+    qr_suppressed = Column(Integer, default=1)
+    created_by = Column(Integer, ForeignKey("users.id"))
+    created_at = Column(TIMESTAMP)
+
+
+class ToolAlert(Base):
+    """Low-stock / near-EOL / forecast alerts — can be suppressed or acknowledged."""
+    __tablename__ = "tool_alerts"
+    id = Column(Integer, primary_key=True, index=True)
+    tool_id = Column(Integer, ForeignKey("tool_stocks.id"), nullable=False, index=True)
+    alert_type = Column(String(40), nullable=False)
+    severity = Column(String(20), default="warning")
+    message = Column(String(500), nullable=False)
+    suppressed = Column(Integer, default=0)
+    acknowledged = Column(Integer, default=0)
+    acknowledged_by = Column(Integer, ForeignKey("users.id"))
+    acknowledged_at = Column(DateTime)
+    meta_json = Column(Text)
+    created_at = Column(TIMESTAMP)

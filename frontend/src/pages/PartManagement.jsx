@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import api from '../api/client';
 import { assetUrl } from '../api/config';
 import PageHeader from '../components/PageHeader';
@@ -414,6 +415,7 @@ function DynamicParamTable({
 
 export default function PartManagement() {
   const { theme: t } = useTheme();
+  const navigate = useNavigate();
   const [parts, setParts] = useState([]);
   const [partsTotal, setPartsTotal] = useState(0);
   const [partsPage, setPartsPage] = useState(1);
@@ -822,7 +824,13 @@ export default function PartManagement() {
       </datalist>
 
       <PageHeader title="Part Management Master" onRefresh={() => loadParts(partsPage, searchQuery)} extra={
-        <button type="button" onClick={newPart} style={s.btnSecondary}>+ New Part</button>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+          <button type="button" onClick={() => navigate('/work-orders')} style={s.btnSecondary}
+            title="Go to Work Order Management">
+            Work Orders
+          </button>
+          <button type="button" onClick={newPart} style={s.btnSecondary}>+ New Part</button>
+        </div>
       } />
 
       <div style={{ display: 'grid', gridTemplateColumns: '280px 1fr', gap: 16 }}>

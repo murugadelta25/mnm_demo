@@ -87,6 +87,7 @@ export const NAV_ICONS = {
   hourlyOutput: icon('barChart'),
   workInstructions: icon('menuBook'),
   parts: icon('inventory'),
+  tools: icon('build'),
   modelChange: icon('autorenew'),
   breakdown: icon('reportProblem'),
   maintenance: icon('build'),

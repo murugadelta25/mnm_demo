@@ -29,6 +29,7 @@ import UserManagement from './pages/UserManagement';
 import OperatorWorkInstructionDashboard from './pages/OperatorWorkInstructionDashboard';
 import QcApprovals from './pages/QcApprovals';
 import PartManagement from './pages/PartManagement';
+import ToolManagement from './pages/ToolManagement';
 import AutoLogin from './pages/AutoLogin';
 import WorkInstructionRevision from './pages/WorkInstructionRevision';
 import DatabaseManagement from './pages/DatabaseManagement';
@@ -74,6 +75,7 @@ function AppRoutes() {
         <Route path="/work-instructions" element={<OperatorWorkInstructionDashboard />} />
         <Route path="/qc-approvals" element={<QcApprovals />} />
         <Route path="/parts" element={<PartManagement />} />
+        <Route path="/tools" element={<ToolManagement />} />
         <Route path="/wi-revisions" element={<WorkInstructionRevision />} />
         <Route path="/users" element={<UserManagement />} />
         <Route path="/database-management" element={<DatabaseManagement />} />
