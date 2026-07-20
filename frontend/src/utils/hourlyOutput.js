@@ -117,14 +117,45 @@ export function buildExpectedHourlyOutputs(ctSec, slots, breakWindows) {
 export function expectedShiftTotal(ctSec, shiftMinutes, breakCfg) {
   const windows = getBreakWindows(breakCfg);
   const breakTotal = windows.reduce((s, w) => s + w.minutes, 0);
-  return expectedParts(ctSec, Math.max(0, shiftMinutes - breakTotal));
+  const untimed = (breakCfg?.other_cleaning || 0) + (breakCfg?.management_meeting || 0);
+  return expectedParts(ctSec, Math.max(0, shiftMinutes - breakTotal - untimed));
+}
+
+/** Distribute planned qty across hourly slots by productive minutes (largest remainder). */
+export function distributePlannedToSlots(slotWeights, target) {
+  const n = slotWeights.length;
+  if (n === 0) return [];
+  if (target <= 0) return Array(n).fill(0);
+  const rawSum = slotWeights.reduce((s, w) => s + w, 0);
+  if (rawSum <= 0) {
+    const base = Math.floor(target / n);
+    const rem = target % n;
+    return slotWeights.map((_, i) => base + (i < rem ? 1 : 0));
+  }
+  const scaled = [];
+  const remainders = [];
+  let allocated = 0;
+  slotWeights.forEach((r, i) => {
+    const exact = (target * r) / rawSum;
+    const flo = Math.floor(exact);
+    scaled.push(flo);
+    remainders.push({ frac: exact - flo, i });
+    allocated += flo;
+  });
+  remainders
+    .sort((a, b) => b.frac - a.frac)
+    .slice(0, Math.max(0, target - allocated))
+    .forEach(({ i }) => { scaled[i] += 1; });
+  return scaled;
 }
 
 /** Theoretical max parts for one shift slot (uses shift window + configured breaks). */
 export function computeShiftCapacity(ctSec, shift, breakCfg = {}) {
   const shiftMinutes = timeToMinutes(shift?.start, shift?.end);
   const breakWindows = getBreakWindows(breakCfg);
-  const breakMinutes = breakWindows.reduce((sum, w) => sum + w.minutes, 0);
+  const breakMinutes = breakWindows.reduce((sum, w) => sum + w.minutes, 0)
+    + (breakCfg.other_cleaning || 0)
+    + (breakCfg.management_meeting || 0);
   const workingMinutes = Math.max(0, shiftMinutes - breakMinutes);
   return {
     shiftId: shift?.id,

@@ -241,6 +241,22 @@ def _hourly_avail_minutes(slots: list, shift_start: datetime, shift_end: datetim
     return weights
 
 
+def _untimed_break_minutes(break_cfg: dict) -> int:
+    """Minutes-only breaks from Configuration (no start/end window)."""
+    if not break_cfg:
+        return 0
+    return int(break_cfg.get('other_cleaning') or 0) + int(break_cfg.get('management_meeting') or 0)
+
+
+def _scale_weights_for_untimed(weights: list, untimed_mins: int) -> list:
+    """Reduce slot weights proportionally when untimed breaks are configured."""
+    total = sum(weights)
+    if total <= 0 or untimed_mins <= 0:
+        return list(weights)
+    factor = max(0.0, (total - untimed_mins) / total)
+    return [w * factor for w in weights]
+
+
 def _expected_hourly_slots(
     slots: list,
     shift_start: datetime,
@@ -248,29 +264,34 @@ def _expected_hourly_slots(
     breaks: list,
     planned_total: int,
     windows: list,
+    break_cfg: Optional[dict] = None,
 ) -> tuple:
     """
-    Capacity-based expected output per slot using CT × available minutes.
-    If planned_total > 0 and CT-capacity sum exceeds it, stop filling slots
-    once cumulative expected reaches planned_total; remaining slots get 0.
+    Expected output per hourly slot.
+
+    When planned_total > 0, distribute planned qty across all slots in proportion
+    to productive minutes (shift window minus lunch/tea/TPM and untimed breaks).
+    When planned_total is 0, fall back to CT × available minutes capacity.
     """
-    raw = []
+    avail_mins_total = sum(_hourly_avail_minutes(slots, shift_start, shift_end, breaks))
+    slot_weights = []
+    ct_capacity = []
     for s in slots:
         lo, hi = _slot_bounds(shift_start, shift_end, s['slot_index'])
-        raw.append(_slot_expected(windows, lo, hi, breaks))
+        slot_weights.append(_slot_avail_minutes(windows, lo, hi, breaks))
+        ct_capacity.append(_slot_expected(windows, lo, hi, breaks))
 
-    if planned_total > 0 and sum(raw) > planned_total:
-        capped, cumulative = [], 0
-        for v in raw:
-            if cumulative >= planned_total:
-                capped.append(0)
-            else:
-                give = min(v, planned_total - cumulative)
-                capped.append(give)
-                cumulative += give
-        return capped, sum(capped), sum(_hourly_avail_minutes(slots, shift_start, shift_end, breaks))
+    if planned_total > 0:
+        weights = _scale_weights_for_untimed(slot_weights, _untimed_break_minutes(break_cfg))
+        if sum(weights) <= 0:
+            weights = _scale_weights_for_untimed(
+                _hourly_avail_minutes(slots, shift_start, shift_end, breaks),
+                _untimed_break_minutes(break_cfg),
+            )
+        distributed = _distribute_to_target(weights, planned_total)
+        return distributed, sum(distributed), avail_mins_total
 
-    return raw, sum(raw), sum(_hourly_avail_minutes(slots, shift_start, shift_end, breaks))
+    return ct_capacity, sum(ct_capacity), avail_mins_total
 
 
 def _distribute_to_target(raw: list, target: int) -> list:
@@ -611,6 +632,7 @@ def _build_variant_breakdown(
     machine_oee: list,
     qr_val: float = 100.0,
     running_threshold_ratio: float = 0.3,
+    break_cfg: Optional[dict] = None,
 ) -> list:
     if not variants:
         return []
@@ -627,16 +649,8 @@ def _build_variant_breakdown(
         ct = _variant_ct(variant, windows, machine_plans, machine_oee)
 
         expected_hourly, exp_shift_total, _ = _expected_hourly_slots(
-            slots, shift_start, shift_end, breaks, planned, var_windows,
+            slots, shift_start, shift_end, breaks, planned, var_windows, break_cfg,
         )
-
-        if var_windows:
-            for i, s in enumerate(slots):
-                slot_start = shift_start + timedelta(hours=s['slot_index'])
-                slot_end = min(shift_start + timedelta(hours=s['slot_index'] + 1), shift_end)
-                if not _slot_overlaps_windows(var_windows, slot_start, slot_end):
-                    expected_hourly[i] = 0
-            exp_shift_total = sum(expected_hourly)
 
         running_hourly, ld_hourly, idle_hourly = [], [], []
         status_windows = _status_windows_for_variant(
@@ -739,6 +753,18 @@ def _build_variant_breakdown(
         breakdown[current_idx]['is_current'] = True
 
     return breakdown
+
+
+def _slot_avail_minutes(windows: list, slot_start: datetime, slot_end: datetime, breaks: list) -> float:
+    """Productive minutes in slot across production windows (breaks deducted)."""
+    total = 0.0
+    for w in windows:
+        lo = max(w['start'], slot_start)
+        hi = min(w['end'], slot_end)
+        if hi <= lo:
+            continue
+        total += _mins_available(lo, hi, breaks)
+    return total
 
 
 def _slot_expected(windows: list, slot_start: datetime, slot_end: datetime, breaks: list) -> int:
@@ -1323,7 +1349,7 @@ def build_hourly_output(
             primary_ct = cycle_times[0]
 
         expected_hourly, exp_shift_total, _ = _expected_hourly_slots(
-            slots, shift_start, shift_end, breaks, planned_total, windows,
+            slots, shift_start, shift_end, breaks, planned_total, windows, break_cfg,
         )
 
         cycle_profile = None
@@ -1397,6 +1423,7 @@ def build_hourly_output(
             variants, windows, slots, shift_start, shift_end, breaks,
             segments, machine_plans, machine_oee, qr_val,
             running_threshold_ratio=running_part_threshold_ratio,
+            break_cfg=break_cfg,
         )
 
         result_machines.append({
