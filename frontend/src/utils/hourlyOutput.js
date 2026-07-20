@@ -120,6 +120,51 @@ export function expectedShiftTotal(ctSec, shiftMinutes, breakCfg) {
   return expectedParts(ctSec, Math.max(0, shiftMinutes - breakTotal));
 }
 
+/** Theoretical max parts for one shift slot (uses shift window + configured breaks). */
+export function computeShiftCapacity(ctSec, shift, breakCfg = {}) {
+  const shiftMinutes = timeToMinutes(shift?.start, shift?.end);
+  const breakWindows = getBreakWindows(breakCfg);
+  const breakMinutes = breakWindows.reduce((sum, w) => sum + w.minutes, 0);
+  const workingMinutes = Math.max(0, shiftMinutes - breakMinutes);
+  return {
+    shiftId: shift?.id,
+    shiftName: shift?.name || shift?.id || 'Shift',
+    shiftMinutes,
+    breakMinutes,
+    workingMinutes,
+    maxQty: expectedParts(ctSec, workingMinutes),
+  };
+}
+
+/**
+ * Planner hints: per-shift CT capacity, WO cap, and a safe suggested qty per slot.
+ * suggestedQty = min(lowest shift theoretical max, WO max per shift slot).
+ */
+export function computePlanningCapacityHints({
+  ctSec,
+  shifts = [],
+  breaks = {},
+  unplannedQty = null,
+  slotCount = 1,
+}) {
+  if (!ctSec || ctSec <= 0 || !shifts.length) return null;
+  const perShift = shifts.map((sh) => computeShiftCapacity(ctSec, sh, breaks[sh.id] || {}));
+  const theoreticalMin = Math.min(...perShift.map((row) => row.maxQty));
+  const woCapPerShift = slotCount > 0 && unplannedQty != null
+    ? Math.floor(unplannedQty / slotCount)
+    : null;
+  const suggestedQty = woCapPerShift != null
+    ? Math.min(theoreticalMin, woCapPerShift)
+    : theoreticalMin;
+  return {
+    perShift,
+    theoreticalMin,
+    theoreticalMax: Math.max(...perShift.map((row) => row.maxQty)),
+    woCapPerShift,
+    suggestedQty: Math.max(0, suggestedQty),
+  };
+}
+
 /** Convert seconds of state time to parts at CT. */
 export function partsFromSeconds(seconds, ctSec) {
   if (!ctSec || ctSec <= 0 || !seconds) return 0;

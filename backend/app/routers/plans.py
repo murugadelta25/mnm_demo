@@ -162,9 +162,13 @@ async def create_plan(data: PlanCreate, db: Session = Depends(get_db),
         total_new = data.planned_qty * delta * len(shifts)
         if existing_planned + total_new > wo.target_qty:
             remaining = max(wo.target_qty - existing_planned, 0)
+            slot_count = delta * len(shifts)
+            max_per_slot = remaining // slot_count if slot_count else remaining
             raise HTTPException(
                 400,
-                f"Planned qty exceeds work order remaining capacity ({remaining} pcs left to plan)",
+                f"Total planned qty ({total_new} pcs = {data.planned_qty} per shift × {slot_count} slots) "
+                f"exceeds work order capacity ({remaining} pcs left to plan). "
+                f"Max per shift for this date/shift range: {max_per_slot} pcs.",
             )
 
         # Tool stock / life forecast — notify planner; require ack if short / near EOL

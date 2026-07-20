@@ -8,6 +8,7 @@ import { useTheme } from '../context/ThemeContext';
 import { pageClass, surfaceClass } from '../themes/tileHelpers';
 import { useConfig, getCurrentShift } from '../context/ConfigContext';
 import { parseCtSeconds, sumCt, formatCtSeconds, isValidDecimalInput } from '../utils/cycleTime';
+import { computePlanningCapacityHints } from '../utils/hourlyOutput';
 import { partToPlanningVariant, planModelVariant } from '../utils/partVariant';
 import { DRAFT_KEYS } from '../utils/formPersistence';
 import usePersistedState from '../hooks/usePersistedState';
@@ -26,6 +27,29 @@ function resolveFormShifts(form, enabledShifts) {
     return sel?.length ? sel : [form.shift];
   }
   return [form.shift];
+}
+
+function computePlanDayCount(form) {
+  if (form.plan_mode === 'single') return 1;
+  if (form.plan_mode === 'weekly') return 7;
+  if (form.plan_mode === 'monthly') {
+    const start = new Date(form.start_date);
+    if (Number.isNaN(start.getTime())) return 1;
+    return new Date(start.getFullYear(), start.getMonth() + 1, 0).getDate();
+  }
+  if (form.plan_mode === 'custom_range' && form.start_date && form.end_date) {
+    const start = new Date(form.start_date);
+    const end = new Date(form.end_date);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end < start) return 0;
+    return Math.floor((end - start) / (24 * 60 * 60 * 1000)) + 1;
+  }
+  return 1;
+}
+
+function computePlanSlotCount(form, enabledShifts) {
+  const days = computePlanDayCount(form);
+  const shifts = resolveFormShifts(form, enabledShifts);
+  return days * shifts.length;
 }
 
 const STATUS_CFG = {
@@ -281,12 +305,60 @@ export default function ProductionPlanning() {
     [workOrders, form.work_order_id],
   );
 
+  const planCapacity = useMemo(() => {
+    const slotCount = computePlanSlotCount(form, enabledShifts);
+    const perShiftQty = parseInt(form.planned_qty, 10) || 0;
+    const totalPlanned = perShiftQty * slotCount;
+    const unplanned = selectedWorkOrder?.unplanned_qty ?? null;
+    const maxPerShift = slotCount > 0 && unplanned != null
+      ? Math.floor(unplanned / slotCount)
+      : null;
+    return { slotCount, perShiftQty, totalPlanned, unplanned, maxPerShift };
+  }, [form, enabledShifts, selectedWorkOrder]);
+
+  const selectedShifts = useMemo(
+    () => enabledShifts.filter((sh) => resolveFormShifts(form, enabledShifts).includes(sh.id)),
+    [form, enabledShifts],
+  );
+
+  const selectedMachine = useMemo(
+    () => machines.find((m) => String(m.id) === String(form.machine_id)),
+    [machines, form.machine_id],
+  );
+
+  const shiftCapacityHints = useMemo(() => {
+    const ctSec = sumCt(form.process_time, form.loading_unloading);
+    return computePlanningCapacityHints({
+      ctSec,
+      shifts: selectedShifts,
+      breaks: config.breaks || {},
+      unplannedQty: selectedWorkOrder?.unplanned_qty ?? null,
+      slotCount: planCapacity.slotCount,
+    });
+  }, [form.process_time, form.loading_unloading, selectedShifts, config.breaks, selectedWorkOrder, planCapacity.slotCount]);
+
   const createPlan = async e => {
     e.preventDefault();
     try {
       const shifts = resolveFormShifts(form, enabledShifts);
       if (!shifts.length) {
         setMsg('❌ Select at least one shift');
+        return;
+      }
+      if (form.plan_mode === 'custom_range') {
+        const dayCount = computePlanDayCount(form);
+        if (dayCount <= 0) {
+          setMsg('❌ End date must be on or after start date');
+          return;
+        }
+      }
+      if (selectedWorkOrder && planCapacity.totalPlanned > (selectedWorkOrder.unplanned_qty ?? 0)) {
+        const { slotCount, maxPerShift, totalPlanned } = planCapacity;
+        setMsg(
+          `❌ Total planned qty (${totalPlanned} pcs = ${planCapacity.perShiftQty} × ${slotCount} slots) `
+          + `exceeds work order capacity (${selectedWorkOrder.unplanned_qty} pcs left). `
+          + (maxPerShift != null ? `Max per shift for this range: ${maxPerShift} pcs.` : ''),
+        );
         return;
       }
       let payload = {
@@ -983,9 +1055,12 @@ export default function ProductionPlanning() {
                 </FField>
               )}
               {form.plan_mode === 'weekly' && (
-                <FField t={t} label="Start Date (Monday)">
+                <FField t={t} label="Start Date (Monday)" wide>
                   <input style={s.inp} type="date" value={form.start_date}
                     onChange={e => setForm(p => ({ ...p, start_date: e.target.value }))} required />
+                  <div style={{ fontSize: 11, color: t.textFaint, marginTop: 6 }}>
+                    Creates plans for 7 consecutive days (Mon–Sun). For a shorter range (e.g. Mon–Fri), use Custom Range.
+                  </div>
                 </FField>
               )}
               {form.plan_mode === 'monthly' && (
@@ -1201,7 +1276,77 @@ export default function ProductionPlanning() {
                 <input style={{ ...s.inp, background: t.surface2, color: t.brand, fontWeight: 700 }} readOnly
                   value={formatCtSeconds(sumCt(form.process_time, form.loading_unloading))} />
               </FField>
-              <FField t={t} label="Planned Qty">
+              {shiftCapacityHints && (
+                <div style={{ gridColumn: '1 / -1', padding: 12, borderRadius: 8, background: t.surface2, border: `1px solid ${t.border}` }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap', marginBottom: 8 }}>
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: t.accent }}>
+                        Shift production capacity
+                        {selectedMachine ? ` · ${selectedMachine.name}` : ''}
+                      </div>
+                      <div style={{ fontSize: 11, color: t.textFaint, marginTop: 2 }}>
+                        Based on CT {formatCtSeconds(sumCt(form.process_time, form.loading_unloading))}s and shift hours (breaks deducted)
+                      </div>
+                    </div>
+                    {shiftCapacityHints.suggestedQty > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setForm((p) => ({ ...p, planned_qty: shiftCapacityHints.suggestedQty }))}
+                        style={{
+                          padding: '6px 12px',
+                          borderRadius: 6,
+                          border: '1px solid #10b981',
+                          background: '#10b98118',
+                          color: '#10b981',
+                          fontSize: 11,
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Apply {shiftCapacityHints.suggestedQty} pcs/shift
+                      </button>
+                    )}
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    {shiftCapacityHints.perShift.map((row) => {
+                      const shiftDef = selectedShifts.find((sh) => sh.id === row.shiftId);
+                      return (
+                        <div key={row.shiftId} style={{ fontSize: 11, color: t.textMuted, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                          <strong style={{ color: t.text }}>{row.shiftName}</strong>
+                          <span>({shiftDef?.start}–{shiftDef?.end})</span>
+                          <span>· {row.workingMinutes} min net</span>
+                          <span>· max <strong style={{ color: '#0ea5e9' }}>{row.maxQty} pcs</strong>/shift</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <div style={{ fontSize: 11, color: t.textFaint, marginTop: 8, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+                    <span>
+                      Theoretical range: {shiftCapacityHints.theoreticalMin}
+                      {shiftCapacityHints.theoreticalMin !== shiftCapacityHints.theoreticalMax
+                        ? `–${shiftCapacityHints.theoreticalMax}`
+                        : ''} pcs/shift
+                    </span>
+                    {selectedWorkOrder && shiftCapacityHints.woCapPerShift != null && (
+                      <span>WO limit: <strong style={{ color: '#10b981' }}>{shiftCapacityHints.woCapPerShift} pcs</strong>/shift for this range</span>
+                    )}
+                    {shiftCapacityHints.suggestedQty > 0 && (
+                      <span>
+                        Suggested: <strong style={{ color: '#f59e0b' }}>{shiftCapacityHints.suggestedQty} pcs</strong>/shift
+                        {selectedWorkOrder && shiftCapacityHints.suggestedQty < shiftCapacityHints.theoreticalMin
+                          ? ' (WO-limited)'
+                          : ''}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+              {!shiftCapacityHints && (form.process_time || form.loading_unloading) && selectedShifts.length > 0 && (
+                <div style={{ gridColumn: '1 / -1', fontSize: 11, color: t.textFaint }}>
+                  Enter valid process time to see shift capacity estimate.
+                </div>
+              )}
+              <FField t={t} label="Planned Qty (per shift slot)" wide>
                 <input
                   style={s.inp}
                   type="number"
@@ -1217,9 +1362,23 @@ export default function ProductionPlanning() {
                   }}
                   required
                 />
-                {selectedWorkOrder && form.planned_qty > selectedWorkOrder.remaining_qty && (
-                  <span style={{ color: '#ef4444', fontSize: 11 }}>
-                    Exceeds work order remaining ({selectedWorkOrder.remaining_qty} pcs)
+                {planCapacity.slotCount > 1 && (
+                  <div style={{ fontSize: 11, color: t.textFaint, marginTop: 6 }}>
+                    {planCapacity.slotCount} plan slot(s) ({computePlanDayCount(form)} day(s) × {resolveFormShifts(form, enabledShifts).length} shift(s))
+                    {planCapacity.perShiftQty > 0 && (
+                      <> · total = <strong style={{ color: t.textMuted }}>{planCapacity.totalPlanned} pcs</strong></>
+                    )}
+                  </div>
+                )}
+                {selectedWorkOrder && planCapacity.maxPerShift != null && planCapacity.slotCount > 0 && (
+                  <div style={{ fontSize: 11, color: t.textFaint, marginTop: 4 }}>
+                    WO capacity left: {selectedWorkOrder.unplanned_qty} pcs
+                    · max per shift for this range: <strong style={{ color: '#10b981' }}>{planCapacity.maxPerShift} pcs</strong>
+                  </div>
+                )}
+                {selectedWorkOrder && planCapacity.totalPlanned > (selectedWorkOrder.unplanned_qty ?? 0) && (
+                  <span style={{ color: '#ef4444', fontSize: 11, display: 'block', marginTop: 4 }}>
+                    Total ({planCapacity.totalPlanned} pcs) exceeds WO capacity ({selectedWorkOrder.unplanned_qty} pcs left to plan)
                   </span>
                 )}
               </FField>
