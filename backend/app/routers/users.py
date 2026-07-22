@@ -25,6 +25,24 @@ router = APIRouter(prefix="/api/users", tags=["users"])
 USER_PHOTO_DIR = Path(__file__).parent.parent.parent / "static" / "operator-reference"
 USER_PHOTO_DIR.mkdir(parents=True, exist_ok=True)
 
+
+def _unlink_reference_photo_file(photo_url: Optional[str]) -> None:
+    if not photo_url:
+        return
+    prefix = "/static/operator-reference/"
+    if not str(photo_url).startswith(prefix):
+        return
+    name = Path(str(photo_url)[len(prefix):]).name
+    if not name or name in (".", ".."):
+        return
+    path = USER_PHOTO_DIR / name
+    try:
+        if path.is_file() and path.resolve().parent == USER_PHOTO_DIR.resolve():
+            path.unlink()
+    except OSError:
+        pass
+
+
 ROLES = ["operator", "supervisor", "maintenance", "admin", "quality", "superadmin"]
 
 class UserCreate(BaseModel):
@@ -112,8 +130,11 @@ async def upload_reference_photo(
     fname = f"user_{user_id}_{uuid.uuid4().hex[:10]}{ext}"
     fpath = USER_PHOTO_DIR / fname
     await save_upload_limited(file, fpath, MAX_IMAGE_BYTES)
+    old_url = u.reference_photo_url
     u.reference_photo_url = f"/static/operator-reference/{fname}"
     db.commit()
+    if old_url and old_url != u.reference_photo_url:
+        _unlink_reference_photo_file(old_url)
     return {"ok": True, "user_id": user_id, "reference_photo_url": u.reference_photo_url}
 
 

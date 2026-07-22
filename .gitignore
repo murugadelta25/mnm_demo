@@ -57,3 +57,7 @@ deploy/nginx-win/
 
 # Uploaded work-instruction PDFs (runtime data)
 backend/static/work-instructions/
+
+# Operator / user face-verification reference photos (runtime uploads via API)
+backend/static/operator-reference/*
+!backend/static/operator-reference/.gitkeep

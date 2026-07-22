@@ -39,6 +39,25 @@ OP_PHOTO_DIR = Path(__file__).parent.parent.parent / "static" / "operator-refere
 OP_PHOTO_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _unlink_reference_photo_file(photo_url: Optional[str]) -> None:
+    """Remove a local /static/operator-reference/* file if present (ignore missing)."""
+    if not photo_url:
+        return
+    # Only delete files under our managed directory — never follow absolute/external URLs
+    prefix = "/static/operator-reference/"
+    if not str(photo_url).startswith(prefix):
+        return
+    name = Path(str(photo_url)[len(prefix):]).name
+    if not name or name in (".", ".."):
+        return
+    path = OP_PHOTO_DIR / name
+    try:
+        if path.is_file() and path.resolve().parent == OP_PHOTO_DIR.resolve():
+            path.unlink()
+    except OSError:
+        pass
+
+
 def _monday(d: date) -> date:
     return d - timedelta(days=d.weekday())
 
@@ -1563,6 +1582,7 @@ def deactivate_operator(
     if not op:
         raise HTTPException(404, "Operator not found")
     if hard:
+        _unlink_reference_photo_file(op.reference_photo_url)
         db.delete(op)
     else:
         op.is_active = 0
@@ -1587,6 +1607,7 @@ async def upload_operator_photo(
     fname = f"op_{operator_id}_{uuid.uuid4().hex[:10]}{ext}"
     fpath = OP_PHOTO_DIR / fname
     await save_upload_limited(file, fpath, MAX_IMAGE_BYTES)
+    old_url = op.reference_photo_url
     op.reference_photo_url = f"/static/operator-reference/{fname}"
     op.updated_at = now_ist()
     if op.linked_user_id:
@@ -1594,6 +1615,8 @@ async def upload_operator_photo(
         if user:
             user.reference_photo_url = op.reference_photo_url
     db.commit()
+    if old_url and old_url != op.reference_photo_url:
+        _unlink_reference_photo_file(old_url)
     return {"ok": True, "operator_id": operator_id, "reference_photo_url": op.reference_photo_url}
 
 
