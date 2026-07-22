@@ -92,6 +92,12 @@ def _compute_status(machine: Machine, db: Session) -> str:
                     if open_loss.minutes is None or float(open_loss.minutes or 0) <= 0:
                         open_loss.minutes = round((now_ist() - started).total_seconds() / 60.0, 2)
                     open_loss.notes = ((open_loss.notes or "") + " [auto-closed: stale open session]").strip()
+                    # Persist immediately — many callers of _compute_status are read-only
+                    # and never commit (unlike push_status, which already commits here).
+                    try:
+                        db.commit()
+                    except Exception:
+                        db.rollback()
                 else:
                     _field, _bucket, loss_status = map_loss_to_oee(
                         open_loss.loss_code, open_loss.sub_division
