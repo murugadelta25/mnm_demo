@@ -2,9 +2,14 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import api from '../api/client';
 import PageHeader from '../components/PageHeader';
 import { useTheme } from '../context/ThemeContext';
+import { useConfig, isMobileIntegrationEnabled } from '../context/ConfigContext';
 import { pageClass, surfaceClass } from '../themes/tileHelpers';
 import { getLossStatusStyles, getLossTileDefs, getLossHistogramColors } from '../themes/lossStatusColors';
 import { downloadAxiosBlob } from '../utils/downloadBlob';
+import {
+  TPM_LOSS_CATEGORIES,
+  formatTpmReason,
+} from '../constants/tpmLosses';
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
   Cell, ReferenceLine, CartesianGrid, Legend,
@@ -179,6 +184,8 @@ function buildRows(statusLog, limitsMs = {}) {
 
 export default function LossTracker() {
   const { theme: t } = useTheme();
+  const { config } = useConfig();
+  const mobileCoupled = isMobileIntegrationEnabled(config);
   const statusStyles = useMemo(() => getLossStatusStyles(t), [t]);
   const tileDefs = useMemo(() => getLossTileDefs(t), [t]);
   const histoColors = useMemo(() => getLossHistogramColors(t), [t]);
@@ -206,7 +213,11 @@ export default function LossTracker() {
   const [histLoaded, setHistLoaded] = useState(false);
 
   // reason editing
-  const [editReason, setEditReason]     = useState({ id: null, value: '', source: '', applyToStation: false });
+  const [editReason, setEditReason]     = useState({
+    id: null, value: '', source: '', applyToStation: false,
+    mode: 'manual', // manual | tpm — default manual so web-only sites keep free-text entry
+    lossCode: '', detail: '',
+  });
   const [saving, setSaving]             = useState(false);
   const [reasonErr, setReasonErr]       = useState('');
   const [stationApplyResult, setStationApplyResult] = useState(null);
@@ -731,11 +742,27 @@ export default function LossTracker() {
   }, [machineId, dateFrom, dateTo, buildStatusLogParams]);
 
   const saveReason = async (logId) => {
-    if (!editReason.value.trim()) { setReasonErr('Reason is mandatory'); return; }
+    const selectedLoss = TPM_LOSS_CATEGORIES.find((l) => l.code === editReason.lossCode);
+    let reason = editReason.value.trim();
+    const useTpm = mobileCoupled && editReason.mode === 'tpm' && selectedLoss;
+    if (useTpm) {
+      if ((selectedLoss.rootCauses || selectedLoss.subDivisions) && !editReason.detail) {
+        setReasonErr('Select root cause / management option');
+        return;
+      }
+      reason = formatTpmReason(selectedLoss.code, selectedLoss.description, editReason.detail || null);
+    }
+    if (!reason) { setReasonErr('Reason is mandatory — pick a TPM loss or type manually'); return; }
     setSaving(true); setReasonErr(''); setStationApplyResult(null);
     try {
-      const reason = editReason.value.trim();
-      await api.patch(`/api/machines/status-log/${logId}/reason`, { reason });
+      const payload = {
+        reason,
+        create_loss_log: Boolean(useTpm),
+        loss_code: useTpm ? selectedLoss.code : null,
+        loss_description: useTpm ? selectedLoss.description : null,
+        sub_division: useTpm ? (editReason.detail || null) : null,
+      };
+      await api.patch(`/api/machines/status-log/${logId}/reason`, payload);
       const updater = prev => prev.map(l => l.id === logId ? { ...l, deviation_reason: reason } : l);
       setLiveLog(updater);
       setHistLog(updater);
@@ -763,7 +790,7 @@ export default function LossTracker() {
                   return l.status === currentLog.status && Math.abs(ts - currentTs) <= WINDOW_MS;
                 });
                 for (const match of matches) {
-                  await api.patch(`/api/machines/status-log/${match.id}/reason`, { reason });
+                  await api.patch(`/api/machines/status-log/${match.id}/reason`, payload);
                   appliedCount++;
                 }
                 if (matches.length > 0) appliedNames.push(pm.name);
@@ -776,7 +803,7 @@ export default function LossTracker() {
           }
         }
       }
-      setEditReason({ id: null, value: '', source: '', applyToStation: false });
+      setEditReason({ id: null, value: '', source: '', applyToStation: false, mode: 'manual', lossCode: '', detail: '' });
     } finally { setSaving(false); }
   };
 
@@ -1019,21 +1046,77 @@ export default function LossTracker() {
                         {!REASON_STATUSES.includes(log.status) ? (
                           <span style={{ color: t.textFaint, fontSize: 11 }}>&mdash;</span>
                         ) : isEditing ? (
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
-                              <input autoFocus style={{ ...inp, flex: 1, fontSize: 12, padding: '5px 8px' }}
-                                placeholder="Enter reason (mandatory)..."
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                            {mobileCoupled && (
+                            <div style={{ display: 'flex', gap: 6 }}>
+                              <button type="button"
+                                onClick={() => setEditReason(p => ({ ...p, mode: 'tpm', value: '' }))}
+                                style={{
+                                  padding: '3px 8px', fontSize: 11, borderRadius: 4, cursor: 'pointer',
+                                  border: `1px solid ${editReason.mode === 'tpm' ? t.accent : t.border}`,
+                                  background: editReason.mode === 'tpm' ? `${t.accent}22` : t.surface2,
+                                  color: editReason.mode === 'tpm' ? t.accent : t.textMuted, fontWeight: 600,
+                                }}>TPM loss</button>
+                              <button type="button"
+                                onClick={() => setEditReason(p => ({ ...p, mode: 'manual', lossCode: '', detail: '' }))}
+                                style={{
+                                  padding: '3px 8px', fontSize: 11, borderRadius: 4, cursor: 'pointer',
+                                  border: `1px solid ${editReason.mode === 'manual' ? t.accent : t.border}`,
+                                  background: editReason.mode === 'manual' ? `${t.accent}22` : t.surface2,
+                                  color: editReason.mode === 'manual' ? t.accent : t.textMuted, fontWeight: 600,
+                                }}>Manual text</button>
+                            </div>
+                            )}
+                            {mobileCoupled && editReason.mode === 'tpm' ? (
+                              <>
+                                <select
+                                  style={{ ...inp, fontSize: 12, padding: '5px 8px' }}
+                                  value={editReason.lossCode}
+                                  onChange={(e) => {
+                                    setEditReason(p => ({ ...p, lossCode: e.target.value, detail: '' }));
+                                    setReasonErr('');
+                                  }}
+                                >
+                                  <option value="">— Select TPM loss —</option>
+                                  {TPM_LOSS_CATEGORIES.map((l) => (
+                                    <option key={l.code} value={l.code}>{l.code} · {l.label}</option>
+                                  ))}
+                                </select>
+                                {(() => {
+                                  const sel = TPM_LOSS_CATEGORIES.find((l) => l.code === editReason.lossCode);
+                                  const opts = sel?.rootCauses || sel?.subDivisions || [];
+                                  if (!opts.length) return null;
+                                  return (
+                                    <select
+                                      style={{ ...inp, fontSize: 12, padding: '5px 8px' }}
+                                      value={editReason.detail}
+                                      onChange={(e) => {
+                                        setEditReason(p => ({ ...p, detail: e.target.value }));
+                                        setReasonErr('');
+                                      }}
+                                    >
+                                      <option value="">— Select detail —</option>
+                                      {opts.map((o) => <option key={o} value={o}>{o}</option>)}
+                                    </select>
+                                  );
+                                })()}
+                              </>
+                            ) : (
+                              <input autoFocus style={{ ...inp, fontSize: 12, padding: '5px 8px' }}
+                                placeholder="Enter reason (manual)..."
                                 value={editReason.value}
                                 onChange={e => { setEditReason(p => ({ ...p, value: e.target.value })); setReasonErr(''); }}
                                 onKeyDown={e => {
                                   if (e.key === 'Enter') saveReason(log.id);
-                                  if (e.key === 'Escape') setEditReason({ id: null, value: '', source: '', applyToStation: false });
+                                  if (e.key === 'Escape') setEditReason({ id: null, value: '', source: '', applyToStation: false, mode: 'manual', lossCode: '', detail: '' });
                                 }}
                               />
+                            )}
+                            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
                               <button disabled={saving} onClick={() => saveReason(log.id)}
                                 style={{ padding: '4px 10px', background: '#10b981', color: '#fff',
-                                         border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>&#10003;</button>
-                              <button onClick={() => { setEditReason({ id: null, value: '', source: '', applyToStation: false }); setReasonErr(''); }}
+                                         border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12, fontWeight: 600 }}>&#10003; Save</button>
+                              <button onClick={() => { setEditReason({ id: null, value: '', source: '', applyToStation: false, mode: 'manual', lossCode: '', detail: '' }); setReasonErr(''); }}
                                 style={{ padding: '4px 8px', background: t.surface2, color: t.textMuted,
                                          border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 12 }}>&#10005;</button>
                             </div>
@@ -1057,7 +1140,15 @@ export default function LossTracker() {
                           </div>
                         ) : (
                           <div style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}
-                            onClick={() => setEditReason({ id: log.id, value: log.deviation_reason || '', source: pageTab, applyToStation: false })}>
+                            onClick={() => setEditReason({
+                              id: log.id,
+                              value: log.deviation_reason || '',
+                              source: pageTab,
+                              applyToStation: false,
+                              mode: 'manual',
+                              lossCode: '',
+                              detail: '',
+                            })}>
                             {log.deviation_reason ? (
                               <>
                                 <span style={{ color: '#10b981', fontSize: 12 }}>&#10003; {log.deviation_reason}</span>
@@ -1071,7 +1162,7 @@ export default function LossTracker() {
                             ) : (
                               <span style={{ color: t.textFaint, fontSize: 11, fontStyle: 'italic',
                                              borderBottom: `1px dashed ${t.border}` }}>
-                                + Add reason (optional)
+                                + Add reason (TPM or manual)
                               </span>
                             )}
                           </div>

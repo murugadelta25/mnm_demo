@@ -155,6 +155,12 @@ def _compute_kpi(
 
     station = db.query(Station).filter(Station.id == machine.station_id).first()
 
+    from ..operator_presence import get_live_operator_map, operator_fields_for_machine
+    op = operator_fields_for_machine(
+        get_live_operator_map(db, entry_date=entry_date, shift_id=shift_id),
+        machine.id,
+    )
+
     return {
         'machine_id': machine.id,
         'machine_name': machine.name,
@@ -165,6 +171,7 @@ def _compute_kpi(
         'image_url': machine.image_url,
         'station_name': station.display_name if station else str(machine.station_id),
         'location': machine.location or '',
+        **op,
         'entry_date': str(entry_date),
         'shift': shift_id,
         'shift_name': shift_def.get('name', shift_id),

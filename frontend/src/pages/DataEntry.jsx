@@ -4,7 +4,7 @@ import api from '../api/client';
 import PageHeader from '../components/PageHeader';
 import { useTheme } from '../context/ThemeContext';
 import { pageClass } from '../themes/tileHelpers';
-import { useConfig, getCurrentShift, timeToMinutes } from '../context/ConfigContext';
+import { useConfig, getCurrentShift, timeToMinutes, isMobileIntegrationEnabled } from '../context/ConfigContext';
 import { parseCtSeconds, sumCt, formatCtSeconds, isValidDecimalInput } from '../utils/cycleTime';
 import { planModelVariant } from '../utils/partVariant';
 import { DRAFT_KEYS } from '../utils/formPersistence';
@@ -86,6 +86,7 @@ function pickBestPlan(plans, machineId) {
 
 export default function DataEntry() {
   const { config } = useConfig();
+  const mobileCoupled = isMobileIntegrationEnabled(config);
   const currentShift = useMemo(() => getCurrentShift(config), [config]);
 
   const [activeShift, setActiveShift] = useState(currentShift || config.shifts.find(s => s.enabled));
@@ -103,6 +104,8 @@ export default function DataEntry() {
   const [msg, setMsg] = useState('');
   const [alerts, setAlerts] = useState([]);
   const [mcAutoMinutes, setMcAutoMinutes] = useState(0);
+  const [mobileLossSync, setMobileLossSync] = useState(null); // { count, totalDown, syncedAt }
+  const [lossSyncTick, setLossSyncTick] = useState(0);
   const [includeOperations, setIncludeOperations] = useState(true);
 
   const stationMachines = useMemo(
@@ -120,42 +123,61 @@ export default function DataEntry() {
       const selectedDate = form.entry_date;
       const monthStart = selectedDate.slice(0, 8) + '01'; // YYYY-MM-01
 
-      // Fetch all entries from month start to selected date (all shifts)
-      const [dayRes, monthRes] = await Promise.all([
+      // Prefer live capture; fall back to data-entry rows (same as backend reports)
+      const [dayRes, monthRes, dayRt, monthRt] = await Promise.all([
         api.get('/api/oee/', { params: { entry_date: selectedDate } }),
         api.get('/api/oee/', { params: { date_from: monthStart, date_to: selectedDate } }),
+        api.get('/api/oee/realtime', { params: { entry_date: selectedDate } }).catch(() => ({ data: [] })),
+        api.get('/api/oee/realtime', { params: { date_from: monthStart, date_to: selectedDate } }).catch(() => ({ data: [] })),
       ]);
 
-      const dayEntries   = dayRes.data;
-      const monthEntries = monthRes.data;
+      const mergeLiveFirst = (manualList, liveList) => {
+        const map = new Map();
+        (Array.isArray(manualList) ? manualList : []).forEach((e) => {
+          map.set(`${e.machine_id}_${e.shift}_${e.entry_date}`, { ...e, source: e.source || 'manual' });
+        });
+        (Array.isArray(liveList) ? liveList : []).forEach((e) => {
+          map.set(`${e.machine_id}_${e.shift}_${e.entry_date}`, { ...e, source: 'realtime' });
+        });
+        return Array.from(map.values());
+      };
+
+      const dayEntries = mergeLiveFirst(dayRes.data, dayRt.data);
+      const monthEntries = mergeLiveFirst(monthRes.data, monthRt.data);
 
       if (!dayEntries.length && !monthEntries.length) {
-        setMsg('✗ No entries found for this date or month'); return;
+        setMsg('✗ No live or data-entry records found for this date or month'); return;
       }
 
       const toRow = e => ({
-        'Date': e.entry_date, 'Station': getStationLabel(e.station_no), 'Shift': e.shift,
+        'Date': e.entry_date,
+        'Station': e.station_name || getStationLabel(e.station_no),
+        'Machine': e.machine_name || '',
+        'Shift': e.shift,
+        'Work Order': e.work_order_no || '',
         'Model / Variant': e.model_variant || '',
         'Current Operation': e.current_operation, 'Next Operation': e.next_operation,
         'Process Time (s)': e.process_time, 'L&U (s)': e.loading_unloading,
         'CT (s)': sumCt(e.process_time, e.loading_unloading),
-        'Start Time': e.start_time, 'Stop Time': e.stop_time, 'Total Minutes': e.total_minutes,
-        'Lunch Break': e.lunch_break, 'Tea Break': e.tea_break,
-        'TPM Cleaning': e.tpm_cleaning, 'Other Cleaning': e.other_cleaning, 'Mgmt Meeting': e.management_meeting,
-        'Total Breaks': e.total_breaks, 'Shift Working Min': e.shift_working_minutes,
-        'No Load': e.no_load, 'New Model Trial': e.new_model_trial, 'Power Cut': e.power_cut,
-        'Planned Maintenance': e.planned_maintenance, 'No Manpower': e.no_manpower_planned,
-        'Mgmt Loss Total': e.management_loss_total, 'Available Time (min)': e.available_shift_time,
-        'Setting Time': e.setting_time, 'Tool Change': e.tool_change,
-        'Dim Correction': e.dimension_correction, 'Scrap Removal': e.scrap_removal, 'Break Down': e.break_down,
-        'Total Down Time': e.total_down_time, 'Operating Time (min)': e.operating_time,
+        'Start Time': e.start_time || '', 'Stop Time': e.stop_time || '', 'Total Minutes': e.total_minutes || 0,
+        'Lunch Break': e.lunch_break || 0, 'Tea Break': e.tea_break || 0,
+        'TPM Cleaning': e.tpm_cleaning || 0, 'Other Cleaning': e.other_cleaning || 0, 'Mgmt Meeting': e.management_meeting || 0,
+        'Total Breaks': e.total_breaks || 0, 'Shift Working Min': e.shift_working_minutes || 0,
+        'No Load': e.no_load || 0, 'New Model Trial': e.new_model_trial || 0, 'Power Cut': e.power_cut || 0,
+        'Planned Maintenance': e.planned_maintenance || 0, 'No Manpower': e.no_manpower_planned || 0,
+        'Mgmt Loss Total': e.management_loss_total || 0, 'Available Time (min)': e.available_shift_time,
+        'Setting Time': e.setting_time || 0, 'Tool Change': e.tool_change || 0,
+        'Dim Correction': e.dimension_correction || 0, 'Scrap Removal': e.scrap_removal || 0, 'Break Down': e.break_down || 0,
+        'Total Down Time': e.total_down_time || 0, 'Operating Time (min)': e.operating_time,
+        'Plan Qty': e.planned_qty ?? '',
         'Possible Qty': e.possible_qty, 'Actual Qty': e.actual_qty,
         'Prod Loss': Math.max(0, (e.possible_qty || 0) - (e.actual_qty || 0)),
-        'Accepted Qty': e.accp_qty, 'Defect Qty': e.defect_qty,
+        'Accepted Qty': e.accp_qty, 'Defect Qty': e.defect_qty || 0,
         'AR%': parseFloat(e.ar || 0).toFixed(2),
         'PR%': parseFloat(e.pr || 0).toFixed(2),
         'QR%': parseFloat(e.qr || 0).toFixed(2),
         'OEE%': parseFloat(e.oee || 0).toFixed(2),
+        'Source': e.source === 'realtime' ? 'Live' : 'Data Entry',
       });
 
       const wb = XLSX.utils.book_new();
@@ -173,8 +195,8 @@ export default function DataEntry() {
       const monthLabel = new Date(selectedDate + 'T00:00:00')
         .toLocaleString('en-GB', { month: 'short', year: 'numeric' });
       const sortedMonth = [...monthEntries].sort((a, b) =>
-        a.entry_date.localeCompare(b.entry_date) ||
-        a.shift.localeCompare(b.shift) ||
+        String(a.entry_date).localeCompare(String(b.entry_date)) ||
+        String(a.shift).localeCompare(String(b.shift)) ||
         String(a.station_no).localeCompare(String(b.station_no))
       );
       const monthSheet = XLSX.utils.json_to_sheet(sortedMonth.map(toRow));
@@ -182,7 +204,7 @@ export default function DataEntry() {
 
       XLSX.writeFile(wb, `data_entry_${monthStart}_to_${selectedDate}.xlsx`);
       const shifts = [...new Set(dayEntries.map(e => e.shift))].sort();
-      setMsg(`✓ Downloaded: Shift ${shifts.join(', ')} (${selectedDate}) + Monthly (${monthStart} → ${selectedDate})`);
+      setMsg(`✓ Downloaded: Shift ${shifts.join(', ') || '—'} (${selectedDate}) + Monthly (${monthStart} → ${selectedDate})`);
       setTimeout(() => setMsg(''), 4000);
     } catch (err) {
       setMsg('✗ ' + (err.response?.data?.detail || err.message || 'Failed to download report'));
@@ -202,7 +224,7 @@ export default function DataEntry() {
       .catch(() => setPartsMaster([]));
   }, []);
 
-  // Fetch approved model change minutes for current date+shift+pair and auto-fill setting_time
+  // Fetch approved model change minutes (badge + setting when no machine selected yet)
   useEffect(() => {
     if (!form.entry_date || !form.shift || !form.station_no) return;
     api.get('/api/model-change/approved', {
@@ -210,9 +232,83 @@ export default function DataEntry() {
     }).then(r => {
       const mins = r.data.total_minutes || 0;
       setMcAutoMinutes(mins);
-      setForm(prev => ({ ...prev, setting_time: mins }));
+      if (!form.machine_id) {
+        setForm(prev => ({ ...prev, setting_time: mins }));
+      }
     }).catch(() => {});
-  }, [form.entry_date, form.shift, form.station_no]);
+  }, [form.entry_date, form.shift, form.station_no, form.machine_id]);
+
+  // Optional: prefill from tablet/mobile loss logs only when mobile integration is ON and losses exist
+  useEffect(() => {
+    if (!mobileCoupled) {
+      setMobileLossSync(null);
+      return undefined;
+    }
+    if (!form.entry_date || !form.shift || !form.machine_id) {
+      setMobileLossSync(null);
+      return undefined;
+    }
+    let cancelled = false;
+    const applyRollup = () => {
+      api.get('/api/mobile/losses/oee-rollup', {
+        params: {
+          machine_id: form.machine_id,
+          entry_date: form.entry_date,
+          shift: form.shift,
+        },
+      }).then((r) => {
+        if (cancelled) return;
+        const fields = r.data?.fields || {};
+        const count = r.data?.count || 0;
+        const mcrMins = r.data?.model_change_setting_minutes || 0;
+        if (mcrMins > 0) setMcAutoMinutes(mcrMins);
+
+        // No mobile/tablet losses → do not touch Data Entry fields (web-only sites)
+        if (count === 0) {
+          setMobileLossSync(null);
+          if (mcrMins > 0) {
+            setForm((prev) => ({ ...prev, setting_time: mcrMins }));
+          }
+          return;
+        }
+
+        setMobileLossSync({
+          count,
+          totalDown: r.data?.total_down_time || 0,
+          mgmt: r.data?.management_loss_total || 0,
+          breaks: r.data?.total_breaks || 0,
+          syncedAt: new Date().toLocaleTimeString(),
+        });
+        setForm((prev) => {
+          const next = { ...prev };
+          const breakKeys = ['lunch_break', 'tea_break', 'tpm_cleaning', 'other_cleaning', 'management_meeting'];
+          const mgmtKeys = ['no_load', 'new_model_trial', 'power_cut', 'planned_maintenance', 'no_manpower_planned'];
+          const downKeys = ['tool_change', 'dimension_correction', 'scrap_removal', 'break_down'];
+          // Only overwrite a field when the rollup has a positive value (never wipe web entry with zeros)
+          breakKeys.forEach((k) => {
+            if ((fields[k] || 0) > 0) next[k] = fields[k];
+          });
+          mgmtKeys.forEach((k) => {
+            if ((fields[k] || 0) > 0) next[k] = fields[k];
+          });
+          downKeys.forEach((k) => {
+            if ((fields[k] || 0) > 0) next[k] = fields[k];
+          });
+          if (mcrMins > 0) {
+            next.setting_time = mcrMins;
+          } else if ((fields.setting_time || 0) > 0) {
+            next.setting_time = fields.setting_time;
+          }
+          return next;
+        });
+      }).catch(() => {
+        // Mobile API unavailable / unused — leave web form as-is
+        if (!cancelled) setMobileLossSync(null);
+      });
+    };
+    applyRollup();
+    return () => { cancelled = true; };
+  }, [mobileCoupled, form.entry_date, form.shift, form.machine_id, lossSyncTick]);
 
   // Load production plan for selected date / shift / station and auto-fill part details
   useEffect(() => {
@@ -448,6 +544,35 @@ export default function DataEntry() {
 
       {msg && <p style={{ color: msg.startsWith('✓') ? '#10b981' : '#ef4444', marginBottom: 12, fontSize: 13 }}>{msg}</p>}
 
+      {form.machine_id && mobileLossSync?.count > 0 && (
+        <div style={{
+          marginBottom: 12, padding: '10px 14px', borderRadius: 8,
+          background: t.surface2 || 'rgba(16,185,129,0.08)',
+          border: `1px solid ${t.border || '#10b98155'}`,
+          fontSize: 13, color: t.textDim || '#94a3b8',
+          display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
+        }}>
+          <span style={{ color: '#10b981', fontWeight: 700 }}>Mobile loss sync</span>
+          <span>
+            {mobileLossSync.count} log(s) → downtime {mobileLossSync.totalDown}m
+            {mobileLossSync.mgmt ? ` · mgmt ${mobileLossSync.mgmt}m` : ''}
+            {mcAutoMinutes > 0 ? ` · setting from Model Change ${mcAutoMinutes}m (no double-count)` : ''}
+            {mobileLossSync.syncedAt ? ` · ${mobileLossSync.syncedAt}` : ''}
+          </span>
+          <button
+            type="button"
+            onClick={() => setLossSyncTick((n) => n + 1)}
+            style={{
+              marginLeft: 'auto', padding: '4px 10px', borderRadius: 6, cursor: 'pointer',
+              border: `1px solid ${t.border}`, background: t.surface, color: t.accent || '#38bdf8',
+              fontSize: 12, fontWeight: 600,
+            }}
+          >
+            Refresh from tablet
+          </button>
+        </div>
+      )}
+
       <form onSubmit={handleSubmit} style={{ opacity: entryEnabled ? 1 : 0.6, pointerEvents: entryEnabled ? 'auto' : 'none' }}>
         {/* Section 1: Basic Info */}
         <Section title="Basic Information">
@@ -604,12 +729,14 @@ export default function DataEntry() {
         {/* Section 4: Downtime */}
         <Section title="Downtime">
           <Row>
-            {[['setting_time','Setting (auto from Model Change)'],['tool_change','Tool Change'],['dimension_correction','Dim. Correction'],
+            {[['setting_time','Setting (auto from Model Change / mobile)'],['tool_change','Tool Change'],['dimension_correction','Dim. Correction'],
               ['scrap_removal','Scrap Removal'],['break_down','Break Down']].map(([k, l]) => (
               <Field key={k} label={k === 'setting_time' ? `${l}${mcAutoMinutes > 0 ? ` ✓ auto: ${mcAutoMinutes}min` : ''}` : l}>
-                <input style={{ ...s.inp, ...(k === 'setting_time' && mcAutoMinutes > 0 ? { borderColor: '#10b981' } : {}) }}
+                <input style={{ ...s.inp, ...((k === 'setting_time' && mcAutoMinutes > 0) || (mobileLossSync?.count > 0 && k !== 'setting_time' && (form[k] || 0) > 0) ? { borderColor: '#10b981' } : {}) }}
                   type="number" min="0" value={form[k]}
-                  onChange={e => setNonNeg(k, e.target.value)} />
+                  onChange={e => setNonNeg(k, e.target.value)}
+                  readOnly={k === 'setting_time' && mcAutoMinutes > 0}
+                />
               </Field>
             ))}
             <Field label="Total Down Time">

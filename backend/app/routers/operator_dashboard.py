@@ -10,7 +10,7 @@ from ..models import (
     Part, PartDocument, PartQcParameter, get_db, now_ist,
 )
 from ..auth import get_current_user
-from .hourly_output import _load_config, _parse_mins, _break_windows, _expected_parts
+from .hourly_output import _load_config, _parse_mins, _break_windows, _expected_parts, _plan_ct
 from .parts import (
     _find_part_by_variant,
     _cycle_time,
@@ -156,6 +156,7 @@ def get_dashboard_context(
     model_variant = (plan.model_variant or plan.current_operation) if plan else None
     process_time = float(plan.process_time) if plan and plan.process_time else None
     loading_unloading = float(plan.loading_unloading) if plan and plan.loading_unloading else 10
+    planned_qty = int(plan.planned_qty or 0) if plan else 0
 
     part = _resolve_part_for_plan(db, plan)
     if part:
@@ -164,13 +165,20 @@ def get_dashboard_context(
         if part.loading_unloading:
             loading_unloading = float(part.loading_unloading)
 
-    ct = (process_time or 0) + (loading_unloading or 0)
+    # Prefer production-plan cycle time (same source as Hourly Output), then part CT
+    ct = _plan_ct(plan) if plan else 0.0
+    if ct <= 0:
+        ct = (process_time or 0) + (loading_unloading or 0)
     if part and ct <= 0:
         ct = _cycle_time(part)
 
     shift_mins = _shift_working_minutes(config, shift_id)
     exp_per_hour = _expected_parts(ct, 60) if ct > 0 else 0
-    exp_per_shift = _expected_parts(ct, shift_mins) if ct > 0 else 0
+    # Shift expected: plan qty when set (matches Hourly Total Expected), else CT × shift minutes
+    if planned_qty > 0:
+        exp_per_shift = planned_qty
+    else:
+        exp_per_shift = _expected_parts(ct, shift_mins) if ct > 0 else 0
 
     docs = []
     qc_params = []
@@ -215,6 +223,8 @@ def get_dashboard_context(
             "status": plan.status,
             "process_time": float(plan.process_time) if plan.process_time else None,
             "loading_unloading": float(plan.loading_unloading) if plan.loading_unloading else None,
+            "planned_qty": planned_qty or None,
+            "cycle_time": round(ct, 2) if ct > 0 else None,
         } if plan else None,
         "part": {
             "id": part.id,
@@ -264,6 +274,7 @@ def get_dashboard_context(
             "jigs_fixtures": {"columns": DEFAULT_JIGS_COLUMNS, "rows": []},
         },
         "cycle_time": round(ct, 2) if ct > 0 else None,
+        "planned_qty": planned_qty or None,
         "exp_output_per_hour": exp_per_hour,
         "exp_output_per_shift": exp_per_shift,
         "documents": [
@@ -303,6 +314,11 @@ def get_dashboard_context(
         "breakdown": {
             "active_ticket_id": active_bd.id if active_bd else None,
             "sheet_url": breakdown_doc.file_url if breakdown_doc else None,
+            "sheet_revision": breakdown_doc.revision if breakdown_doc else None,
+            "sheet_rev_date": (
+                breakdown_doc.rev_date.isoformat()
+                if breakdown_doc and breakdown_doc.rev_date else None
+            ),
         },
         "server_time": now_ist().strftime("%Y-%m-%d %H:%M:%S IST"),
     }

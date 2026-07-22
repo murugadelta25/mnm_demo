@@ -10,12 +10,25 @@ import api from '../api/client';
 import { SESSION_EXPIRED_KEY } from '../components/IdleTimeoutGuard';
 import { isFeatureEnabled } from '../config/featureRegistry';
 
+const EMPTY_RESET = {
+  username: '',
+  newPassword: '',
+  confirmPassword: '',
+  approverUsername: '',
+  approverPassword: '',
+};
+
 export default function Login() {
   const [creds, setCreds] = useState({ username: '', password: '' });
   const [error, setError] = useState('');
   const [sessionNotice, setSessionNotice] = useState('');
   const [loading, setLoading] = useState(false);
   const [networkUrls, setNetworkUrls] = useState([]);
+  const [showForgot, setShowForgot] = useState(false);
+  const [resetForm, setResetForm] = useState(EMPTY_RESET);
+  const [resetError, setResetError] = useState('');
+  const [resetSuccess, setResetSuccess] = useState('');
+  const [resetLoading, setResetLoading] = useState(false);
   const { login } = useAuth();
   const { modules } = useFeatureFlags();
   const nav = useNavigate();
@@ -38,6 +51,18 @@ export default function Login() {
       })
       .catch(() => {});
   }, []);
+
+  const inputStyle = {
+    width: '100%',
+    padding: '10px 12px',
+    marginBottom: 12,
+    borderRadius: 6,
+    border: `1px solid ${t.inpBorder}`,
+    background: t.inp,
+    color: t.text,
+    fontSize: 14,
+    boxSizing: 'border-box',
+  };
 
   const handleSubmit = async e => {
     e.preventDefault();
@@ -65,9 +90,57 @@ export default function Login() {
     }
   };
 
+  const openForgot = () => {
+    setShowForgot(true);
+    setResetError('');
+    setResetSuccess('');
+    setResetForm({ ...EMPTY_RESET, username: creds.username || '' });
+    setError('');
+  };
+
+  const closeForgot = () => {
+    setShowForgot(false);
+    setResetError('');
+    setResetSuccess('');
+    setResetForm(EMPTY_RESET);
+  };
+
+  const handleResetPassword = async e => {
+    e.preventDefault();
+    setResetError('');
+    setResetSuccess('');
+
+    if (resetForm.newPassword !== resetForm.confirmPassword) {
+      setResetError('New password and confirmation do not match.');
+      return;
+    }
+    if (resetForm.newPassword.length < 4) {
+      setResetError('New password must be at least 4 characters.');
+      return;
+    }
+
+    setResetLoading(true);
+    try {
+      const r = await api.post('/api/auth/forgot-password', {
+        username: resetForm.username.trim(),
+        new_password: resetForm.newPassword,
+        approver_username: resetForm.approverUsername.trim(),
+        approver_password: resetForm.approverPassword,
+      });
+      setResetSuccess(r.data?.message || 'Password reset. You can sign in now.');
+      setCreds(p => ({ ...p, username: resetForm.username.trim(), password: '' }));
+      setResetForm(f => ({ ...f, newPassword: '', confirmPassword: '', approverPassword: '' }));
+    } catch (err) {
+      const detail = err.response?.data?.detail;
+      setResetError(typeof detail === 'string' ? detail : 'Password reset failed. Check details and try again.');
+    } finally {
+      setResetLoading(false);
+    }
+  };
+
   return (
     <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: t.bg, transition: 'background 0.2s' }}>
-      <div style={{ background: t.surface, padding: 40, borderRadius: 12, width: 360, boxShadow: '0 4px 24px #0008', border: `1px solid ${t.border}` }}>
+      <div style={{ background: t.surface, padding: 40, borderRadius: 12, width: 400, boxShadow: '0 4px 24px #0008', border: `1px solid ${t.border}` }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 8 }}>
           <LogoIcon size={40} />
           <div>
@@ -78,36 +151,155 @@ export default function Login() {
         <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 20 }}>
           <ThemeModeToggler />
         </div>
-        <form onSubmit={handleSubmit}>
-          <input style={{ width: '100%', padding: '10px 12px', marginBottom: 12, borderRadius: 6,
-                          border: `1px solid ${t.inpBorder}`, background: t.inp, color: t.text,
-                          fontSize: 14, boxSizing: 'border-box' }}
-            placeholder="Username" value={creds.username} autoFocus
-            onChange={e => setCreds(p => ({ ...p, username: e.target.value }))} />
-          <input style={{ width: '100%', padding: '10px 12px', marginBottom: 12, borderRadius: 6,
-                          border: `1px solid ${t.inpBorder}`, background: t.inp, color: t.text,
-                          fontSize: 14, boxSizing: 'border-box' }}
-            type="password" placeholder="Password" value={creds.password}
-            onChange={e => setCreds(p => ({ ...p, password: e.target.value }))} />
-          {sessionNotice && (
-            <div style={{ background: '#f59e0b22', border: '1px solid #f59e0b', borderRadius: 6,
-                          padding: '8px 12px', marginBottom: 12 }}>
-              <p style={{ color: '#d97706', fontSize: 13, margin: 0 }}>{sessionNotice}</p>
-            </div>
-          )}
-          {error && (
-            <div style={{ background: '#ef444422', border: '1px solid #ef4444', borderRadius: 6,
-                          padding: '8px 12px', marginBottom: 12 }}>
-              <p style={{ color: '#ef4444', fontSize: 13, margin: 0 }}>⚠ {error}</p>
-            </div>
-          )}
-          <button style={{ width: '100%', padding: '11px', background: loading ? t.textFaint : t.accent,
-                           color: '#fff', border: 'none', borderRadius: 6, fontSize: 15,
-                           fontWeight: 600, cursor: loading ? 'not-allowed' : 'pointer' }}
-            type="submit" disabled={loading}>
-            {loading ? 'Connecting...' : 'Login'}
-          </button>
-        </form>
+
+        {!showForgot ? (
+          <form onSubmit={handleSubmit}>
+            <input
+              style={inputStyle}
+              placeholder="Username"
+              value={creds.username}
+              autoFocus
+              onChange={e => setCreds(p => ({ ...p, username: e.target.value }))}
+            />
+            <input
+              style={inputStyle}
+              type="password"
+              placeholder="Password"
+              value={creds.password}
+              onChange={e => setCreds(p => ({ ...p, password: e.target.value }))}
+            />
+            {sessionNotice && (
+              <div style={{ background: '#f59e0b22', border: '1px solid #f59e0b', borderRadius: 6,
+                            padding: '8px 12px', marginBottom: 12 }}>
+                <p style={{ color: '#d97706', fontSize: 13, margin: 0 }}>{sessionNotice}</p>
+              </div>
+            )}
+            {error && (
+              <div style={{ background: '#ef444422', border: '1px solid #ef4444', borderRadius: 6,
+                            padding: '8px 12px', marginBottom: 12 }}>
+                <p style={{ color: '#ef4444', fontSize: 13, margin: 0 }}>⚠ {error}</p>
+              </div>
+            )}
+            <button
+              style={{ width: '100%', padding: '11px', background: loading ? t.textFaint : t.accent,
+                       color: '#fff', border: 'none', borderRadius: 6, fontSize: 15,
+                       fontWeight: 600, cursor: loading ? 'not-allowed' : 'pointer' }}
+              type="submit"
+              disabled={loading}
+            >
+              {loading ? 'Connecting...' : 'Login'}
+            </button>
+            <button
+              type="button"
+              onClick={openForgot}
+              style={{
+                display: 'block',
+                width: '100%',
+                marginTop: 14,
+                padding: 0,
+                border: 'none',
+                background: 'transparent',
+                color: t.accent,
+                fontSize: 13,
+                cursor: 'pointer',
+                textAlign: 'center',
+                textDecoration: 'underline',
+              }}
+            >
+              Forgot password?
+            </button>
+          </form>
+        ) : (
+          <form onSubmit={handleResetPassword}>
+            <h3 style={{ color: t.text, margin: '0 0 6px', fontSize: 16 }}>Reset password</h3>
+            <p style={{ color: t.textMuted, margin: '0 0 14px', fontSize: 12, lineHeight: 1.4 }}>
+              Works for all roles (operator → superadmin). An <strong>admin</strong> or <strong>superadmin</strong> must authorize the reset.
+            </p>
+            <input
+              style={inputStyle}
+              placeholder="Username to reset"
+              value={resetForm.username}
+              autoFocus
+              required
+              onChange={e => setResetForm(p => ({ ...p, username: e.target.value }))}
+            />
+            <input
+              style={inputStyle}
+              type="password"
+              placeholder="New password"
+              value={resetForm.newPassword}
+              required
+              onChange={e => setResetForm(p => ({ ...p, newPassword: e.target.value }))}
+            />
+            <input
+              style={inputStyle}
+              type="password"
+              placeholder="Confirm new password"
+              value={resetForm.confirmPassword}
+              required
+              onChange={e => setResetForm(p => ({ ...p, confirmPassword: e.target.value }))}
+            />
+            <div style={{ height: 1, background: t.border, margin: '4px 0 14px' }} />
+            <p style={{ color: t.textMuted, margin: '0 0 10px', fontSize: 12 }}>
+              Approver (admin / superadmin)
+            </p>
+            <input
+              style={inputStyle}
+              placeholder="Approver username"
+              value={resetForm.approverUsername}
+              required
+              onChange={e => setResetForm(p => ({ ...p, approverUsername: e.target.value }))}
+            />
+            <input
+              style={inputStyle}
+              type="password"
+              placeholder="Approver password"
+              value={resetForm.approverPassword}
+              required
+              onChange={e => setResetForm(p => ({ ...p, approverPassword: e.target.value }))}
+            />
+            {resetError && (
+              <div style={{ background: '#ef444422', border: '1px solid #ef4444', borderRadius: 6,
+                            padding: '8px 12px', marginBottom: 12 }}>
+                <p style={{ color: '#ef4444', fontSize: 13, margin: 0 }}>⚠ {resetError}</p>
+              </div>
+            )}
+            {resetSuccess && (
+              <div style={{ background: '#10b98122', border: '1px solid #10b981', borderRadius: 6,
+                            padding: '8px 12px', marginBottom: 12 }}>
+                <p style={{ color: '#059669', fontSize: 13, margin: 0 }}>✓ {resetSuccess}</p>
+              </div>
+            )}
+            <button
+              style={{ width: '100%', padding: '11px', background: resetLoading ? t.textFaint : t.accent,
+                       color: '#fff', border: 'none', borderRadius: 6, fontSize: 15,
+                       fontWeight: 600, cursor: resetLoading ? 'not-allowed' : 'pointer' }}
+              type="submit"
+              disabled={resetLoading}
+            >
+              {resetLoading ? 'Resetting...' : 'Reset password'}
+            </button>
+            <button
+              type="button"
+              onClick={closeForgot}
+              style={{
+                display: 'block',
+                width: '100%',
+                marginTop: 14,
+                padding: 0,
+                border: 'none',
+                background: 'transparent',
+                color: t.textMuted,
+                fontSize: 13,
+                cursor: 'pointer',
+                textAlign: 'center',
+              }}
+            >
+              ← Back to login
+            </button>
+          </form>
+        )}
+
         {networkUrls.length > 0 && (
           <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${t.border}` }}>
             <p style={{ color: t.textMuted, fontSize: 12, margin: '0 0 8px' }}>

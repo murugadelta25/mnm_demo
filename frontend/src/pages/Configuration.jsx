@@ -67,6 +67,7 @@ export default function Configuration() {
           factory: config.factory ?? latest?.factory,
           hourly_output: config.hourly_output ?? latest?.hourly_output,
           backup: config.backup ?? latest?.backup,
+          mobile_integration: config.mobile_integration ?? latest?.mobile_integration,
         };
       } catch { /* proceed with local config */ }
 
@@ -77,6 +78,7 @@ export default function Configuration() {
         ...(preserved.factory ? { factory: preserved.factory } : {}),
         ...(preserved.hourly_output != null ? { hourly_output: preserved.hourly_output } : {}),
         ...(preserved.backup ? { backup: preserved.backup } : {}),
+        ...(preserved.mobile_integration ? { mobile_integration: preserved.mobile_integration } : {}),
       };
 
       await api.put('/api/config/', { config: payload });
@@ -284,6 +286,53 @@ export default function Configuration() {
               </div>
             </div>
           ))}
+        </div>
+      </Section>
+
+      <Section title="Mobile App Integration">
+        <div style={{
+          display: 'flex', alignItems: 'flex-start', gap: 16, flexWrap: 'wrap',
+          padding: '12px 14px', borderRadius: 8,
+          border: `1px solid ${t.border}`,
+          background: t.surface2 || t.inp,
+        }}>
+          <label style={{
+            display: 'flex', alignItems: 'center', gap: 12, cursor: 'pointer',
+            userSelect: 'none', flex: '1 1 280px',
+          }}>
+            <input
+              type="checkbox"
+              checked={config.mobile_integration?.enabled !== false}
+              onChange={(e) => setConfig((prev) => ({
+                ...prev,
+                mobile_integration: {
+                  ...(prev.mobile_integration || {}),
+                  enabled: e.target.checked,
+                },
+              }))}
+              style={{ width: 18, height: 18, accentColor: t.accent, cursor: 'pointer' }}
+            />
+            <span>
+              <span style={{ color: t.text, fontWeight: 700, fontSize: 14, display: 'block' }}>
+                {config.mobile_integration?.enabled !== false
+                  ? 'Coupled — tablet / mobile app enabled'
+                  : 'Decoupled — web app only'}
+              </span>
+              <span style={{ color: t.textMuted, fontSize: 12, lineHeight: 1.45, display: 'block', marginTop: 4 }}>
+                When ON, the tablet Loss Assigner / Idle Reasons sync with Data Entry and Loss Tracker.
+                When OFF, mobile APIs are blocked and the web PMS runs independently (manual Data Entry &amp; Loss Tracker).
+              </span>
+            </span>
+          </label>
+          <span style={{
+            padding: '6px 12px', borderRadius: 20, fontSize: 12, fontWeight: 800,
+            letterSpacing: 0.4, alignSelf: 'center',
+            background: config.mobile_integration?.enabled !== false ? '#10b98133' : '#64748b33',
+            color: config.mobile_integration?.enabled !== false ? '#10b981' : t.textMuted,
+            border: `1px solid ${config.mobile_integration?.enabled !== false ? '#10b98155' : t.border}`,
+          }}>
+            {config.mobile_integration?.enabled !== false ? 'ENABLED' : 'DISABLED'}
+          </span>
         </div>
       </Section>
 

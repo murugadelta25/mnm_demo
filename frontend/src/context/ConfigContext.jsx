@@ -30,6 +30,9 @@ const DEFAULT_CONFIG = {
     },
   },
   checkDataDaysBack: 1,
+  mobile_integration: {
+    enabled: true,
+  },
   backup: {
     enabled: false,
     interval_days: 15,
@@ -111,4 +114,9 @@ export function ConfigProvider({ children }) {
 
 export function useConfig() {
   return useContext(ConfigContext);
+}
+
+/** True when Configuration → Mobile App Integration is ON (default true). */
+export function isMobileIntegrationEnabled(config) {
+  return config?.mobile_integration?.enabled !== false;
 }

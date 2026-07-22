@@ -33,6 +33,8 @@ import ToolManagement from './pages/ToolManagement';
 import AutoLogin from './pages/AutoLogin';
 import WorkInstructionRevision from './pages/WorkInstructionRevision';
 import DatabaseManagement from './pages/DatabaseManagement';
+import OperatorManagement from './pages/OperatorManagement';
+import MyWorkHours from './pages/MyWorkHours';
 
 /** CPLM Root + Outlet pattern — shell wraps all authenticated routes */
 function AuthenticatedShell() {
@@ -78,6 +80,8 @@ function AppRoutes() {
         <Route path="/tools" element={<ToolManagement />} />
         <Route path="/wi-revisions" element={<WorkInstructionRevision />} />
         <Route path="/users" element={<UserManagement />} />
+        <Route path="/operators" element={<OperatorManagement />} />
+        <Route path="/my-work-hours" element={<MyWorkHours />} />
         <Route path="/database-management" element={<DatabaseManagement />} />
         <Route path="*" element={<Navigate to="/dashboard" />} />
       </Route>

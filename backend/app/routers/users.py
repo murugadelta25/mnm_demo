@@ -1,11 +1,29 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import IntegrityError
 from pydantic import BaseModel
 from typing import Optional
-from ..models import User, get_db
+from pathlib import Path
+import uuid
+from ..models import (
+    User,
+    Operator,
+    OperatorSession,
+    AttendanceRecord,
+    MachineAllocation,
+    OperatorRosterDay,
+    OperatorLossLog,
+    BreakdownTicket,
+    QcInspectionReport,
+    get_db,
+)
 from ..auth import hash_password, get_current_user, require_role
+from ..upload_limits import MAX_IMAGE_BYTES, save_upload_limited
 
 router = APIRouter(prefix="/api/users", tags=["users"])
+
+USER_PHOTO_DIR = Path(__file__).parent.parent.parent / "static" / "operator-reference"
+USER_PHOTO_DIR.mkdir(parents=True, exist_ok=True)
 
 ROLES = ["operator", "supervisor", "maintenance", "admin", "quality", "superadmin"]
 
@@ -25,7 +43,17 @@ class PasswordChange(BaseModel):
 @router.get("/")
 def list_users(db: Session = Depends(get_db), _=Depends(get_current_user)):
     users = db.query(User).order_by(User.role, User.username).all()
-    return [{"id": u.id, "username": u.username, "role": u.role} for u in users]
+    return [{"id": u.id, "username": u.username, "role": u.role, "reference_photo_url": u.reference_photo_url, "has_reference_photo": bool(u.reference_photo_url)} for u in users]
+
+@router.get("/me")
+def get_me(current=Depends(get_current_user)):
+    return {
+        "id": current.id,
+        "username": current.username,
+        "role": current.role,
+        "reference_photo_url": current.reference_photo_url,
+        "has_reference_photo": bool(current.reference_photo_url),
+    }
 
 @router.post("/")
 def create_user(data: UserCreate, db: Session = Depends(get_db),
@@ -65,7 +93,86 @@ def update_user(user_id: int, data: UserUpdate, db: Session = Depends(get_db),
             raise HTTPException(400, "Password must be at least 4 characters")
         u.password_hash = hash_password(data.password)
     db.commit()
-    return {"id": u.id, "username": u.username, "role": u.role}
+    return {"id": u.id, "username": u.username, "role": u.role, "reference_photo_url": u.reference_photo_url}
+
+@router.post("/{user_id}/reference-photo")
+async def upload_reference_photo(
+    user_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current=Depends(require_role("admin", "supervisor")),
+):
+    """Master reference photo for mobile operator face verification."""
+    u = db.query(User).filter(User.id == user_id).first()
+    if not u:
+        raise HTTPException(404, "User not found")
+    ext = Path(file.filename or "photo.jpg").suffix.lower()
+    if ext not in {".jpg", ".jpeg", ".png", ".webp"}:
+        ext = ".jpg"
+    fname = f"user_{user_id}_{uuid.uuid4().hex[:10]}{ext}"
+    fpath = USER_PHOTO_DIR / fname
+    await save_upload_limited(file, fpath, MAX_IMAGE_BYTES)
+    u.reference_photo_url = f"/static/operator-reference/{fname}"
+    db.commit()
+    return {"ok": True, "user_id": user_id, "reference_photo_url": u.reference_photo_url}
+
+
+def _unlink_user_references(db: Session, user_id: int, reassign_to: int) -> dict:
+    """
+    Detach login user from shop-floor / history rows so the users row can be deleted.
+    Keeps operator directory records and historical rows (nulls legacy user_id where allowed).
+    Non-nullable FKs (e.g. breakdown raised_by) are reassigned to the deleting admin.
+    """
+    counts = {}
+    linked = db.query(Operator).filter(Operator.linked_user_id == user_id).all()
+    for op in linked:
+        op.linked_user_id = None
+    counts["operators_unlinked"] = len(linked)
+
+    counts["roster"] = (
+        db.query(OperatorRosterDay)
+        .filter(OperatorRosterDay.user_id == user_id)
+        .update({OperatorRosterDay.user_id: None}, synchronize_session=False)
+    )
+    counts["allocations"] = (
+        db.query(MachineAllocation)
+        .filter(MachineAllocation.user_id == user_id)
+        .update({MachineAllocation.user_id: None}, synchronize_session=False)
+    )
+    counts["attendance"] = (
+        db.query(AttendanceRecord)
+        .filter(AttendanceRecord.user_id == user_id)
+        .update({AttendanceRecord.user_id: None}, synchronize_session=False)
+    )
+    counts["sessions"] = (
+        db.query(OperatorSession)
+        .filter(OperatorSession.user_id == user_id)
+        .update({OperatorSession.user_id: None}, synchronize_session=False)
+    )
+    counts["losses"] = (
+        db.query(OperatorLossLog)
+        .filter(OperatorLossLog.user_id == user_id)
+        .update({OperatorLossLog.user_id: None}, synchronize_session=False)
+    )
+    counts["qc_submitted_by"] = (
+        db.query(QcInspectionReport)
+        .filter(QcInspectionReport.submitted_by == user_id)
+        .update({QcInspectionReport.submitted_by: None}, synchronize_session=False)
+    )
+    # Non-nullable: reassign ticket ownership so the login account can be removed
+    counts["breakdown_reassigned"] = (
+        db.query(BreakdownTicket)
+        .filter(BreakdownTicket.raised_by == user_id)
+        .update({BreakdownTicket.raised_by: reassign_to}, synchronize_session=False)
+    )
+    if hasattr(BreakdownTicket, "acknowledged_by"):
+        counts["breakdown_ack_cleared"] = (
+            db.query(BreakdownTicket)
+            .filter(BreakdownTicket.acknowledged_by == user_id)
+            .update({BreakdownTicket.acknowledged_by: None}, synchronize_session=False)
+        )
+    return counts
+
 
 @router.delete("/{user_id}")
 def delete_user(user_id: int, db: Session = Depends(get_db),
@@ -75,9 +182,21 @@ def delete_user(user_id: int, db: Session = Depends(get_db),
         raise HTTPException(404, "User not found")
     if u.id == current.id:
         raise HTTPException(400, "Cannot delete your own account")
-    db.delete(u)
-    db.commit()
-    return {"ok": True}
+    if u.role == "superadmin" and current.role != "superadmin":
+        raise HTTPException(403, "Only superadmin can delete superadmin users")
+
+    unlinked = _unlink_user_references(db, user_id, reassign_to=current.id)
+    try:
+        db.delete(u)
+        db.commit()
+    except IntegrityError as e:
+        db.rollback()
+        raise HTTPException(
+            409,
+            "Cannot delete this user because other records still reference them "
+            f"(plans/QC/tools/etc.). Reassign or archive those first. Detail: {e.orig}",
+        ) from e
+    return {"ok": True, "unlinked": unlinked}
 
 # Any logged-in user can change their own password
 @router.post("/me/change-password")

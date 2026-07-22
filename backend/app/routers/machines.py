@@ -40,7 +40,7 @@ class StatusPush(BaseModel):
 
 
 def _compute_status(machine: Machine, db: Session) -> str:
-    """Priority: offline > breakdown > alarm > setting_change > PLC status (running/idle) > plan-derived running > idle"""
+    """Priority: offline > breakdown > alarm > setting_change > open operator loss > PLC status (running/idle) > idle"""
     # 1. Offline — highest priority
     if machine.status == "offline":
         return "offline"
@@ -65,19 +65,57 @@ def _compute_status(machine: Machine, db: Session) -> str:
     if active_mc:
         return "setting_change"
 
-    # 5. Trust PLC-pushed running/idle directly — PLC is ground truth
+    # 5. Open timed loss from tablet — only when mobile integration is enabled
+    try:
+        from ..mobile_integration import is_mobile_integration_enabled
+        if not is_mobile_integration_enabled(db):
+            pass  # fall through to PLC / idle
+        else:
+            from ..models import OperatorLossLog
+            from ..loss_mapping import map_loss_to_oee
+            from datetime import timedelta as _td
+            open_loss = (
+                db.query(OperatorLossLog)
+                .filter(
+                    OperatorLossLog.machine_id == machine.id,
+                    OperatorLossLog.status == "open",
+                )
+                .order_by(OperatorLossLog.started_at.desc())
+                .first()
+            )
+            if open_loss:
+                # Abandoned open losses must not freeze web Loss Tracker / PLC forever
+                started = open_loss.started_at
+                if started and (now_ist() - started) > _td(hours=12):
+                    open_loss.status = "closed"
+                    open_loss.ended_at = now_ist()
+                    if open_loss.minutes is None or float(open_loss.minutes or 0) <= 0:
+                        open_loss.minutes = round((now_ist() - started).total_seconds() / 60.0, 2)
+                    open_loss.notes = ((open_loss.notes or "") + " [auto-closed: stale open session]").strip()
+                else:
+                    _field, _bucket, loss_status = map_loss_to_oee(
+                        open_loss.loss_code, open_loss.sub_division
+                    )
+                    if loss_status:
+                        return loss_status
+    except Exception:
+        pass
+
+    # 6. Trust PLC-pushed running/idle directly — PLC is ground truth
     if machine.status in ("running", "idle"):
         return machine.status
 
     return "idle"
 
 
-def _log_status(machine_id: int, status: str, source: str, db: Session):
+def _log_status(machine_id: int, status: str, source: str, db: Session,
+                deviation_reason: str = None):
     entry = MachineStatusLog(
         machine_id=machine_id,
         status=status,
         changed_at=now_ist(),
         source=source,
+        deviation_reason=(deviation_reason or None),
     )
     db.add(entry)
     db.flush()
@@ -138,24 +176,83 @@ def _pick_plan_for_segment(db: Session, machine_id: int, changed_at: datetime, c
 
 class ReasonUpdate(BaseModel):
     reason: str
+    loss_code: Optional[str] = None
+    loss_description: Optional[str] = None
+    sub_division: Optional[str] = None
+    create_loss_log: bool = False  # opt-in; default keeps web manual reason independent of mobile rollup
+
 
 @router.patch("/status-log/{log_id}/reason")
-def update_reason(log_id: int, data: ReasonUpdate, db: Session = Depends(get_db), _=Depends(get_current_user)):
+def update_reason(log_id: int, data: ReasonUpdate, db: Session = Depends(get_db), user=Depends(get_current_user)):
     log = db.query(MachineStatusLog).filter(MachineStatusLog.id == log_id).first()
     if not log:
         raise HTTPException(404, "Log entry not found")
     log.deviation_reason = data.reason
+
+    # Optional: create OperatorLossLog so Data Entry / availability picks up the minutes
+    loss_id = None
+    if data.create_loss_log and data.loss_code:
+        try:
+            from ..mobile_integration import is_mobile_integration_enabled
+            if not is_mobile_integration_enabled(db):
+                raise RuntimeError("mobile integration off")
+            from ..models import OperatorLossLog
+            from ..loss_mapping import map_loss_to_oee
+
+            nxt = (
+                db.query(MachineStatusLog)
+                .filter(
+                    MachineStatusLog.machine_id == log.machine_id,
+                    MachineStatusLog.changed_at > log.changed_at,
+                )
+                .order_by(MachineStatusLog.changed_at.asc())
+                .first()
+            )
+            end_at = nxt.changed_at if nxt else now_ist()
+            mins = max(0.1, round((end_at - log.changed_at).total_seconds() / 60.0, 2))
+            oee_field, oee_bucket, _st = map_loss_to_oee(data.loss_code, data.sub_division)
+            desc = data.loss_description or data.reason
+            row = OperatorLossLog(
+                machine_id=log.machine_id,
+                operator_id=None,
+                user_id=getattr(user, "id", None) if not getattr(user, "is_operator_principal", False) else None,
+                username=getattr(user, "username", None) or getattr(user, "employee_code", None),
+                loss_code=data.loss_code,
+                loss_description=desc[:100],
+                sub_division=data.sub_division,
+                minutes=mins,
+                notes=f"Assigned from Loss Tracker status-log #{log.id}",
+                entry_date=log.changed_at.date() if log.changed_at else now_ist().date(),
+                shift=None,
+                status="closed",
+                started_at=log.changed_at,
+                ended_at=end_at,
+                oee_field=oee_field,
+                oee_bucket=oee_bucket,
+                exclude_from_oee=0,
+                created_at=now_ist(),
+            )
+            db.add(row)
+            db.flush()
+            loss_id = row.id
+        except Exception as exc:
+            print(f"[ReasonUpdate] loss log create skipped: {exc}")
+
     db.commit()
     try:
         from ..deviation_alert_service import resolve_escalation_for_segment
         resolve_escalation_for_segment(db, log_id, 'deviation_reason_recorded')
     except Exception as exc:
         print(f"[DeviationAlert] resolve on reason failed: {exc}")
-    return {"ok": True}
+    return {"ok": True, "loss_log_id": loss_id}
+
 
 @router.get("/")
 def list_machines(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    from ..operator_presence import get_live_operator_map, operator_fields_for_machine
+
     machines = db.query(Machine).order_by(Machine.station_id, Machine.id).all()
+    op_map = get_live_operator_map(db)
     result = []
     for m in machines:
         live_status = _compute_status(m, db)
@@ -163,7 +260,7 @@ def list_machines(db: Session = Depends(get_db), _=Depends(get_current_user)):
             m.status = live_status
             _log_status(m.id, live_status, "sync", db)
         station = db.query(Station).filter(Station.id == m.station_id).first()
-        result.append({
+        row = {
             "id": m.id,
             "name": m.name,
             "station_id": m.station_id,
@@ -176,7 +273,9 @@ def list_machines(db: Session = Depends(get_db), _=Depends(get_current_user)):
             "location": m.location,
             "image_url": m.image_url,
             "status": live_status,
-        })
+        }
+        row.update(operator_fields_for_machine(op_map, m.id))
+        result.append(row)
     db.commit()
     return result
 
@@ -191,12 +290,15 @@ def get_station_numbers(db: Session = Depends(get_db), _=Depends(get_current_use
 @router.get("/fleet")
 def get_fleet(db: Session = Depends(get_db), _=Depends(get_current_user)):
     """Returns all machines with live computed status grouped by station."""
+    from ..operator_presence import get_live_operator_map, operator_fields_for_machine
+
     machines = db.query(Machine).order_by(Machine.station_id, Machine.id).all()
+    op_map = get_live_operator_map(db)
     result = []
     for m in machines:
         live_status = _compute_status(m, db)
         station = db.query(Station).filter(Station.id == m.station_id).first()
-        result.append({
+        row = {
             "id": m.id, "name": m.name, "station_id": m.station_id,
             "station_name": station.display_name if station else "Unknown",
             "machine_type": m.machine_type, "make": m.make,
@@ -205,7 +307,9 @@ def get_fleet(db: Session = Depends(get_db), _=Depends(get_current_user)):
             "image_url": m.image_url, "plc_source": m.plc_source,
             "plc_endpoint": m.plc_endpoint, "plc_topic": m.plc_topic,
             "status": live_status,
-        })
+        }
+        row.update(operator_fields_for_machine(op_map, m.id))
+        result.append(row)
     return result
 
 
@@ -300,6 +404,34 @@ async def push_status(machine_id: int, data: StatusPush,
         ).first()
         if active_mc:
             return {"id": machine_id, "status": m.status, "source": data.source, "note": "setting change active"}
+        # Open tablet timed loss — don't override with PLC idle/running (ignore when integration off / stale)
+        try:
+            from ..mobile_integration import is_mobile_integration_enabled
+            from ..models import OperatorLossLog
+            from datetime import timedelta as _td
+            if is_mobile_integration_enabled(db):
+                open_loss = db.query(OperatorLossLog).filter(
+                    OperatorLossLog.machine_id == machine_id,
+                    OperatorLossLog.status == "open",
+                ).first()
+                if open_loss:
+                    started = open_loss.started_at
+                    if started and (now_ist() - started) > _td(hours=12):
+                        open_loss.status = "closed"
+                        open_loss.ended_at = now_ist()
+                        if open_loss.minutes is None or float(open_loss.minutes or 0) <= 0:
+                            open_loss.minutes = round((now_ist() - started).total_seconds() / 60.0, 2)
+                        open_loss.notes = ((open_loss.notes or "") + " [auto-closed: stale open session]").strip()
+                        db.commit()
+                    else:
+                        return {
+                            "id": machine_id,
+                            "status": m.status,
+                            "source": data.source,
+                            "note": "operator loss active",
+                        }
+        except Exception:
+            pass
     if m.status == data.status:
         return {"id": machine_id, "status": m.status, "source": data.source, "note": "no change"}
     m.status = data.status
@@ -340,6 +472,44 @@ def get_status_log(
         except ValueError:
             pass
     logs = q.order_by(MachineStatusLog.changed_at.desc()).limit(limit).all()
+
+    # Auto-fill empty Deviation Reason from tablet loss logs (only when mobile integration ON)
+    try:
+        from ..mobile_integration import is_mobile_integration_enabled
+        if is_mobile_integration_enabled(db):
+            from ..models import OperatorLossLog
+            loss_rows = (
+                db.query(OperatorLossLog)
+                .filter(OperatorLossLog.machine_id == machine_id)
+                .order_by(OperatorLossLog.started_at.desc())
+                .limit(100)
+                .all()
+            )
+            updated = False
+            for loss in loss_rows:
+                if not loss.started_at:
+                    continue
+                reason_parts = [f"{loss.loss_code} · {loss.loss_description}"]
+                if loss.sub_division:
+                    reason_parts.append(loss.sub_division)
+                reason = " · ".join(reason_parts)[:500]
+                end_at = loss.ended_at or now_ist()
+                from datetime import timedelta as _td
+                win_start = loss.started_at - _td(seconds=2)
+                win_end = end_at + _td(seconds=2)
+                for log in logs:
+                    if log.changed_at < win_start or log.changed_at > win_end:
+                        continue
+                    if log.status == "running" or log.source == "operator_loss_end":
+                        continue
+                    if not (log.deviation_reason or "").strip():
+                        log.deviation_reason = reason
+                        updated = True
+            if updated:
+                db.commit()
+    except Exception as exc:
+        print(f"[LossReasonSync] skipped: {exc}")
+
     result = []
     cfg = _load_config(db) if include_plan_metrics else {}
     hourly_cfg = cfg.get("hourly_output") if include_plan_metrics else {}

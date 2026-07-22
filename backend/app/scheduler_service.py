@@ -85,6 +85,46 @@ def _run_archive_backup():
     run_scheduled_backup()
 
 
+def _run_plan_auto_transition():
+    """Periodic job — auto-start continuous same-part pending plans for the live shift.
+
+    Does not rely on someone opening Hourly Output / OEE pages.
+    """
+    from datetime import timedelta
+    from .models import SessionLocal
+    from .routers.hourly_output import (
+        _load_config, _shift_window, auto_transition_shift_plans,
+    )
+
+    db = SessionLocal()
+    try:
+        cfg = _load_config(db)
+        _now = now_ist()
+        today = _now.date()
+        enabled = [s for s in cfg.get('shifts', []) if s.get('enabled', True)]
+        for sh in enabled:
+            try:
+                s_start, s_end = _shift_window(today, sh)
+            except Exception:
+                continue
+            # Overnight shifts that started yesterday
+            if _now < s_start:
+                yday = today - timedelta(days=1)
+                try:
+                    y_start, y_end = _shift_window(yday, sh)
+                except Exception:
+                    continue
+                if y_start <= _now < y_end:
+                    auto_transition_shift_plans(db, yday, sh['id'], cfg)
+                continue
+            if s_start <= _now < s_end:
+                auto_transition_shift_plans(db, today, sh['id'], cfg)
+    except Exception as exc:
+        print(f"[Scheduler] Plan auto-transition failed: {exc}")
+    finally:
+        db.close()
+
+
 def reload_archive_schedule(db: Session):
     """Add or remove the archive backup job based on site_config.backup settings."""
     import json as _json
@@ -147,6 +187,16 @@ def reload_schedules(db: Session):
             replace_existing=True,
         )
         print("[Scheduler] Deviation breach scan every 5 minutes")
+
+    # Always re-register after reload clears jobs
+    scheduler.add_job(
+        _run_plan_auto_transition,
+        trigger='interval',
+        minutes=1,
+        id='plan_auto_transition',
+        replace_existing=True,
+    )
+    print("[Scheduler] Plan auto-transition every 1 minute")
 
     reload_archive_schedule(db)
 

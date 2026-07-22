@@ -77,31 +77,24 @@ def get_group_emails(db: Session, group_ids: List[int]) -> List[str]:
     ).all()
     return [r.email for r in recipients]
 
-def build_oee_xlsx(db: Session) -> bytes:
+def build_oee_xlsx(db: Session, report_date=None) -> bytes:
     import openpyxl
     from openpyxl.styles import Font, PatternFill, Alignment
-    from ..models import Station, OEEDefectLog, User, Machine, ProductionPlan, WorkOrder
+    from ..models import OEEDefectLog, User
+    from datetime import date as date_type, timedelta
+    from .oee import collect_merged_oee_report_rows
 
-    entries = db.query(OEEEntry).order_by(OEEEntry.entry_date.desc()).all()
-    station_map = {p.id: (p.display_name or p.name) for p in db.query(Station).all()}
-    machine_map = {m.id: m.name for m in db.query(Machine).all()}
+    if report_date is None:
+        report_date = date_type.today() - timedelta(days=1)
+    elif isinstance(report_date, str):
+        report_date = date_type.fromisoformat(report_date)
+
+    entries = collect_merged_oee_report_rows(
+        db,
+        entry_date=report_date,
+        prefer_live=True,
+    )
     user_map = {u.id: u.username for u in db.query(User).all()}
-
-    dates = {e.entry_date for e in entries}
-    all_plans = db.query(ProductionPlan).filter(ProductionPlan.plan_date.in_(dates)).all() if dates else []
-    wo_ids = {p.work_order_id for p in all_plans if p.work_order_id}
-    wo_map = {w.id: w.work_order_no for w in db.query(WorkOrder).filter(WorkOrder.id.in_(wo_ids)).all()} if wo_ids else {}
-    plan_lookup = {}
-    for p in all_plans:
-        key = (p.machine_id, str(p.plan_date), p.shift, p.current_operation)
-        wo_no = wo_map.get(p.work_order_id, "")
-        existing = plan_lookup.get(key)
-        if not existing:
-            plan_lookup[key] = {"wo": wo_no, "planned": p.planned_qty or 0}
-        else:
-            existing["planned"] += (p.planned_qty or 0)
-            if wo_no and not existing["wo"]:
-                existing["wo"] = wo_no
 
     def fmt_ist(dt_val):
         if not dt_val: return ''
@@ -122,12 +115,16 @@ def build_oee_xlsx(db: Session) -> bytes:
                "Avail (min)","Op Time (min)","Plan Qty","Possible Qty","Actual Qty",
                "Prod Loss","Accepted Qty","Defect Qty",
                "AR%","PR%","QR%","OEE%",
-               "AR% (original)","PR% (original)","QR% (original)","OEE% (original)"]
+               "AR% (original)","PR% (original)","QR% (original)","OEE% (original)",
+               "Source"]
     ws.append(headers)
     for col in range(1, len(headers) + 1):
         cell = ws.cell(row=1, column=col)
         cell.fill = hdr_fill; cell.font = hdr_font
         cell.alignment = Alignment(horizontal="center")
+
+    if not entries:
+        ws.append([f"No live or data-entry OEE records found for {report_date}"])
 
     for e in entries:
         ct = (e.process_time or 0) + (e.loading_unloading or 0)
@@ -140,21 +137,21 @@ def build_oee_xlsx(db: Session) -> bytes:
         pr_raw = float(e.pr_raw or 0) if e.pr_raw is not None else None
         qr_raw = float(e.qr_raw or 0) if e.qr_raw is not None else None
         oee_raw = float(e.oee_raw or 0) if e.oee_raw is not None else None
-        key = (e.machine_id, str(e.entry_date), e.shift, e.current_operation)
-        pl = plan_lookup.get(key, {})
+        plan_qty = e.planned_qty if e.planned_qty is not None else ""
         ws.append([
-            str(e.entry_date), station_map.get(e.station_no, str(e.station_no)),
-            machine_map.get(e.machine_id, "") if e.machine_id else "",
-            e.shift, pl.get("wo", ""), e.model_variant or "",
+            str(e.entry_date), e.station_name or str(e.station_no or ""),
+            e.machine_name or "",
+            e.shift, e.work_order_no or "", e.model_variant or "",
             e.current_operation, e.next_operation,
             ct, e.available_shift_time, e.operating_time,
-            pl.get("planned", ""), e.possible_qty, e.actual_qty, prod_loss,
+            plan_qty, e.possible_qty, e.actual_qty, prod_loss,
             e.accp_qty, e.defect_qty,
             ar_val, pr_val, qr_val, oee_val,
             ar_raw if ar_raw is not None else "—",
             pr_raw if pr_raw is not None else "—",
             qr_raw if qr_raw is not None else "—",
             oee_raw if oee_raw is not None else "—",
+            "Live" if e.source == "realtime" else "Data Entry",
         ])
         row_idx = ws.max_row
         ws.cell(row_idx, 21).font = grn_font if oee_val >= 85 else (amb_font if oee_val >= 65 else red_font)
@@ -162,16 +159,18 @@ def build_oee_xlsx(db: Session) -> bytes:
             if raw is not None:
                 ws.cell(row_idx, col).font = amb_font
 
-    col_widths = [12,14,12,8,18,16,14,14,10,12,14,10,12,12,10,12,12,8,8,8,8,14,14,14,14]
+    col_widths = [12,14,12,8,18,16,14,14,10,12,14,10,12,12,10,12,12,8,8,8,8,14,14,14,14,12]
     for i, w in enumerate(col_widths, 1):
         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
 
     # ── QC Logs sheet ────────────────────────────────────────────────────────
-    entry_ids = [e.id for e in entries]
-    qc_logs = db.query(OEEDefectLog)\
-                .filter(OEEDefectLog.oee_entry_id.in_(entry_ids))\
-                .order_by(OEEDefectLog.updated_at.desc()).all()
-    entry_map = {e.id: e for e in entries}
+    entry_ids = [e.id for e in entries if e.id]
+    qc_logs = []
+    if entry_ids:
+        qc_logs = db.query(OEEDefectLog)\
+                    .filter(OEEDefectLog.oee_entry_id.in_(entry_ids))\
+                    .order_by(OEEDefectLog.updated_at.desc()).all()
+    entry_map = {e.id: e for e in entries if e.id}
 
     ws_qc = wb.create_sheet("QC Logs")
     qc_headers = [
@@ -196,7 +195,7 @@ def build_oee_xlsx(db: Session) -> bytes:
             e.next_operation if e else "",
             str(e.entry_date) if e else "",
             e.shift if e else "",
-            station_map.get(e.station_no, str(e.station_no)) if e else "",
+            (e.station_name if e else "") or "",
             fmt_ist(l.updated_at),
             user_map.get(l.updated_by, str(l.updated_by) if l.updated_by else ""),
             l.before_defect_qty, l.before_accp_qty,
@@ -206,10 +205,8 @@ def build_oee_xlsx(db: Session) -> bytes:
             l.note or "",
         ])
         row_i = ws_qc.max_row
-        # colour Before OEE%
         bf = ws_qc.cell(row_i, 11)
         bf.font = grn_font if before_oee >= 85 else (amb_font if before_oee >= 65 else red_font)
-        # colour After OEE%
         af = ws_qc.cell(row_i, 15)
         af.font = grn_font if after_oee  >= 85 else (amb_font if after_oee  >= 65 else red_font)
 
@@ -237,7 +234,8 @@ def build_oee_xlsx(db: Session) -> bytes:
         avg_pr  = round(sum(float(e.pr  or 0) for e in grp) / n, 2)
         avg_qr  = round(sum(float(e.qr  or 0) for e in grp) / n, 2)
         avg_oee = round(sum(float(e.oee or 0) for e in grp) / n, 2)
-        ws_day.append([dt, station_map.get(pno, str(pno)),
+        station_label = grp[0].station_name if grp else str(pno)
+        ws_day.append([dt, station_label,
                        avg_ar, avg_pr, avg_qr, avg_oee,
                        sum(e.actual_qty or 0 for e in grp),
                        sum(e.accp_qty   or 0 for e in grp),
@@ -264,7 +262,8 @@ def build_oee_xlsx(db: Session) -> bytes:
         avg_pr  = round(sum(float(e.pr  or 0) for e in grp) / n, 2)
         avg_qr  = round(sum(float(e.qr  or 0) for e in grp) / n, 2)
         avg_oee = round(sum(float(e.oee or 0) for e in grp) / n, 2)
-        ws_shift.append([dt, station_map.get(pno, str(pno)), sh,
+        station_label = grp[0].station_name if grp else str(pno)
+        ws_shift.append([dt, station_label, sh,
                          sum(e.actual_qty or 0 for e in grp),
                          sum(max(0,(e.possible_qty or 0)-(e.actual_qty or 0)) for e in grp),
                          sum(e.accp_qty   or 0 for e in grp),
@@ -423,17 +422,14 @@ def build_maintenance_xlsx(db: Session) -> bytes:
 def build_data_entry_xlsx(db: Session, report_date=None) -> bytes:
     import openpyxl
     from openpyxl.styles import Font, PatternFill, Alignment
-    from ..models import Station
     from datetime import date as date_type, timedelta
-    from sqlalchemy import extract
+    from .oee import collect_merged_oee_report_rows
 
     # Default: previous day's completed data
     if report_date is None:
         report_date = date_type.today() - timedelta(days=1)
     elif isinstance(report_date, str):
         report_date = date_type.fromisoformat(report_date)
-
-    station_map = {p.id: (p.display_name or p.name) for p in db.query(Station).all()}
 
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
@@ -446,7 +442,8 @@ def build_data_entry_xlsx(db: Session, report_date=None) -> bytes:
     oee_bad   = Font(bold=True, color="DC2626")
 
     HEADERS = [
-        "Date", "Station", "Shift", "Model / Variant", "Current Operation", "Next Operation",
+        "Date", "Station", "Machine", "Shift", "Work Order", "Model / Variant",
+        "Current Operation", "Next Operation",
         "Process Time (s)", "Loading & Unloading (s)", "CT (s)",
         "Start Time", "Stop Time", "Total Minutes",
         "Lunch Break", "Tea Break", "TPM Cleaning", "Other Cleaning", "Mgmt Meeting",
@@ -454,25 +451,27 @@ def build_data_entry_xlsx(db: Session, report_date=None) -> bytes:
         "No Load", "New Model Trial", "Power Cut", "Planned Maintenance", "No Manpower",
         "Mgmt Loss Total", "Available Shift Time (min)",
         "Setting Time", "Tool Change", "Dim Correction", "Scrap Removal", "Break Down",
-        "Total Down Time", "Operating Time (min)", "Possible Qty",
+        "Total Down Time", "Operating Time (min)", "Plan Qty", "Possible Qty",
         "Actual Qty", "Production Loss", "Accepted Qty", "Defect Qty",
-        "AR%", "PR%", "QR%", "OEE%"
+        "AR%", "PR%", "QR%", "OEE%", "Source",
     ]
     COL_WIDTHS = [
-        12,14,8,16,14,14, 16,20,10, 10,10,14,
+        12,14,12,8,18,16, 14,14, 16,20,10, 10,10,14,
         12,10,14,14,14, 12,18,
         10,16,12,20,14, 14,22,
-        12,12,14,14,12, 14,18,12,
-        12,14,12,12, 8,8,8,8
+        12,12,14,14,12, 14,18,10,12,
+        12,14,12,12, 8,8,8,8, 12,
     ]
-    OEE_COL = len(HEADERS)  # last column (1-based)
+    OEE_COL = len(HEADERS) - 1  # OEE% column (1-based), Source is last
 
     def entry_row(e):
         ct = (e.process_time or 0) + (e.loading_unloading or 0)
         prod_loss = max(0, (e.possible_qty or 0) - (e.actual_qty or 0))
+        plan_qty = e.planned_qty if e.planned_qty is not None else ""
         return [
-            str(e.entry_date), station_map.get(e.station_no, str(e.station_no)),
-            e.shift, e.model_variant or "", e.current_operation or "", e.next_operation or "",
+            str(e.entry_date), e.station_name or str(e.station_no or ""),
+            e.machine_name or "", e.shift, e.work_order_no or "", e.model_variant or "",
+            e.current_operation or "", e.next_operation or "",
             e.process_time or 0, e.loading_unloading or 0, ct,
             e.start_time or "", e.stop_time or "", e.total_minutes or 0,
             e.lunch_break or 0, e.tea_break or 0, e.tpm_cleaning or 0,
@@ -483,10 +482,11 @@ def build_data_entry_xlsx(db: Session, report_date=None) -> bytes:
             e.management_loss_total or 0, e.available_shift_time or 0,
             e.setting_time or 0, e.tool_change or 0,
             e.dimension_correction or 0, e.scrap_removal or 0, e.break_down or 0,
-            e.total_down_time or 0, e.operating_time or 0, e.possible_qty or 0,
+            e.total_down_time or 0, e.operating_time or 0, plan_qty, e.possible_qty or 0,
             e.actual_qty or 0, prod_loss, e.accp_qty or 0, e.defect_qty or 0,
             float(e.ar or 0), float(e.pr or 0),
             float(e.qr or 0), float(e.oee or 0),
+            "Live" if e.source == "realtime" else "Data Entry",
         ]
 
     def style_sheet(ws, entries_for_sheet):
@@ -509,27 +509,27 @@ def build_data_entry_xlsx(db: Session, report_date=None) -> bytes:
         for i, w in enumerate(COL_WIDTHS, 1):
             ws.column_dimensions[ws.cell(1, i).column_letter].width = w
 
-    # ── Per-shift sheets for report_date ─────────────────────────────────────
-    day_entries = db.query(OEEEntry).filter(OEEEntry.entry_date == report_date)\
-                    .order_by(OEEEntry.shift, OEEEntry.station_no).all()
+    # ── Per-shift sheets for report_date (live first, else data entry) ────────
+    day_entries = collect_merged_oee_report_rows(
+        db, entry_date=report_date, prefer_live=True,
+    )
 
-    shifts_present = sorted(set(e.shift for e in day_entries)) or ["A", "B"]
+    shifts_present = sorted(set(e.shift for e in day_entries if e.shift)) or ["A", "B"]
     for shift in shifts_present:
         ws = wb.create_sheet(title=f"Shift {shift} — {report_date}")
         style_sheet(ws, [e for e in day_entries if e.shift == shift])
 
     if not day_entries:
         ws = wb.create_sheet(f"No Data — {report_date}")
-        ws.append([f"No data entry records found for {report_date}"])
+        ws.append([f"No live or data-entry records found for {report_date}"])
 
     # ── Monthly Consolidated sheet ────────────────────────────────────────────
     month_start = report_date.replace(day=1)
-    monthly_entries = (
-        db.query(OEEEntry)
-          .filter(OEEEntry.entry_date >= month_start,
-                  OEEEntry.entry_date <= report_date)
-          .order_by(OEEEntry.entry_date, OEEEntry.shift, OEEEntry.station_no)
-          .all()
+    monthly_entries = collect_merged_oee_report_rows(
+        db,
+        date_from=month_start,
+        date_to=report_date,
+        prefer_live=True,
     )
 
     month_label = report_date.strftime("%b %Y")
@@ -539,17 +539,16 @@ def build_data_entry_xlsx(db: Session, report_date=None) -> bytes:
     # Add a summary row at the bottom of monthly sheet
     if monthly_entries:
         ws_monthly.append([])  # blank separator
-        total_row_idx = ws_monthly.max_row + 1
-        summary_label_col = 1
         totals = [
-            "TOTALS / AVG", "", "", "", "",
-            "", "", "", "", "", "",
+            "TOTALS / AVG", "", "", "", "", "",
+            "", "", "", "", "",
+            "", "", "",
             "", "", "", "", "",
             "", "",
             "", "", "", "", "",
             "", "",
             "", "", "", "", "",
-            "", "",
+            "", "", "",
             sum(e.possible_qty or 0 for e in monthly_entries),
             sum(e.actual_qty or 0 for e in monthly_entries),
             sum(max(0,(e.possible_qty or 0)-(e.actual_qty or 0)) for e in monthly_entries),
@@ -559,6 +558,7 @@ def build_data_entry_xlsx(db: Session, report_date=None) -> bytes:
             round(sum(float(e.pr or 0) for e in monthly_entries)/len(monthly_entries), 2),
             round(sum(float(e.qr or 0) for e in monthly_entries)/len(monthly_entries), 2),
             round(sum(float(e.oee or 0) for e in monthly_entries)/len(monthly_entries), 2),
+            "",
         ]
         ws_monthly.append(totals)
         tr = ws_monthly.max_row
@@ -1167,7 +1167,7 @@ def build_tools_xlsx(db: Session, report_date=None) -> bytes:
 def build_attachments_for_report_types(report_types: str, db: Session, report_date=None) -> dict:
     rts = [r.strip() for r in report_types.split(",")]
     attachments = {}
-    if "oee"         in rts: attachments["oee_report.xlsx"]         = build_oee_xlsx(db)
+    if "oee"         in rts: attachments["oee_report.xlsx"]         = build_oee_xlsx(db, report_date)
     if "planning"    in rts: attachments["production_plan.xlsx"]    = build_plan_xlsx(db)
     if "breakdown"   in rts: attachments["breakdown_report.xlsx"]   = build_breakdown_xlsx(db)
     if "maintenance" in rts: attachments["maintenance_report.xlsx"] = build_maintenance_xlsx(db)

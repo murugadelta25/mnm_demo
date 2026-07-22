@@ -20,6 +20,8 @@ from .routers import platform as platform_router
 from .routers import features as features_router
 from .routers import machine_kpi as machine_kpi_router
 from .routers import archive as archive_router
+from .routers import mobile as mobile_router
+from .routers import operators as operators_router
 from .ws_manager import manager
 from sqlalchemy import text, inspect
 from sqlalchemy.orm import Session
@@ -205,13 +207,16 @@ app.include_router(platform_router.router)
 app.include_router(features_router.router)
 app.include_router(machine_kpi_router.router)
 app.include_router(archive_router.router)
+app.include_router(mobile_router.router)
+app.include_router(operators_router.router)
 
 # Serve uploaded machine images — pathlib works on both Windows and Linux
 STATIC_DIR = Path(__file__).parent.parent / "static"
 (STATIC_DIR / "machines").mkdir(parents=True, exist_ok=True)
 (STATIC_DIR / "factory").mkdir(parents=True, exist_ok=True)
 (STATIC_DIR / "work-instructions").mkdir(parents=True, exist_ok=True)
-(STATIC_DIR / "parts").mkdir(parents=True, exist_ok=True)
+(STATIC_DIR / "operator-sessions").mkdir(parents=True, exist_ok=True)
+(STATIC_DIR / "operator-reference").mkdir(parents=True, exist_ok=True)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 @app.websocket("/ws")

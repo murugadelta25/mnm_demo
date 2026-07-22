@@ -206,6 +206,16 @@ export default function MaintenanceDashboard() {
                 </div>
                 <div style={{ color: t.text, fontSize: 13, fontWeight: 600, marginBottom: 2 }}>{m.name}</div>
                 <div style={{ color: t.textFaint, fontSize: 11, marginBottom: 4 }}>{stationLabel}</div>
+                {m.operator_name ? (
+                  <div style={{ color: t.accent, fontSize: 11, fontWeight: 600, marginBottom: 4 }}>
+                    Op: {m.operator_name}
+                    {m.operator_code && m.operator_code !== m.operator_name
+                      ? ` (${m.operator_code})`
+                      : ''}
+                  </div>
+                ) : (
+                  <div style={{ color: t.textFaint, fontSize: 10, marginBottom: 4, fontStyle: 'italic' }}>No operator</div>
+                )}
                 {m.machine_type && (
                   <div style={{ color: t.textFaint, fontSize: 11, marginBottom: 4 }}>
                     {m.machine_type}{m.make ? ` · ${m.make}` : ''}

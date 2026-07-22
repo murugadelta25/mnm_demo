@@ -279,28 +279,47 @@ export default function Dashboard() {
     if (msg.type === 'oee_updated') fetchData();
   }, [fetchData]));
 
-  const saveDefect = async (entryId) => {
+  const saveDefect = async (entry) => {
     if (defectEdit.value === '' || defectEdit.value < 0) return;
     setDefectSaving(true);
     try {
-      const r = await api.patch(`/api/oee/${entryId}/defect`, {
-        defect_qty: parseInt(defectEdit.value),
-        note: defectEdit.note
-      });
-      setEntries(prev => prev.map(e => e.id === entryId
-        ? { ...e, defect_qty: r.data.defect_qty, accp_qty: r.data.accp_qty,
+      const payload = {
+        defect_qty: parseInt(defectEdit.value, 10),
+        note: defectEdit.note,
+      };
+      const r = entry.source === 'realtime'
+        ? await api.patch('/api/oee/defect/by-machine', {
+            machine_id: entry.machine_id,
+            entry_date: entry.entry_date,
+            shift: entry.shift,
+            ...payload,
+          })
+        : await api.patch(`/api/oee/${entry.id}/defect`, payload);
+      setEntries(prev => prev.map(e => e.id === entry.id
+        ? { ...e, id: r.data.id ?? e.id, source: 'manual',
+             defect_qty: r.data.defect_qty, accp_qty: r.data.accp_qty,
              qr: r.data.qr, oee: r.data.oee }
         : e
       ));
       setDefectEdit({ id: null, value: '', note: '' });
-      fetchData(); // refresh summary KPIs
+      fetchData();
+    } catch (err) {
+      alert(err.response?.data?.detail || err.message || 'Failed to update defect qty');
     } finally { setDefectSaving(false); }
   };
 
-  const loadDefectLog = async (entryId) => {
-    if (defectLog.id === entryId) { setDefectLog({ id: null, records: [] }); return; }
-    const r = await api.get(`/api/oee/${entryId}/defect-log`);
-    setDefectLog({ id: entryId, records: r.data });
+  const loadDefectLog = async (entry) => {
+    if (defectLog.id === entry.id) { setDefectLog({ id: null, records: [] }); return; }
+    const r = entry.source === 'realtime'
+      ? await api.get('/api/oee/defect-log/by-machine', {
+          params: {
+            machine_id: entry.machine_id,
+            entry_date: entry.entry_date,
+            shift: entry.shift,
+          },
+        })
+      : await api.get(`/api/oee/${entry.id}/defect-log`);
+    setDefectLog({ id: entry.id, records: r.data });
   };
 
   const fmtIST = (istStr) => {
@@ -616,9 +635,9 @@ export default function Dashboard() {
                     <td style={s.td}>{e.actual_qty}</td>
                     <td style={{ ...s.td, color: prodLoss > 0 ? '#f59e0b' : '#10b981' }}>{prodLoss}</td>
                     <td style={s.td}>{e.accp_qty}</td>
-                    {/* Defect — editable inline */}
+                    {/* Defect — editable inline (manual + live/realtime rows) */}
                     <td style={{ ...s.td, color: safeNum(e.defect_qty) > 0 ? '#ef4444' : '#10b981' }}>
-                      {!isRealtime && isEditing ? (
+                      {isEditing ? (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 3, minWidth: 180 }}>
                           <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
                             <input type="number" min="0" max={e.actual_qty}
@@ -626,9 +645,9 @@ export default function Dashboard() {
                               value={defectEdit.value}
                               autoFocus
                               onChange={ev => setDefectEdit(p => ({ ...p, value: ev.target.value }))}
-                              onKeyDown={ev => { if (ev.key === 'Enter') saveDefect(e.id); if (ev.key === 'Escape') setDefectEdit({ id: null, value: '', note: '' }); }}
+                              onKeyDown={ev => { if (ev.key === 'Enter') saveDefect(e); if (ev.key === 'Escape') setDefectEdit({ id: null, value: '', note: '' }); }}
                             />
-                            <button disabled={defectSaving} onClick={() => saveDefect(e.id)}
+                            <button disabled={defectSaving} onClick={() => saveDefect(e)}
                               style={{ padding: '3px 8px', background: '#10b981', color: '#fff',
                                        border: 'none', borderRadius: 4, cursor: 'pointer', fontSize: 11, fontWeight: 600 }}>✓</button>
                             <button onClick={() => setDefectEdit({ id: null, value: '', note: '' })}
@@ -651,25 +670,24 @@ export default function Dashboard() {
                     <td style={{ ...s.td, fontWeight: 700, color: oee >= 85 ? '#10b981' : oee >= 65 ? '#f59e0b' : '#ef4444' }}>
                       {Math.round(oee)}%
                     </td>
-                    {/* QC Edit column — manual entries only */}
+                    {/* QC Edit — manual and live/realtime rows */}
                     <td style={{ ...s.td, whiteSpace: 'nowrap' }}>
-                      {isRealtime ? (
-                        <span style={{ color: t.textFaint, fontSize: 11 }}>Live</span>
-                      ) : (
-                        <div style={{ display: 'flex', gap: 4 }}>
-                          {!isEditing && (
-                            <button onClick={() => setDefectEdit({ id: e.id, value: String(e.defect_qty || 0), note: '' })}
-                              style={{ padding: '3px 8px', background: '#f59e0b', color: '#fff', border: 'none',
-                                       borderRadius: 4, cursor: 'pointer', fontSize: 11, fontWeight: 600 }}
-                              title="Update defect qty after QC">✏ QC</button>
-                          )}
-                          <button onClick={() => loadDefectLog(e.id)}
-                            style={{ padding: '3px 8px', background: showLog ? t.accent : t.surface2,
-                                     color: showLog ? '#fff' : t.textMuted, border: 'none',
-                                     borderRadius: 4, cursor: 'pointer', fontSize: 11 }}
-                            title="View QC history">{showLog ? '▲ Hide' : '📋 Log'}</button>
-                        </div>
-                      )}
+                      <div style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                        {!isEditing && (
+                          <button onClick={() => setDefectEdit({ id: e.id, value: String(e.defect_qty || 0), note: '' })}
+                            style={{ padding: '3px 8px', background: '#f59e0b', color: '#fff', border: 'none',
+                                     borderRadius: 4, cursor: 'pointer', fontSize: 11, fontWeight: 600 }}
+                            title="Update defect qty after QC">✏ QC</button>
+                        )}
+                        <button onClick={() => loadDefectLog(e)}
+                          style={{ padding: '3px 8px', background: showLog ? t.accent : t.surface2,
+                                   color: showLog ? '#fff' : t.textMuted, border: 'none',
+                                   borderRadius: 4, cursor: 'pointer', fontSize: 11 }}
+                          title="View QC history">{showLog ? '▲ Hide' : '📋 Log'}</button>
+                        {isRealtime && (
+                          <span style={{ color: t.textFaint, fontSize: 10 }} title="Live data — QC save persists to OEE">Live</span>
+                        )}
+                      </div>
                     </td>
                   </tr>
                   {/* QC history expansion row */}
@@ -754,6 +772,16 @@ export default function Dashboard() {
                       <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>{d.machine_name}</h2>
                       <div style={{ fontSize: 13, color: t.textMuted, marginTop: 2 }}>{d.station_name} &middot; {d.machine_type} &middot; {d.make || ''} {d.model_no || ''}</div>
                       <div style={{ fontSize: 13, color: t.textMuted }}>{d.location}</div>
+                      {d.operator_name ? (
+                        <div style={{ fontSize: 13, color: t.accent, fontWeight: 600, marginTop: 4 }}>
+                          Operator: {d.operator_name}
+                          {d.operator_code && d.operator_code !== d.operator_name
+                            ? ` (${d.operator_code})`
+                            : ''}
+                        </div>
+                      ) : (
+                        <div style={{ fontSize: 12, color: t.textFaint, marginTop: 4, fontStyle: 'italic' }}>No operator assigned</div>
+                      )}
                       <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
                         <span style={{ width: 10, height: 10, borderRadius: '50%', background: statusColor, display: 'inline-block', boxShadow: `0 0 6px ${statusColor}` }} />
                         <span style={{ fontSize: 13, fontWeight: 600, color: statusColor, textTransform: 'uppercase' }}>{d.machine_status}</span>

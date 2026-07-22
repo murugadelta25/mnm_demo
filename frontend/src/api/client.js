@@ -32,7 +32,9 @@ api.interceptors.request.use(cfg => {
 api.interceptors.response.use(
   r => r,
   err => {
-    if (err.response?.status === 401 && !err.config?.url?.includes('/api/auth/login')) {
+    const url = err.config?.url || '';
+    const isAuthPublic = url.includes('/api/auth/login') || url.includes('/api/auth/forgot-password');
+    if (err.response?.status === 401 && !isAuthPublic) {
       const userJson = localStorage.getItem('user');
       let username = null;
       try {

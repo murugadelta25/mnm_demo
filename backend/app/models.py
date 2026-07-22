@@ -51,6 +51,28 @@ def ensure_oee_schema(bind=None):
 ensure_oee_schema()
 
 
+def ensure_users_schema(bind=None):
+    """Add operator reference photo column for mobile face verification."""
+    if bind is None:
+        bind = engine
+    try:
+        from sqlalchemy import inspect, text
+
+        inspector = inspect(bind)
+        if not inspector.has_table("users"):
+            return False
+        cols = {c["name"] for c in inspector.get_columns("users")}
+        if "reference_photo_url" not in cols:
+            with bind.begin() as conn:
+                conn.execute(text("ALTER TABLE users ADD COLUMN reference_photo_url VARCHAR(500) NULL"))
+        return True
+    except Exception:
+        return False
+
+
+ensure_users_schema()
+
+
 def get_db():
     db = SessionLocal()
     try:
@@ -71,6 +93,24 @@ class User(Base):
     username = Column(String(50), unique=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
     role = Column(Enum("operator", "supervisor", "maintenance", "admin", "quality", "superadmin"), nullable=False)
+    reference_photo_url = Column(String(500), nullable=True)
+
+
+class Operator(Base):
+    """Shop-floor operator identity — separate from login users (User Management)."""
+    __tablename__ = "operators"
+    id = Column(Integer, primary_key=True, index=True)
+    employee_code = Column(String(50), unique=True, nullable=False, index=True)
+    name = Column(String(100), nullable=False)
+    is_temporary = Column(Integer, default=0)
+    is_active = Column(Integer, default=1)
+    pin_hash = Column(String(255), nullable=True)
+    reference_photo_url = Column(String(500), nullable=True)
+    linked_user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    notes = Column(String(255), nullable=True)
+    created_at = Column(TIMESTAMP)
+    updated_at = Column(DateTime)
+
 
 class Station(Base):
     __tablename__ = "stations"
@@ -541,3 +581,257 @@ class ToolAlert(Base):
     acknowledged_at = Column(DateTime)
     meta_json = Column(Text)
     created_at = Column(TIMESTAMP)
+
+
+class MobileDevice(Base):
+    """Factory tablet / phone bound to a machine (operator mobile app)."""
+    __tablename__ = "mobile_devices"
+    id = Column(Integer, primary_key=True, index=True)
+    tab_id = Column(String(100), unique=True, nullable=False, index=True)
+    machine_id = Column(Integer, ForeignKey("machines.id"), nullable=False, index=True)
+    mac_address = Column(String(100))
+    platform = Column(String(40), default="mobile")
+    last_seen_at = Column(DateTime)
+    created_at = Column(TIMESTAMP)
+    updated_at = Column(DateTime)
+
+
+class OperatorSession(Base):
+    """Operator login presence / availability at a machine tablet."""
+    __tablename__ = "operator_sessions"
+    id = Column(Integer, primary_key=True, index=True)
+    operator_id = Column(Integer, ForeignKey("operators.id"), nullable=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)  # legacy / linked login
+    username = Column(String(50), nullable=False)  # display: employee_code or name
+    machine_id = Column(Integer, ForeignKey("machines.id"), nullable=False, index=True)
+    tab_id = Column(String(100))
+    mac_address = Column(String(100))
+    shift_id = Column(String(1))
+    face_verified = Column(Integer, default=0)
+    face_match_score = Column(Numeric(6, 3))
+    login_photo_url = Column(String(500))
+    logout_photo_url = Column(String(500))
+    logout_reason = Column(String(40))
+    started_at = Column(DateTime, nullable=False)
+    ended_at = Column(DateTime)
+    status = Column(String(20), default="active")
+
+
+class AttendanceRecord(Base):
+    """Shift attendance punch in/out (AttendTrack-style, unified with mobile operator app)."""
+    __tablename__ = "attendance_records"
+    id = Column(Integer, primary_key=True, index=True)
+    operator_id = Column(Integer, ForeignKey("operators.id"), nullable=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)  # legacy
+    username = Column(String(50), nullable=False)
+    entry_date = Column(Date, nullable=False, index=True)
+    shift_id = Column(String(1))
+    machine_id = Column(Integer, ForeignKey("machines.id"))
+    operator_session_id = Column(Integer)
+    time_in = Column(DateTime, nullable=False)
+    time_out = Column(DateTime)
+    duration_mins = Column(Numeric(10, 2))
+    status = Column(String(30), default="open")
+    created_at = Column(TIMESTAMP)
+
+
+class OperatorRosterDay(Base):
+    """Weekly shift roster — one row per operator per calendar day per shift."""
+    __tablename__ = "operator_roster_days"
+    id = Column(Integer, primary_key=True, index=True)
+    week_start = Column(Date, nullable=False, index=True)
+    entry_date = Column(Date, nullable=False, index=True)
+    shift_id = Column(String(1), nullable=False, index=True)
+    operator_id = Column(Integer, ForeignKey("operators.id"), nullable=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)  # legacy
+    username = Column(String(50), nullable=False)
+    status = Column(String(20), nullable=False, default="Present")  # Present|Absent|Leave|Week Off
+    updated_at = Column(DateTime)
+    updated_by = Column(String(50))
+
+
+class MachineAllocation(Base):
+    """Assign operator to machine for a date+shift; tablet must acknowledge."""
+    __tablename__ = "machine_allocations"
+    id = Column(Integer, primary_key=True, index=True)
+    entry_date = Column(Date, nullable=False, index=True)
+    shift_id = Column(String(1), nullable=False, index=True)
+    machine_id = Column(Integer, ForeignKey("machines.id"), nullable=False, index=True)
+    operator_id = Column(Integer, ForeignKey("operators.id"), nullable=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)  # legacy
+    username = Column(String(50), nullable=False)
+    status = Column(String(20), default="assigned")  # assigned|acknowledged|active|cancelled
+    source = Column(String(20), default="web")  # web|login
+    assigned_by = Column(String(50))
+    assigned_at = Column(DateTime)
+    acknowledged_at = Column(DateTime)
+    acknowledged_via = Column(String(20))  # password|face|pin
+    notes = Column(String(255))
+
+
+class OperatorLossLog(Base):
+    """TPM 16-loss logging from operator mobile app (timed sessions + OEE mapping)."""
+    __tablename__ = "operator_loss_logs"
+    id = Column(Integer, primary_key=True, index=True)
+    machine_id = Column(Integer, ForeignKey("machines.id"), nullable=False, index=True)
+    tab_id = Column(String(100))
+    operator_id = Column(Integer, ForeignKey("operators.id"), nullable=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    username = Column(String(50))
+    loss_code = Column(String(20), nullable=False)
+    loss_description = Column(String(100), nullable=False)
+    sub_division = Column(String(100))
+    minutes = Column(Numeric(10, 2), nullable=True, default=0)
+    notes = Column(Text)
+    entry_date = Column(Date)
+    shift = Column(String(1))
+    status = Column(String(20), default="closed")  # open | closed
+    started_at = Column(DateTime)
+    ended_at = Column(DateTime)
+    oee_field = Column(String(40))  # Data Entry field key
+    oee_bucket = Column(String(20))  # breaks | mgmt | downtime | none
+    exclude_from_oee = Column(Integer, default=0)  # 1 = avoid double-count (e.g. setting vs MCR)
+    created_at = Column(TIMESTAMP)
+
+
+def _add_column_if_missing(bind, text, table: str, column: str, ddl: str):
+    from sqlalchemy import inspect
+    inspector = inspect(bind)
+    if not inspector.has_table(table):
+        return
+    cols = {c["name"] for c in inspector.get_columns(table)}
+    if column not in cols:
+        with bind.begin() as conn:
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
+
+
+def ensure_operators_schema(bind=None):
+    """Create operators table, add operator_id FKs, migrate former User-role operators."""
+    if bind is None:
+        bind = engine
+    try:
+        from sqlalchemy import inspect, text
+
+        Operator.__table__.create(bind=bind, checkfirst=True)
+        inspector = inspect(bind)
+        if not inspector.has_table("operators"):
+            return False
+
+        with bind.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO operators (employee_code, name, is_temporary, is_active, reference_photo_url, linked_user_id, created_at)
+                SELECT u.username, u.username, 0, 1, u.reference_photo_url, u.id, CURRENT_TIMESTAMP
+                FROM users u
+                WHERE u.role = 'operator'
+                  AND NOT EXISTS (
+                    SELECT 1 FROM operators o
+                    WHERE o.employee_code = u.username OR o.linked_user_id = u.id
+                  )
+            """))
+
+        for table in (
+            "operator_sessions",
+            "attendance_records",
+            "operator_roster_days",
+            "machine_allocations",
+            "operator_loss_logs",
+        ):
+            _add_column_if_missing(bind, text, table, "operator_id", "operator_id INT NULL")
+
+        with bind.begin() as conn:
+            for table in (
+                "operator_sessions",
+                "attendance_records",
+                "operator_roster_days",
+                "machine_allocations",
+                "operator_loss_logs",
+            ):
+                insp = inspect(bind)
+                if not insp.has_table(table):
+                    continue
+                cols = {c["name"]: c for c in insp.get_columns(table)}
+                if "operator_id" in cols and "user_id" in cols:
+                    conn.execute(text(f"""
+                        UPDATE {table} t
+                        INNER JOIN operators o ON o.linked_user_id = t.user_id
+                        SET t.operator_id = o.id
+                        WHERE t.operator_id IS NULL AND t.user_id IS NOT NULL
+                    """))
+                # Allow operator-only rows (no User Management account)
+                if "user_id" in cols and cols["user_id"].get("nullable") is False:
+                    try:
+                        conn.execute(text(f"ALTER TABLE {table} MODIFY COLUMN user_id INT NULL"))
+                    except Exception:
+                        pass
+        return True
+    except Exception:
+        return False
+
+
+def ensure_mobile_schema(bind=None):
+    """Create mobile operator tables if missing (safe on existing DBs)."""
+    if bind is None:
+        bind = engine
+    try:
+        from sqlalchemy import inspect, text
+
+        Operator.__table__.create(bind=bind, checkfirst=True)
+
+        MobileDevice.__table__.create(bind=bind, checkfirst=True)
+        OperatorSession.__table__.create(bind=bind, checkfirst=True)
+        AttendanceRecord.__table__.create(bind=bind, checkfirst=True)
+        OperatorRosterDay.__table__.create(bind=bind, checkfirst=True)
+        MachineAllocation.__table__.create(bind=bind, checkfirst=True)
+        OperatorLossLog.__table__.create(bind=bind, checkfirst=True)
+
+        inspector = inspect(bind)
+        if inspector.has_table("operator_sessions"):
+            cols = {c["name"] for c in inspector.get_columns("operator_sessions")}
+            alters = []
+            if "shift_id" not in cols:
+                alters.append("ADD COLUMN shift_id VARCHAR(1) NULL")
+            if "face_verified" not in cols:
+                alters.append("ADD COLUMN face_verified INT DEFAULT 0")
+            if "face_match_score" not in cols:
+                alters.append("ADD COLUMN face_match_score DECIMAL(6,3) NULL")
+            if "login_photo_url" not in cols:
+                alters.append("ADD COLUMN login_photo_url VARCHAR(500) NULL")
+            if "logout_photo_url" not in cols:
+                alters.append("ADD COLUMN logout_photo_url VARCHAR(500) NULL")
+            if "logout_reason" not in cols:
+                alters.append("ADD COLUMN logout_reason VARCHAR(40) NULL")
+            if "operator_id" not in cols:
+                alters.append("ADD COLUMN operator_id INT NULL")
+            if alters:
+                with bind.begin() as conn:
+                    for stmt in alters:
+                        conn.execute(text(f"ALTER TABLE operator_sessions {stmt}"))
+
+        ensure_operators_schema(bind)
+        # Timed loss session columns
+        for col, ddl in (
+            ("status", "status VARCHAR(20) NULL DEFAULT 'closed'"),
+            ("started_at", "started_at DATETIME NULL"),
+            ("ended_at", "ended_at DATETIME NULL"),
+            ("oee_field", "oee_field VARCHAR(40) NULL"),
+            ("oee_bucket", "oee_bucket VARCHAR(20) NULL"),
+            ("exclude_from_oee", "exclude_from_oee INT NULL DEFAULT 0"),
+        ):
+            _add_column_if_missing(bind, text, "operator_loss_logs", col, ddl)
+        try:
+            with bind.begin() as conn:
+                conn.execute(text(
+                    "UPDATE operator_loss_logs SET status='closed' WHERE status IS NULL"
+                ))
+                # Allow open sessions with 0 minutes
+                conn.execute(text(
+                    "ALTER TABLE operator_loss_logs MODIFY COLUMN minutes DECIMAL(10,2) NULL"
+                ))
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+
+ensure_mobile_schema()

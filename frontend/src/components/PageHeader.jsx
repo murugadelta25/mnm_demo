@@ -115,21 +115,27 @@ export default function PageHeader({ title, onRefresh, extra }) {
 
   const s = {
     bar: {
-      display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16,
-      flexWrap: 'wrap',
+      display: 'flex',
+      alignItems: 'center',
+      gap: 12,
+      marginBottom: 16,
+      flexWrap: 'nowrap',
+      minHeight: 'var(--titan-feature-title-height)',
+      contain: 'layout',
     },
     title: { color: t.text, fontSize: 18, margin: 0, whiteSpace: 'nowrap' },
-    extra: { flex: 1, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' },
+    extra: { flex: 1, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', minWidth: 0 },
     right: {
       marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10,
       background: t.surface, borderRadius: 10, padding: '6px 14px',
-      border: `1px solid ${t.border}`, flexShrink: 0,
+      border: `1px solid ${t.border}`, flexShrink: 0, minHeight: 42,
     },
     lastRefresh: { color: t.textFaint, fontSize: 11, whiteSpace: 'nowrap' },
     shiftBadge: {
       background: t.bg, color: t.brand, fontSize: 11, fontWeight: 700,
       padding: '2px 10px', borderRadius: 10, border: `1px solid ${t.brand}44`,
       whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 6,
+      minWidth: 88, minHeight: 22, justifyContent: 'center',
     },
     refreshBtn: {
       position: 'relative', width: 30, height: 30, borderRadius: 6,
@@ -138,7 +144,7 @@ export default function PageHeader({ title, onRefresh, extra }) {
       flexShrink: 0, opacity: timerPaused ? 0.8 : 1, padding: 0,
     },
     countdown: { color: t.textFaint, fontSize: 11, minWidth: 28, textAlign: 'right' },
-    clock: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 1 },
+    clock: { display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 1, minWidth: 72 },
     time: { color: t.accent, fontSize: 15, fontWeight: 700, fontVariantNumeric: 'tabular-nums', letterSpacing: '0.03em' },
     date: { color: t.textDim, fontSize: 10, whiteSpace: 'nowrap' },
   };
@@ -148,22 +154,29 @@ export default function PageHeader({ title, onRefresh, extra }) {
       <h3 style={{ ...s.title, color: t.text }}>{title}</h3>
       {extra && <div style={s.extra}>{extra}</div>}
       <div style={{ ...s.right, background: t.surface, border: `1px solid ${t.border}` }}>
-        {currentShift && (
-          <span style={{ ...s.shiftBadge, background: t.bg, borderColor: '#f59e0b44', color: '#f59e0b' }}>
-            <svg width={14} height={14} viewBox="0 0 14 14" aria-hidden="true">
-              <circle cx={7} cy={7} r={5.5} fill="none" stroke="#f59e0b55" strokeWidth={1.5} />
-              <circle
-                cx={7} cy={7} r={5.5} fill="none" stroke="#f59e0b" strokeWidth={1.5}
-                strokeDasharray={2 * Math.PI * 5.5}
-                strokeDashoffset={0}
-                strokeLinecap="round"
-                transform="rotate(-90 7 7)"
-              />
-              <circle cx={7} cy={3.2} r={0.9} fill="#f59e0b" />
-            </svg>
-            {currentShift.name}
-          </span>
-        )}
+        <span
+          style={{
+            ...s.shiftBadge,
+            background: t.bg,
+            borderColor: currentShift ? '#f59e0b44' : t.border,
+            color: currentShift ? '#f59e0b' : t.textFaint,
+            visibility: currentShift ? 'visible' : 'hidden',
+          }}
+          aria-hidden={!currentShift}
+        >
+          <svg width={14} height={14} viewBox="0 0 14 14" aria-hidden="true">
+            <circle cx={7} cy={7} r={5.5} fill="none" stroke="#f59e0b55" strokeWidth={1.5} />
+            <circle
+              cx={7} cy={7} r={5.5} fill="none" stroke="#f59e0b" strokeWidth={1.5}
+              strokeDasharray={2 * Math.PI * 5.5}
+              strokeDashoffset={0}
+              strokeLinecap="round"
+              transform="rotate(-90 7 7)"
+            />
+            <circle cx={7} cy={3.2} r={0.9} fill="#f59e0b" />
+          </svg>
+          {currentShift?.name || 'Shift'}
+        </span>
         <NotificationBell />
         <span style={{ ...s.lastRefresh, color: t.textFaint }}>↻ {fmtShort(lastRefresh)}</span>
         <button

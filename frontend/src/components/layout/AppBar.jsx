@@ -88,6 +88,9 @@ export default function AppBar({ onMenuClick, isIntegration = false, navVisible 
             fontSize: 14,
             letterSpacing: '0.5px',
             whiteSpace: 'nowrap',
+            minWidth: 140,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
           }}
         >
           {siteTitle}

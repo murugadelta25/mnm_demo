@@ -13,11 +13,14 @@ import AppBar from './AppBar';
 
 export default function AppShell() {
   const { theme } = useTheme();
-  const { config } = useConfig();
+  const { config, ready: configReady } = useConfig();
   const { isIntegration, navHidden, toggleNav } = useEmbed();
   const [navOpen, setNavOpen] = useState(true);
   const { isEnabled } = useFeatureFlags();
-  const needsFactorySetup = config?.factory?.configured !== true && isEnabled('settings.factory_setup');
+  const needsFactorySetup =
+    configReady &&
+    config?.factory?.configured !== true &&
+    isEnabled('settings.factory_setup');
 
   const sidebarExpanded = isIntegration ? !navHidden : navOpen;
   const onMenuClick = isIntegration ? toggleNav : () => setNavOpen((value) => !value);
@@ -59,22 +62,50 @@ export default function AppShell() {
           style={{
             flex: 1,
             minWidth: 0,
-            overflowY: 'auto',
+            minHeight: 0,
+            overflow: 'hidden',
             display: 'flex',
             flexDirection: 'column',
             position: 'relative',
             ...contentAreaStyle(theme),
           }}
         >
+          {/* Overlay — must not push LCP content (avoids CLS when config loads) */}
           {needsFactorySetup && !isIntegration && (
-            <div style={{
-              padding: '10px 16px', background: '#f59e0b22', borderBottom: `1px solid ${theme.border}`,
-              color: theme.text, fontSize: 13,
-            }}>
-              Complete your plant setup: <Link to="/factory-setup" style={{ color: theme.accent, fontWeight: 600 }}>Factory Setup</Link>
+            <div
+              className="titan-factory-banner"
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                right: 0,
+                zIndex: 40,
+                padding: '10px 16px',
+                background: theme.surface || '#0f172a',
+                borderBottom: `1px solid ${theme.border}`,
+                color: theme.text,
+                fontSize: 13,
+                boxShadow: '0 4px 12px rgba(0,0,0,0.18)',
+              }}
+            >
+              <span style={{ color: '#f59e0b', fontWeight: 700 }}>Plant setup incomplete. </span>
+              Complete your plant setup:{' '}
+              <Link to="/factory-setup" style={{ color: theme.accent, fontWeight: 600 }}>
+                Factory Setup
+              </Link>
             </div>
           )}
-          <div className="titan-page-outlet" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+          <div
+            className="titan-page-outlet"
+            style={{
+              flex: 1,
+              minHeight: 0,
+              overflowY: 'auto',
+              overflowX: 'hidden',
+              WebkitOverflowScrolling: 'touch',
+              scrollbarGutter: 'stable',
+            }}
+          >
             <Outlet />
           </div>
         </main>

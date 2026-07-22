@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useFeatureFlags } from '../context/FeatureFlagsContext';
@@ -17,6 +17,13 @@ export default function Sidebar({ expanded = true }) {
   const nav = useNavigate();
   const { theme: t } = useTheme();
   const [openGroups, setOpenGroups] = useState({});
+  const [animateWidth, setAnimateWidth] = useState(false);
+
+  // Avoid CLS from width transition on first paint; animate only after mount
+  useEffect(() => {
+    const id = window.requestAnimationFrame(() => setAnimateWidth(true));
+    return () => window.cancelAnimationFrame(id);
+  }, []);
 
   const { modules } = useFeatureFlags();
   const toggleGroup = (g) => setOpenGroups((p) => ({ ...p, [g]: !p[g] }));
@@ -56,16 +63,18 @@ export default function Sidebar({ expanded = true }) {
       className="titan-side-drawer"
       style={{
         width: navWidth,
+        minWidth: navWidth,
         opacity: expanded ? 1 : 0,
         display: 'flex',
         flexDirection: 'column',
         background: t.navBg || t.surface,
         borderRight: expanded ? `3px solid ${t.border}` : 'none',
-        transition: 'width 0.2s ease, opacity 0.2s ease',
+        transition: animateWidth ? 'width 0.2s ease, min-width 0.2s ease, opacity 0.2s ease' : 'none',
         flexShrink: 0,
         overflow: 'hidden',
         paddingTop: 8,
         paddingBottom: 8,
+        contain: 'layout',
       }}
     >
       <nav

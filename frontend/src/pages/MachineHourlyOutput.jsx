@@ -464,6 +464,14 @@ function MachineCard({ machine, slots, palette, layout, t, isLive, shiftLabel })
               }}>
                 {machine.machine_name}
               </div>
+              {machine.operator_name ? (
+                <div style={{ fontSize: metaFont, color: t.accent, fontWeight: 600, marginTop: 2 }}>
+                  Op: {machine.operator_name}
+                  {machine.operator_code && machine.operator_code !== machine.operator_name
+                    ? ` (${machine.operator_code})`
+                    : ''}
+                </div>
+              ) : null}
               <div style={{ fontSize: metaFont, color: t.textMuted, marginTop: 3 }}>
                 {machine.station_name}
                 {shiftLabel && <span style={{ marginLeft: 6, padding: '1px 6px', borderRadius: 4, background: t.accent + '22', color: t.accent, fontSize: 10, fontWeight: 600 }}>{shiftLabel}</span>}
@@ -489,6 +497,14 @@ function MachineCard({ machine, slots, palette, layout, t, isLive, shiftLabel })
               }}>
                 {machine.machine_name}
               </div>
+              {machine.operator_name ? (
+                <div style={{ fontSize: metaFont, color: t.accent, fontWeight: 600, marginTop: 2 }}>
+                  Op: {machine.operator_name}
+                  {machine.operator_code && machine.operator_code !== machine.operator_name
+                    ? ` (${machine.operator_code})`
+                    : ''}
+                </div>
+              ) : null}
               <div style={{ fontSize: metaFont, color: t.textMuted, marginTop: 3 }}>
                 {machine.station_name}
                 {shiftLabel && <span style={{ marginLeft: 6, padding: '1px 6px', borderRadius: 4, background: t.accent + '22', color: t.accent, fontSize: 10, fontWeight: 600 }}>{shiftLabel}</span>}

@@ -11,12 +11,12 @@ const ROLE_CFG = {
   superadmin:  { color: '#dc2626', label: 'Super Admin', icon: '🛡', desc: 'Full access + factory setup, data backup & archive' },
   admin:       { color: '#ef4444', label: 'Admin',       icon: '⚙', desc: 'Full access to all features except factory setup & backup' },
   supervisor:  { color: '#f59e0b', label: 'Supervisor',  icon: '📋', desc: 'Planning, data entry, QC incharge approval' },
-  operator:    { color: '#0ea5e9', label: 'Operator',    icon: '🔧', desc: 'Data entry, raise breakdown tickets, QC operator' },
+  operator:    { color: '#0ea5e9', label: 'Operator (web login)', icon: '🔧', desc: 'Optional web/tablet login account — shop-floor roster lives in Operator Management' },
   maintenance: { color: '#10b981', label: 'Maintenance', icon: '🛠', desc: 'Acknowledge and resolve breakdown tickets' },
   quality:     { color: '#8b5cf6', label: 'Quality',     icon: '✓', desc: 'QC inspection sheet — inspector approval' },
 };
 
-const INIT_FORM = { username: '', password: '', role: 'operator' };
+const INIT_FORM = { username: '', password: '', role: 'supervisor' };
 
 function PasswordInput({ value, onChange, placeholder = '', required = false, style = {} }) {
   const [visible, setVisible] = useState(false);
@@ -52,6 +52,7 @@ export default function UserManagement() {
   const [pwForm, setPwForm]     = useState({ id: null, current: '', next: '', confirm: '' });
   const [showPwForm, setShowPwForm] = useState(false);
   const [msg, setMsg]           = useState({ text: '', ok: true });
+  const [photoUploadId, setPhotoUploadId] = useState(null);
 
   const flash = (text, ok = true) => {
     setMsg({ text, ok });
@@ -97,13 +98,19 @@ export default function UserManagement() {
   };
 
   const deleteUser = async (id, username) => {
-    if (!window.confirm(`Delete user "${username}"?`)) return;
+    if (!window.confirm(
+      `Delete login user "${username}"?\n\n`
+      + 'Shop-floor Operator Directory records are kept. History is unlinked from this login.\n'
+      + 'Tickets raised by this user are reassigned to you.',
+    )) return;
     try {
       await api.delete(`/api/users/${id}`);
       flash('✅ User deleted');
       fetchUsers();
     } catch (err) {
-      flash('❌ ' + (err.response?.data?.detail || err.message), false);
+      const d = err.response?.data?.detail;
+      const msg = typeof d === 'string' ? d : (Array.isArray(d) ? d.map((x) => x.msg || x).join('; ') : err.message);
+      flash('❌ ' + msg, false);
     }
   };
 
@@ -122,6 +129,24 @@ export default function UserManagement() {
       setPwForm({ id: null, current: '', next: '', confirm: '' });
     } catch (err) {
       flash('❌ ' + (err.response?.data?.detail || err.message), false);
+    }
+  };
+
+  const uploadReferencePhoto = async (userId, file) => {
+    if (!file) return;
+    setPhotoUploadId(userId);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      await api.post(`/api/users/${userId}/reference-photo`, fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      flash('✅ Reference photo uploaded for mobile face verification');
+      fetchUsers();
+    } catch (err) {
+      flash('❌ ' + (err.response?.data?.detail || err.message), false);
+    } finally {
+      setPhotoUploadId(null);
     }
   };
 
@@ -145,7 +170,10 @@ export default function UserManagement() {
           </div>
         }
       />
-
+      <p style={{ color: t.textMuted, fontSize: 13, marginTop: -4, marginBottom: 12 }}>
+        Login accounts for web/admin roles. Shop-floor operators (roster, temp staff, large headcount) are managed under{' '}
+        <strong style={{ color: t.accent }}>Operator Management → Operator Directory</strong>.
+      </p>
       {msg.text && (
         <div style={{ padding: '10px 16px', borderRadius: 8, marginBottom: 12,
                       background: msg.ok ? '#10b98122' : '#ef444422',
@@ -269,13 +297,13 @@ export default function UserManagement() {
           <table style={s.table}>
             <thead>
               <tr>
-                {['#', 'Username', 'Role', 'Access Level', 'Actions'].map(h =>
+                {['#', 'Username', 'Role', 'Face ID', 'Access Level', 'Actions'].map(h =>
                   <th key={h} style={s.th}>{h}</th>)}
               </tr>
             </thead>
             <tbody>
               {users.length === 0 && (
-                <tr><td colSpan={5} style={{ ...s.td, textAlign: 'center', color: t.textFaint, padding: 32 }}>
+                <tr><td colSpan={6} style={{ ...s.td, textAlign: 'center', color: t.textFaint, padding: 32 }}>
                   No users found.
                 </td></tr>
               )}
@@ -306,10 +334,37 @@ export default function UserManagement() {
                       </span>
                     </td>
                     <td style={s.td}>
+                      {u.role === 'operator' ? (
+                        u.has_reference_photo ? (
+                          <span style={{ color: '#10b981', fontSize: 12, fontWeight: 600 }}>✓ Master photo</span>
+                        ) : (
+                          <span style={{ color: '#f59e0b', fontSize: 12, fontWeight: 600 }}>Not set</span>
+                        )
+                      ) : (
+                        <span style={{ color: t.textFaint, fontSize: 12 }}>—</span>
+                      )}
+                    </td>
+                    <td style={s.td}>
                       <span style={{ color: t.textMuted, fontSize: 12 }}>{cfg.desc}</span>
                     </td>
                     <td style={s.td}>
-                      <div style={{ display: 'flex', gap: 6 }}>
+                      <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                        {u.role === 'operator' && (
+                          <label style={{ ...s.miniBtn, background: '#6366f1', cursor: 'pointer', display: 'inline-block' }}>
+                            {photoUploadId === u.id ? '…' : '📷 Ref photo'}
+                            <input
+                              type="file"
+                              accept="image/*"
+                              style={{ display: 'none' }}
+                              disabled={photoUploadId === u.id}
+                              onChange={(e) => {
+                                const f = e.target.files?.[0];
+                                if (f) uploadReferencePhoto(u.id, f);
+                                e.target.value = '';
+                              }}
+                            />
+                          </label>
+                        )}
                         <button style={{ ...s.miniBtn, background: t.accent }}
                           onClick={() => openEdit(u)}>✏ Edit</button>
                         <button
@@ -356,7 +411,7 @@ export default function UserManagement() {
                 { feature: 'Acknowledge Breakdown',  admin: true,  supervisor: false, operator: false, maintenance: true  },
                 { feature: 'Resolve Breakdown',      admin: true,  supervisor: false, operator: false, maintenance: true  },
                 { feature: 'Email Alerts Config',    admin: true,  supervisor: true,  operator: false, maintenance: false },
-                { feature: 'Machine Configuration',  admin: true,  supervisor: false, operator: false, maintenance: false },
+                { feature: 'Machine Configuration',  admin: true,  supervisor: true,  operator: false, maintenance: false },
                 { feature: 'User Management',        admin: true,  supervisor: false, operator: false, maintenance: false },
                 { feature: 'System Configuration',   admin: true,  supervisor: false, operator: false, maintenance: false },
               ].map(row => (

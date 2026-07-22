@@ -4,6 +4,7 @@ import { assetUrl } from '../api/config';
 import { useTheme } from '../context/ThemeContext';
 import { pageClass } from '../themes/tileHelpers';
 import { useConfig } from '../context/ConfigContext';
+import { useAuth } from '../context/AuthContext';
 import { getFactoryLines } from '../utils/factoryHelpers';
 import PageHeader from '../components/PageHeader';
 
@@ -19,6 +20,8 @@ const STATUS_CFG = {
 export default function MachineConfig() {
   const { theme: t } = useTheme();
   const { config } = useConfig();
+  const { user } = useAuth();
+  const canEdit = ['admin', 'superadmin'].includes(user?.role);
   const factoryLines = useMemo(() => getFactoryLines(config), [config]);
   const [stations, setStations] = useState([]);
   const [machines, setMachines] = useState([]);
@@ -140,7 +143,7 @@ export default function MachineConfig() {
     <div className={pageClass(t)} style={{ padding: 20, background: t.bg, minHeight: 'calc(100vh - 52px)', color: t.text }}>
       <PageHeader
         title="⚙ MACHINE CONFIGURATION"
-        subtitle="Manage machine fleet — stations and lines are configured in Factory Setup"
+        subtitle="Manage machine fleet — use Machine ID when setting up operator tablets"
         onRefresh={() => { fetchStations(); fetchMachines(); }}
       />
 
@@ -152,10 +155,37 @@ export default function MachineConfig() {
         </div>
       )}
 
-      {showMachineForm && (
+      <div style={{
+        padding: '10px 14px', borderRadius: 8, marginBottom: 12,
+        background: t.accent + '14', border: `1px solid ${t.accent}55`,
+        color: t.text, fontSize: 12, lineHeight: 1.45,
+      }}>
+        Tablet / mobile setup: enter the numeric <strong>Machine ID</strong> (not the name like CN40).
+        Example: CN40 → ID <strong>1</strong>, CN41 → ID <strong>2</strong>.
+      </div>
+
+      {showMachineForm && canEdit && (
         <div style={s.card}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                <h4 style={s.cardTitle}>{editMachineId ? '✏ Edit Machine' : '➕ Add New Machine'}</h4>
+                <div>
+                  <h4 style={{ ...s.cardTitle, marginBottom: 4 }}>
+                    {editMachineId ? '✏ Edit Machine' : '➕ Add New Machine'}
+                  </h4>
+                  {editMachineId && (
+                    <div style={{ fontSize: 12, color: t.textMuted }}>
+                      Machine ID:{' '}
+                      <span style={{
+                        display: 'inline-block', padding: '2px 8px', borderRadius: 6,
+                        background: t.accent + '22', color: t.accent, fontWeight: 700, fontFamily: 'monospace',
+                      }}>
+                        {editMachineId}
+                      </span>
+                      <span style={{ marginLeft: 8, color: t.textFaint }}>
+                        (use this value on the operator tablet)
+                      </span>
+                    </div>
+                  )}
+                </div>
                 <button style={s.closeBtn} onClick={() => setShowMachineForm(false)}>✕</button>
               </div>
               <form onSubmit={saveMachine}>
@@ -255,13 +285,15 @@ export default function MachineConfig() {
       <div style={s.card}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
               <h4 style={s.cardTitle}>Machine Fleet ({machines.length})</h4>
-              <button style={s.addBtn} onClick={openAddMachine}>+ Add Machine</button>
+              {canEdit && (
+                <button style={s.addBtn} onClick={openAddMachine}>+ Add Machine</button>
+              )}
             </div>
             <div style={{ overflowX: 'auto' }}>
               <table style={s.table}>
                 <thead>
                   <tr>
-                    {['Image','Machine','Station','Type','Make / Model','Tonnage','Location','Status','Actions'].map(h =>
+                    {['ID','Image','Machine','Station','Type','Make / Model','Tonnage','Location','Status','Actions'].map(h =>
                       <th key={h} style={s.th}>{h}</th>)}
                   </tr>
                 </thead>
@@ -275,6 +307,20 @@ export default function MachineConfig() {
                     const sc = STATUS_CFG[m.status] || STATUS_CFG.idle;
                     return (
                       <tr key={m.id}>
+                        <td style={s.td}>
+                          <span
+                            title="Use this Machine ID on the operator tablet"
+                            style={{
+                              display: 'inline-block', minWidth: 28, textAlign: 'center',
+                              padding: '4px 10px', borderRadius: 8, fontSize: 14, fontWeight: 800,
+                              fontFamily: 'ui-monospace, Consolas, monospace',
+                              background: t.accent + '22', color: t.accent,
+                              border: `1px solid ${t.accent}66`,
+                            }}
+                          >
+                            {m.id}
+                          </span>
+                        </td>
                         <td style={s.td}>
                           <div style={{ width: 56, height: 40, borderRadius: 6, overflow: 'hidden',
                                         background: t.surface2, border: `1px solid ${t.border}`,
@@ -309,10 +355,14 @@ export default function MachineConfig() {
                           </span>
                         </td>
                         <td style={s.td}>
-                          <div style={{ display: 'flex', gap: 6 }}>
-                            <button style={{ ...s.miniBtn, background: t.accent }} onClick={() => openEditMachine(m)}>✏ Edit</button>
-                            <button style={{ ...s.miniBtn, background: '#ef4444' }} onClick={() => deleteMachine(m.id)}>🗑</button>
-                          </div>
+                          {canEdit ? (
+                            <div style={{ display: 'flex', gap: 6 }}>
+                              <button style={{ ...s.miniBtn, background: t.accent }} onClick={() => openEditMachine(m)}>✏ Edit</button>
+                              <button style={{ ...s.miniBtn, background: '#ef4444' }} onClick={() => deleteMachine(m.id)}>🗑</button>
+                            </div>
+                          ) : (
+                            <span style={{ color: t.textFaint, fontSize: 12 }}>View only</span>
+                          )}
                         </td>
                       </tr>
                     );

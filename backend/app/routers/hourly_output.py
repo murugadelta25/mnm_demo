@@ -43,20 +43,72 @@ def _previous_shift_info(cfg: dict, current_shift_id: str, entry_date: date):
     return ids[idx - 1], entry_date
 
 
+def _shift_order_index(cfg: dict, shift_id: str) -> int:
+    shifts = [s for s in cfg.get('shifts', []) if s.get('enabled', True)]
+    ordered = sorted(shifts, key=lambda s: _parse_mins(s['start']))
+    ids = [s['id'] for s in ordered]
+    try:
+        return ids.index(shift_id)
+    except ValueError:
+        return -1
+
+
+def _find_continuous_same_part_prior(
+    db: Session, machine_id: int, model_variant: str,
+    entry_date: date, shift_id: str, cfg: dict, lookback_days: int = 14,
+):
+    """Most recent started prior plan on this machine. Same part = continuous.
+
+    Continuity means no intervening different part was run on the machine.
+    Day-1 of a new part still requires Start / MCR; subsequent same-part
+    shifts/days auto-start. Pending-only plans do not break continuity.
+    """
+    since = entry_date - timedelta(days=lookback_days)
+    candidates = (
+        db.query(ProductionPlan)
+        .filter(
+            ProductionPlan.machine_id == machine_id,
+            ProductionPlan.plan_date >= since,
+            ProductionPlan.plan_date <= entry_date,
+            ProductionPlan.status.in_(['running', 'completed', 'paused']),
+        )
+        .all()
+    )
+    cur_ord = _shift_order_index(cfg, shift_id)
+
+    def _sort_key(p):
+        return (p.plan_date, _shift_order_index(cfg, p.shift), p.id or 0)
+
+    prior = [
+        p for p in candidates
+        if (
+            p.plan_date < entry_date
+            or (
+                p.plan_date == entry_date
+                and _shift_order_index(cfg, p.shift) < cur_ord
+            )
+        )
+    ]
+    if not prior:
+        return None
+
+    latest = max(prior, key=_sort_key)
+    if not latest.model_variant or latest.model_variant != model_variant:
+        return None
+    return latest
+
+
 def auto_transition_shift_plans(db: Session, entry_date: date, shift_id: str, cfg: dict):
-    """Auto-start plans when the same part continues from the previous shift.
+    """Auto-start plans when the same part continues from a prior shift/day.
 
     Rules:
-    - If the previous shift had a running/completed plan with the same
-      model_variant on the same machine, the current shift's pending plan
-      is auto-started (no model-change request needed).
-    - The previous shift's still-running plan is auto-completed.
-    - Works across days (Shift C → next-day Shift A).
+    - If the most recent prior plan on the machine used the same model_variant
+      (running/completed/paused), the current pending plan is auto-started
+      (no model-change request needed).
+    - Still-running prior plan is auto-completed.
+    - Works across days and overnight shift boundaries (C → next-day A).
+    - New / changed parts remain pending until Start / MCR.
     """
-    prev_shift_id, prev_date = _previous_shift_info(cfg, shift_id, entry_date)
-    if not prev_shift_id:
-        return
-
     current_plans = (
         db.query(ProductionPlan)
         .filter(
@@ -75,17 +127,24 @@ def auto_transition_shift_plans(db: Session, entry_date: date, shift_id: str, cf
         if not plan.machine_id or not plan.model_variant:
             continue
 
-        prev_plan = (
-            db.query(ProductionPlan)
-            .filter(
-                ProductionPlan.machine_id == plan.machine_id,
-                ProductionPlan.plan_date == prev_date,
-                ProductionPlan.shift == prev_shift_id,
-                ProductionPlan.model_variant == plan.model_variant,
-                ProductionPlan.status.in_(['running', 'completed', 'paused']),
-            )
-            .first()
+        prev_plan = _find_continuous_same_part_prior(
+            db, plan.machine_id, plan.model_variant, entry_date, shift_id, cfg,
         )
+        if not prev_plan:
+            # Fallback: immediate previous shift only (legacy path)
+            prev_shift_id, prev_date = _previous_shift_info(cfg, shift_id, entry_date)
+            if prev_shift_id:
+                prev_plan = (
+                    db.query(ProductionPlan)
+                    .filter(
+                        ProductionPlan.machine_id == plan.machine_id,
+                        ProductionPlan.plan_date == prev_date,
+                        ProductionPlan.shift == prev_shift_id,
+                        ProductionPlan.model_variant == plan.model_variant,
+                        ProductionPlan.status.in_(['running', 'completed', 'paused']),
+                    )
+                    .first()
+                )
         if not prev_plan:
             continue
 
@@ -940,6 +999,7 @@ def _merge_micro_gaps(segments: list, gap_sec: int = MICRO_GAP_SEC) -> list:
     n = len(segments)
     while i < n:
         if (i + 2 < n
+                and not segments[i].get('prior')
                 and segments[i]['state'] == 'running'
                 and segments[i + 1]['state'] == 'ld_unld'
                 and segments[i + 1]['seconds'] < gap_sec
@@ -949,6 +1009,7 @@ def _merge_micro_gaps(segments: list, gap_sec: int = MICRO_GAP_SEC) -> list:
                 'start': segments[i]['start'],
                 'end': segments[i + 2]['end'],
                 'seconds': segments[i]['seconds'] + segments[i + 1]['seconds'] + segments[i + 2]['seconds'],
+                'prior': False,
             }
             i += 3
             while (i + 1 < n
@@ -1342,6 +1403,9 @@ def build_hourly_output(
     for mcr in mcrs_all:
         mcr_by_machine.setdefault(mcr.machine_id, []).append(mcr)
 
+    from ..operator_presence import get_live_operator_map, operator_fields_for_machine
+    _hourly_op_map = get_live_operator_map(db, entry_date=entry_date, shift_id=shift)
+
     result_machines = []
     for m in machines:
         station = db.query(Station).filter(Station.id == m.station_id).first()
@@ -1438,6 +1502,9 @@ def build_hourly_output(
             break_cfg=break_cfg,
         )
 
+        from ..operator_presence import operator_fields_for_machine
+        _op = operator_fields_for_machine(_hourly_op_map, m.id)
+
         result_machines.append({
             'machine_id': m.id,
             'machine_name': m.name,
@@ -1455,6 +1522,7 @@ def build_hourly_output(
             'process_time': machine_plans[0].process_time if machine_plans else 0,
             'loading_unloading': machine_plans[0].loading_unloading if machine_plans else 0,
             'cycle_time_source': 'production_plan' if machine_plans else ('oee' if machine_oee else 'none'),
+            **_op,
             'states': {
                 'running': running_cum,
                 'ld_unld': ld_cum,

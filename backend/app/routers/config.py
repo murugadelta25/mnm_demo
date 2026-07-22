@@ -75,6 +75,10 @@ DEFAULT_CONFIG = {
         "max_backups": 10,
         "last_backup_at": None,
     },
+    # Optional tablet / mobile coupling — OFF = web app runs independently
+    "mobile_integration": {
+        "enabled": True,
+    },
 }
 
 class ConfigPayload(BaseModel):
@@ -112,6 +116,9 @@ def merge_config(stored: dict) -> dict:
     backup = stored.get("backup") or {}
     default_backup = DEFAULT_CONFIG["backup"]
     merged["backup"] = {**default_backup, **backup}
+    mi = stored.get("mobile_integration") or {}
+    default_mi = DEFAULT_CONFIG["mobile_integration"]
+    merged["mobile_integration"] = {**default_mi, **mi}
     return merged
 
 
@@ -155,6 +162,21 @@ def get_network_info():
     return build_network_payload()
 
 
+@router.get("/mobile-integration")
+def get_mobile_integration_status(db: Session = Depends(get_db)):
+    """Public flag for tablet apps — whether coupling with the web PMS is enabled."""
+    from ..mobile_integration import is_mobile_integration_enabled
+    enabled = is_mobile_integration_enabled(db)
+    return {
+        "enabled": enabled,
+        "message": (
+            "Mobile app integration is enabled."
+            if enabled
+            else "Mobile app integration is disabled in Configuration. Web app runs independently."
+        ),
+    }
+
+
 @router.get("/")
 def get_config(db: Session = Depends(get_db), _=Depends(get_current_user)):
     return _load_config(db)
@@ -184,6 +206,7 @@ def save_config(payload: ConfigPayload, db: Session = Depends(get_db), _=Depends
         "factory",
         "backup",
         "featureModules",
+        "mobile_integration",
     )
     for key in preserve_keys:
         if key not in incoming or incoming.get(key) in (None, {}):
@@ -196,6 +219,13 @@ def save_config(payload: ConfigPayload, db: Session = Depends(get_db), _=Depends
             **DEFAULT_CONFIG["loss_tracker_limits"],
             **existing["loss_tracker_limits"],
             **incoming["loss_tracker_limits"],
+        }
+
+    if isinstance(incoming.get("mobile_integration"), dict):
+        incoming["mobile_integration"] = {
+            **DEFAULT_CONFIG["mobile_integration"],
+            **(existing.get("mobile_integration") or {}),
+            **incoming["mobile_integration"],
         }
 
     if row:

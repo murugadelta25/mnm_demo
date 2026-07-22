@@ -119,6 +119,28 @@
       ]
     },
     {
+      "id": "operators",
+      "label": "Operators",
+      "navIcon": "users",
+      "roles": ["admin", "superadmin", "supervisor", "operator"],
+      "items": [
+        {
+          "id": "operators.management",
+          "label": "Operator Management",
+          "path": "/operators",
+          "navIcon": "users",
+          "roles": ["admin", "superadmin", "supervisor"]
+        },
+        {
+          "id": "operators.my_work_hours",
+          "label": "My Work Hours",
+          "path": "/my-work-hours",
+          "navIcon": "hourlyOutput",
+          "roles": ["admin", "superadmin", "supervisor", "operator"]
+        }
+      ]
+    },
+    {
       "id": "settings",
       "label": "Settings",
       "navIcon": "settings",
@@ -157,7 +179,7 @@
           "label": "Machines",
           "path": "/machines",
           "navIcon": "machines",
-          "roles": ["admin", "superadmin"]
+          "roles": ["admin", "superadmin", "supervisor"]
         },
         {
           "id": "settings.factory_setup",

@@ -8,7 +8,7 @@ $BackendDir = Join-Path $ProjectDir "backend"
 $FrontendDir = Join-Path $ProjectDir "frontend"
 $BackendPort = 8010
 $FrontendPort = 5174
-$TotalSteps = 7
+$TotalSteps = 8
 
 function Get-PrimaryLanIp {
     param([string[]]$Ips, [string]$ProjectDir)
@@ -134,13 +134,143 @@ function Invoke-MySql {
     return $output
 }
 
+function Get-FileHashHex {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return "" }
+    return (Get-FileHash -Path $Path -Algorithm SHA256).Hash
+}
+
+function Test-VenvBelongsToProject {
+    param([string]$VenvDir, [string]$ExpectedBackendDir)
+    $cfg = Join-Path $VenvDir "pyvenv.cfg"
+    if (-not (Test-Path $cfg)) { return $false }
+    $raw = Get-Content $cfg -Raw
+    # Reject venvs created for another project (common when folders were copied)
+    if ($raw -match '(?im)^command\s*=\s*(.+)$') {
+        $cmd = $Matches[1].Trim()
+        $expectedNorm = [System.IO.Path]::GetFullPath($ExpectedBackendDir).TrimEnd('\')
+        if ($cmd -and ($cmd -notlike "*$expectedNorm*")) {
+            return $false
+        }
+    }
+    $py = Join-Path $VenvDir "Scripts\python.exe"
+    return (Test-Path $py)
+}
+
+function Ensure-BackendDependencies {
+    # Prefer .venv (avoids locked legacy backend\venv from old runs / other projects)
+    $venvDir = Join-Path $BackendDir ".venv"
+    $legacyVenv = Join-Path $BackendDir "venv"
+    $venvPython = Join-Path $venvDir "Scripts\python.exe"
+    $reqFile = Join-Path $BackendDir "requirements.txt"
+    $stampFile = Join-Path $venvDir ".requirements.sha256"
+    $expectedBackend = [System.IO.Path]::GetFullPath($BackendDir)
+
+    if (-not (Test-Path $reqFile)) {
+        throw "backend\requirements.txt not found"
+    }
+
+    $py = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $py) { throw "python not found on PATH. Install Python 3.11+ and retry." }
+
+    $venvOk = (Test-Path $venvPython) -and (Test-VenvBelongsToProject -VenvDir $venvDir -ExpectedBackendDir $expectedBackend)
+    if (-not $venvOk) {
+        if (Test-Path $venvDir) {
+            Write-Host "  Replacing stale backend\.venv..." -ForegroundColor Yellow
+            $bakName = ".venv.stale_{0}" -f (Get-Date -Format "yyyyMMdd_HHmmss")
+            try {
+                Rename-Item -Path $venvDir -NewName $bakName -ErrorAction Stop
+            } catch {
+                throw "backend\.venv is locked. Close Backend windows and retry. ($($_.Exception.Message))"
+            }
+        }
+        Write-Host "  Creating Python venv for this project (backend\.venv)..." -ForegroundColor Yellow
+        python -m venv $venvDir
+        if (-not (Test-Path $venvPython)) { throw "Failed to create backend\.venv" }
+        if (Test-Path $stampFile) { Remove-Item -Force $stampFile -ErrorAction SilentlyContinue }
+    }
+
+    if (Test-Path $legacyVenv) {
+        Write-Host "  Note: legacy backend\venv ignored (using backend\.venv). You can delete backend\venv after closing old Backend windows." -ForegroundColor DarkGray
+    }
+
+    $reqHash = Get-FileHashHex -Path $reqFile
+    $prevHash = if (Test-Path $stampFile) { (Get-Content $stampFile -Raw).Trim() } else { "" }
+    $needInstall = ($reqHash -ne $prevHash)
+
+    if (-not $needInstall) {
+        $null = & $venvPython -c "import fastapi, uvicorn, cv2, numpy; print('ok')" 2>&1
+        if ($LASTEXITCODE -ne 0) { $needInstall = $true }
+    }
+
+    if ($needInstall) {
+        Write-Host "  Installing backend requirements.txt into backend\.venv..." -ForegroundColor Yellow
+        & $venvPython -m pip install -r $reqFile | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "pip install -r requirements.txt failed" }
+        Set-Content -Path $stampFile -Value $reqHash -Encoding ASCII
+        Write-StepOk "Backend Python packages installed"
+    } else {
+        Write-StepOk "Backend requirements already satisfied"
+    }
+
+    return $venvPython
+}
+
+function Ensure-FrontendDependencies {
+    $pkgFile = Join-Path $FrontendDir "package.json"
+    $lockFile = Join-Path $FrontendDir "package-lock.json"
+    $nodeModules = Join-Path $FrontendDir "node_modules"
+    $viteBin = Join-Path $FrontendDir "node_modules\.bin\vite.cmd"
+    $stampFile = Join-Path $FrontendDir "node_modules\.package-lock.sha256"
+
+    if (-not (Test-Path $pkgFile)) {
+        throw "frontend\package.json not found"
+    }
+
+    $npm = Get-Command npm -ErrorAction SilentlyContinue
+    if (-not $npm) { throw "npm not found on PATH. Install Node.js and retry." }
+
+    $lockHash = if (Test-Path $lockFile) { Get-FileHashHex -Path $lockFile } else { Get-FileHashHex -Path $pkgFile }
+    $prevHash = if (Test-Path $stampFile) { (Get-Content $stampFile -Raw).Trim() } else { "" }
+    $needInstall = ($lockHash -ne $prevHash) -or (-not (Test-Path $viteBin)) -or (-not (Test-Path $nodeModules))
+
+    if ($needInstall) {
+        Write-Host "  Installing frontend npm packages..." -ForegroundColor Yellow
+        Push-Location $FrontendDir
+        try {
+            npm install
+            if ($LASTEXITCODE -ne 0) { throw "npm install failed with exit code $LASTEXITCODE" }
+        } finally {
+            Pop-Location
+        }
+        if (-not (Test-Path $nodeModules)) {
+            throw "frontend\node_modules missing after npm install"
+        }
+        New-Item -ItemType Directory -Force -Path $nodeModules | Out-Null
+        Set-Content -Path $stampFile -Value $lockHash -Encoding ASCII
+        Write-StepOk "Frontend npm packages installed"
+    } else {
+        Write-StepOk "Frontend dependencies already satisfied"
+    }
+}
+
 Write-BannerLine
 Write-Host "  EAP PMS - Starting Application" -ForegroundColor Cyan
 Write-BannerLine
 Write-Host ""
 
-# [1/5] MySQL
-Write-StepHeader 1 "Checking MySQL..."
+# [1/8] Dependencies (always first)
+Write-StepHeader 1 "Checking / installing dependencies..."
+try {
+    $venvPython = Ensure-BackendDependencies
+    Ensure-FrontendDependencies
+} catch {
+    Write-StepFail ("Dependency setup failed: {0}" -f $_.Exception.Message)
+    exit 1
+}
+
+# [2/8] MySQL
+Write-StepHeader 2 "Checking MySQL..."
 $mysqlExe = Get-MySqlExe
 $dbCreds = Get-DatabaseCredentials
 if (-not $mysqlExe) {
@@ -155,13 +285,11 @@ try {
     exit 1
 }
 
-# [2/5] Database
-Write-StepHeader 2 "Setting up database..."
-$venvPython = Join-Path $BackendDir "venv\Scripts\python.exe"
+# [3/8] Database
+Write-StepHeader 3 "Setting up database..."
 if (-not (Test-Path $venvPython)) {
-    Write-Host "  Creating Python venv..." -ForegroundColor Yellow
-    python -m venv (Join-Path $BackendDir "venv")
-    & (Join-Path $BackendDir "venv\Scripts\pip.exe") install -r (Join-Path $BackendDir "requirements.txt")
+    Write-StepFail "backend\venv missing. Dependency step should have created it."
+    exit 1
 }
 $initScript = Join-Path $ProjectDir "database\init_database.ps1"
 if (-not (Test-Path (Join-Path $ProjectDir "database\db.config.json"))) {
@@ -185,8 +313,8 @@ try {
     exit 1
 }
 
-# [3/5] Network + frontend env (Vite proxy mode for LAN access)
-Write-StepHeader 3 "Configuring network..."
+# [4/8] Network + frontend env (Vite proxy mode for LAN access)
+Write-StepHeader 4 "Configuring network..."
 $networkIPs = Get-NetworkIPs
 $frontendEnv = Join-Path $FrontendDir ".env"
 $frontendEnvContent = @"
@@ -201,11 +329,11 @@ if ($networkIPs.Count -eq 0) {
     Write-StepOk ("Network configured ({0}, Vite proxy enabled)" -f ($networkIPs -join ', '))
 }
 
-# [4/5] Backend
-Write-StepHeader 4 "Starting backend on port $BackendPort..."
+# [5/8] Backend — always use this project's backend\venv
+Write-StepHeader 5 "Starting backend on port $BackendPort..."
 Start-Process powershell -ArgumentList @(
     "-NoExit", "-Command",
-    "cd '$BackendDir'; .\venv\Scripts\Activate.ps1; uvicorn app.main:app --host 0.0.0.0 --port $BackendPort --reload"
+    "cd '$BackendDir'; & '.\.venv\Scripts\Activate.ps1'; python -m uvicorn app.main:app --host 0.0.0.0 --port $BackendPort --reload"
 ) -WindowStyle Normal
 Start-Sleep -Seconds 3
 $backendOk = $false
@@ -226,16 +354,8 @@ if ($backendOk) {
     exit 1
 }
 
-# [5/6] Frontend
-Write-StepHeader 5 "Starting frontend on port $FrontendPort..."
-$viteBin = Join-Path $FrontendDir "node_modules\.bin\vite.cmd"
-if (-not (Test-Path $viteBin)) {
-    Write-Host "  Installing frontend dependencies..." -ForegroundColor Yellow
-    Push-Location $FrontendDir
-    npm install
-    if ($LASTEXITCODE -ne 0) { throw "npm install failed with exit code $LASTEXITCODE" }
-    Pop-Location
-}
+# [6/8] Frontend
+Write-StepHeader 6 "Starting frontend on port $FrontendPort..."
 Start-Process powershell -ArgumentList @(
     "-NoExit", "-Command",
     "cd '$FrontendDir'; npm run dev"
@@ -258,8 +378,8 @@ if ($frontendOk) {
     exit 1
 }
 
-# [6/7] nginx — standard URL din.eappms
-Write-StepHeader 6 "Configuring standard URL (nginx reverse proxy)..."
+# [7/8] nginx — standard URL din.eappms
+Write-StepHeader 7 "Configuring standard URL (nginx reverse proxy)..."
 $domainCfg = $null
 try {
     $domainCfg = & (Join-Path $ProjectDir "scripts\Install-Nginx.ps1") -ProjectDir $ProjectDir -BackendPort $BackendPort -FrontendPort $FrontendPort
@@ -275,8 +395,8 @@ if ($domainCfg -and $domainCfg.HostsRegistered) {
     $hostsReady = $true
 }
 
-# [7/7] LAN DNS — din.eappms for all devices on the network
-Write-StepHeader 7 "Starting LAN DNS (network-wide din.eappms)..."
+# [8/8] LAN DNS — din.eappms for all devices on the network
+Write-StepHeader 8 "Starting LAN DNS (network-wide din.eappms)..."
 $dnsCfg = $null
 $prevEaDns = $ErrorActionPreference
 $ErrorActionPreference = "Continue"

@@ -35,10 +35,48 @@ body {
   background-position: var(--content-bg-position, center center);
   background-repeat: var(--content-bg-repeat, no-repeat);
   background-attachment: var(--content-bg-attachment, scroll);
+  overflow-anchor: none;
+}
+
+.titan-page-outlet {
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll-thumb, rgba(148, 163, 184, 0.55)) transparent;
+}
+
+.titan-page-outlet::-webkit-scrollbar {
+  width: 10px;
+}
+
+.titan-page-outlet::-webkit-scrollbar-thumb {
+  background-color: var(--scroll-thumb, rgba(148, 163, 184, 0.55));
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+.titan-page-outlet::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 .titan-page-outlet > * {
   background: var(--page-bg, var(--bg, inherit)) !important;
+}
+
+.titan-side-drawer {
+  contain: layout;
+}
+
+.titan-app-bar {
+  contain: layout;
+}
+
+.titan-factory-banner {
+  /* Absolute overlay from AppShell — keeps LCP element stable */
+  pointer-events: auto;
 }
 
 [data-theme='techBlue'] .titan-page-outlet > * {
