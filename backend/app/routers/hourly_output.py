@@ -533,6 +533,8 @@ def _slot_parts_in_windows(
     for seg in segments:
         if seg['state'] not in state_filter:
             continue
+        if seg.get('prior'):
+            continue
         if seg['start'] < slot_start or seg['start'] >= slot_end:
             continue
         for w in var_windows:
@@ -895,11 +897,16 @@ def _build_status_segments(
         if seg_end <= seg_start:
             continue
         dur = int((seg_end - seg_start).total_seconds())
+        # Mark segments whose status was carried over from before the shift start
+        # (prior log entry). These represent machine state at shift open, not a
+        # completed cycle within this shift, so they must not be counted as parts.
+        is_prior_carryover = (i == 0 and prior is not None and t_start == shift_start)
         raw_segments.append({
             'state': _classify(status, dur, ld_unld_max_sec),
             'start': seg_start,
             'end': seg_end,
             'seconds': dur,
+            'prior': is_prior_carryover,
         })
 
     raw_segments = _merge_micro_gaps(raw_segments, micro_gap_sec)
@@ -999,14 +1006,18 @@ def _cfg_micro_gap_sec(cfg: Optional[dict]) -> int:
 def _countable_running_segments(segments: list, process_time_sec: Optional[float], ratio: float = 0.3) -> int:
     """Count running segments only when they cross the configured threshold.
 
-    A short micro-run before a stoppage should not increment the part total.
-    When no process time is available, preserve the existing behavior and count all running segments.
+    Segments tagged 'prior=True' are carry-over state from before the shift
+    and are never counted as completed parts.
     """
     if not process_time_sec or process_time_sec <= 0:
-        return sum(1 for seg in segments if seg.get('state') == 'running')
+        return sum(1 for seg in segments
+                   if seg.get('state') == 'running' and not seg.get('prior'))
 
     threshold_sec = max(1, int(float(process_time_sec) * ratio))
-    return sum(1 for seg in segments if seg.get('state') == 'running' and seg.get('seconds', 0) >= threshold_sec)
+    return sum(1 for seg in segments
+               if seg.get('state') == 'running'
+               and not seg.get('prior')
+               and seg.get('seconds', 0) >= threshold_sec)
 
 
 def sync_plan_actuals_from_status_logs(
@@ -1380,6 +1391,7 @@ def build_hourly_output(
             relevant = [
                 seg for seg in segments
                 if seg['state'] in state_filter
+                and not seg.get('prior')
                 and seg['start'] >= shift_start
                 and seg['start'] < slot_end_dt
             ]
