@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+from typing import Optional
 
 from ..models import SiteConfig, get_db
 from ..auth import require_role, require_superadmin
@@ -114,6 +115,95 @@ def restore_from_backup(filename: str, _=Depends(require_superadmin())):
         return result
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Backup not found")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ── Historical archive (remote LAN DB, ~2 month hot retention) ──────────────
+
+class TableArchiveSetting(BaseModel):
+    name: str
+    enabled: bool = False
+    retention_days: int = Field(default=60, ge=30, le=3650)
+
+
+class HistoryArchiveConfigPayload(BaseModel):
+    enabled: bool = False
+    retention_days: int = Field(default=60, ge=30, le=3650)
+    interval_days: int = Field(default=1, ge=1, le=30)
+    host: str = ""
+    port: int = Field(default=3306, ge=1, le=65535)
+    user: str = ""
+    password: Optional[str] = None  # omit / blank = keep existing
+    database: str = "eap_pms_archive"
+    tables: Optional[list[TableArchiveSetting]] = None
+
+
+@router.get("/history/config")
+def get_history_archive_config(db: Session = Depends(get_db), _=Depends(require_superadmin())):
+    from ..history_archive import public_history_status
+    return public_history_status(db)
+
+
+@router.put("/history/config")
+def update_history_archive_config(
+    payload: HistoryArchiveConfigPayload,
+    db: Session = Depends(get_db),
+    _=Depends(require_superadmin()),
+):
+    from ..history_archive import (
+        TABLE_CATALOG,
+        _get_site_history_cfg,
+        _save_site_history_cfg,
+        public_history_status,
+        get_archive_engine,
+    )
+    current = _get_site_history_cfg(db)
+    current["enabled"] = payload.enabled
+    current["retention_days"] = payload.retention_days
+    current["interval_days"] = payload.interval_days
+    current["host"] = (payload.host or "").strip()
+    current["port"] = payload.port
+    current["user"] = (payload.user or "").strip()
+    current["database"] = (payload.database or "eap_pms_archive").strip()
+    if payload.password is not None and payload.password != "":
+        current["password"] = payload.password
+    if payload.tables is not None:
+        tables_cfg = {}
+        for t in payload.tables:
+            if t.name not in TABLE_CATALOG:
+                continue
+            tables_cfg[t.name] = {
+                "enabled": bool(t.enabled),
+                "retention_days": int(t.retention_days),
+            }
+        current["tables"] = tables_cfg
+    _save_site_history_cfg(db, current)
+    try:
+        get_archive_engine(current, force_refresh=True)
+    except Exception:
+        pass
+    from ..scheduler_service import reload_history_archive_schedule
+    reload_history_archive_schedule(db)
+    return public_history_status(db)
+
+
+@router.post("/history/test")
+def test_history_archive_connection(db: Session = Depends(get_db), _=Depends(require_superadmin())):
+    from ..history_archive import ensure_archive_schema, public_history_status
+    try:
+        schema = ensure_archive_schema()
+        status = public_history_status(db)
+        return {"ok": True, "schema": schema, "status": status}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/history/run")
+def run_history_archive_now(db: Session = Depends(get_db), _=Depends(require_superadmin())):
+    from ..history_archive import run_history_archive
+    try:
+        return run_history_archive(db, triggered_by="manual")
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 

@@ -85,6 +85,15 @@ def _run_archive_backup():
     run_scheduled_backup()
 
 
+def _run_history_archive():
+    """Periodic job — move rows older than retention window to LAN archive DB."""
+    from .history_archive import run_history_archive
+    try:
+        run_history_archive(triggered_by="scheduled")
+    except Exception as exc:
+        print(f"[Scheduler] History archive failed: {exc}")
+
+
 def _run_plan_auto_transition():
     """Periodic job — auto-start continuous same-part pending plans for the live shift.
 
@@ -159,6 +168,43 @@ def reload_archive_schedule(db: Session):
         print("[Scheduler] Archive backup disabled")
 
 
+def reload_history_archive_schedule(db: Session):
+    """Schedule automatic move of old data to remote archive MySQL."""
+    import json as _json
+    from .models import SiteConfig
+
+    job_id = "history_archive"
+
+    try:
+        row = db.query(SiteConfig).first()
+        cfg = _json.loads(row.config_json) if row else {}
+        hist = cfg.get("history_archive", {})
+    except Exception:
+        hist = {}
+
+    enabled = hist.get("enabled", False)
+    interval_days = int(hist.get("interval_days") or 1)
+
+    existing = scheduler.get_job(job_id)
+    if existing:
+        existing.remove()
+
+    if enabled:
+        scheduler.add_job(
+            _run_history_archive,
+            trigger="interval",
+            days=max(1, interval_days),
+            id=job_id,
+            replace_existing=True,
+        )
+        print(
+            f"[Scheduler] History archive every {interval_days} day(s) "
+            f"(retention={hist.get('retention_days', 60)} days)"
+        )
+    else:
+        print("[Scheduler] History archive disabled")
+
+
 def reload_schedules(db: Session):
     """Remove all existing jobs and re-add from DB"""
     from .models import EmailSchedule
@@ -199,6 +245,7 @@ def reload_schedules(db: Session):
     print("[Scheduler] Plan auto-transition every 1 minute")
 
     reload_archive_schedule(db)
+    reload_history_archive_schedule(db)
 
 def start_scheduler(db: Session = None):
     if not scheduler.running:

@@ -354,7 +354,7 @@ export default function Login() {
             />
             <PasswordField
               theme={t}
-              style={inputStyle}
+              style={{ ...inputStyle, marginBottom: 16 }}
               placeholder="Password"
               value={creds.password}
               autoComplete="current-password"
@@ -373,7 +373,7 @@ export default function Login() {
               </div>
             )}
             <button
-              style={{ width: '100%', padding: '11px', background: loading ? t.textFaint : t.accent,
+              style={{ width: '100%', marginTop: 4, padding: '11px', background: loading ? t.textFaint : t.accent,
                        color: '#fff', border: 'none', borderRadius: 6, fontSize: 15,
                        fontWeight: 600, cursor: loading ? 'not-allowed' : 'pointer' }}
               type="submit"

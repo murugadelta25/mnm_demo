@@ -172,47 +172,25 @@ def get_entries(
     db: Session = Depends(get_db),
     _=Depends(get_current_user)
 ):
-    q = db.query(OEEEntry)
-    if shift: q = q.filter(OEEEntry.shift == shift)
-    if entry_date: q = q.filter(OEEEntry.entry_date == entry_date)
-    if date_from: q = q.filter(OEEEntry.entry_date >= date_from)
-    if date_to: q = q.filter(OEEEntry.entry_date <= date_to)
-    if month: q = q.filter(extract("month", OEEEntry.entry_date) == month)
-    if year: q = q.filter(extract("year", OEEEntry.entry_date) == year)
-    if station_no: q = q.filter(OEEEntry.station_no == station_no)
-    if machine_id: q = q.filter(OEEEntry.machine_id == machine_id)
+    from ..history_archive import query_oee_entries_federated
+
     term = (search or model or current_operation or "").strip()
-    if term:
-        like = f"%{term}%"
-        q = q.filter(or_(
-            OEEEntry.current_operation.like(like),
-            OEEEntry.model_variant.like(like),
-        ))
-    entries = q.order_by(OEEEntry.entry_date.desc(), OEEEntry.shift).all()
-
-    dates = {e.entry_date for e in entries}
-    plans = []
-    if dates:
-        plans = db.query(ProductionPlan).filter(ProductionPlan.plan_date.in_(dates)).all()
-    wo_ids = {p.work_order_id for p in plans if p.work_order_id}
-    wo_map = {}
-    if wo_ids:
-        wos = db.query(WorkOrder).filter(WorkOrder.id.in_(wo_ids)).all()
-        wo_map = {w.id: w.work_order_no for w in wos}
-
-    plan_wo = {}
-    for p in plans:
-        key = (p.machine_id, str(p.plan_date), p.shift, p.current_operation)
-        if p.work_order_id and p.work_order_id in wo_map:
-            plan_wo[key] = wo_map[p.work_order_id]
-
-    result = []
-    for e in entries:
-        d = {c.name: getattr(e, c.name) for c in e.__table__.columns}
-        key = (e.machine_id, str(e.entry_date), e.shift, e.current_operation)
-        d["work_order_no"] = plan_wo.get(key, "—")
-        d["source"] = "manual"
-        result.append(d)
+    result, meta = query_oee_entries_federated(
+        db,
+        shift=shift,
+        entry_date=entry_date,
+        date_from=date_from,
+        date_to=date_to,
+        month=month,
+        year=year,
+        station_no=station_no,
+        machine_id=machine_id,
+        term=term,
+    )
+    # Attach federation meta on empty list via custom response is awkward;
+    # clients read rows; meta available on /summary. Keep rows as list for compat.
+    for row in result:
+        row.setdefault("hot_cutoff_date", meta.get("hot_cutoff_date"))
     return result
 
 @router.get("/summary")
@@ -231,36 +209,26 @@ def get_summary(
     db: Session = Depends(get_db),
     _=Depends(get_current_user)
 ):
-    from sqlalchemy import func
-    q = db.query(OEEEntry)
-    if shift: q = q.filter(OEEEntry.shift == shift)
-    if entry_date: q = q.filter(OEEEntry.entry_date == entry_date)
-    if date_from: q = q.filter(OEEEntry.entry_date >= date_from)
-    if date_to: q = q.filter(OEEEntry.entry_date <= date_to)
-    if month: q = q.filter(extract("month", OEEEntry.entry_date) == month)
-    if year: q = q.filter(extract("year", OEEEntry.entry_date) == year)
-    if station_no: q = q.filter(OEEEntry.station_no == station_no)
-    if machine_id: q = q.filter(OEEEntry.machine_id == machine_id)
+    from ..history_archive import query_oee_entries_federated, summarize_oee_dicts
+
     term = (search or model or current_operation or "").strip()
-    if term:
-        like = f"%{term}%"
-        q = q.filter(or_(
-            OEEEntry.current_operation.like(like),
-            OEEEntry.model_variant.like(like),
-        ))
-    entries = q.all()
-    if not entries:
-        return {"avg_ar": 0, "avg_pr": 0, "avg_qr": 0, "avg_oee": 0, "total_actual": 0, "total_accp": 0, "total_defect": 0}
-    return {
-        "avg_ar": round(sum(float(e.ar or 0) for e in entries) / len(entries), 2),
-        "avg_pr": round(sum(float(e.pr or 0) for e in entries) / len(entries), 2),
-        "avg_qr": round(sum(float(e.qr or 0) for e in entries) / len(entries), 2),
-        "avg_oee": round(sum(float(e.oee or 0) for e in entries) / len(entries), 2),
-        "total_actual": sum(e.actual_qty or 0 for e in entries),
-        "total_accp": sum(e.accp_qty or 0 for e in entries),
-        "total_defect": sum(e.defect_qty or 0 for e in entries),
-        "count": len(entries)
-    }
+    entries, meta = query_oee_entries_federated(
+        db,
+        shift=shift,
+        entry_date=entry_date,
+        date_from=date_from,
+        date_to=date_to,
+        month=month,
+        year=year,
+        station_no=station_no,
+        machine_id=machine_id,
+        term=term,
+    )
+    out = summarize_oee_dicts(entries)
+    out["data_sources"] = meta.get("sources") or ["live"]
+    out["hot_cutoff_date"] = meta.get("hot_cutoff_date")
+    out["archive_enabled"] = meta.get("archive_enabled")
+    return out
 
 def _compute_realtime_oee_for_date(
     db: Session,

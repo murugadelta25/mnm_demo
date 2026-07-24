@@ -331,13 +331,47 @@ if ($networkIPs.Count -eq 0) {
 
 # [5/8] Backend — always use this project's backend\venv
 Write-StepHeader 5 "Starting backend on port $BackendPort..."
+
+# Free port 8010 from stale uvicorn/--reload orphans (common cause of 502 Bad Gateway)
+function Clear-PortListeners {
+    param([int]$Port)
+    $killed = @()
+    try {
+        $conns = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue
+        foreach ($c in $conns) {
+            $procId = [int]$c.OwningProcess
+            if ($procId -le 4) { continue }
+            if ($killed -contains $procId) { continue }
+            $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $procId" -ErrorAction SilentlyContinue
+            $cmd = [string]$proc.CommandLine
+            if ($cmd -match 'uvicorn|multiprocessing\.spawn|app\.main:app' -or -not $cmd) {
+                Write-Host "  Clearing stale process on port $Port (PID $procId)..." -ForegroundColor Yellow
+                Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+                $killed += $procId
+            }
+        }
+    } catch { }
+    # Orphaned --reload workers whose parent already died
+    Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue | Where-Object {
+        $_.CommandLine -match "uvicorn app\.main:app|--multiprocessing-fork"
+    } | ForEach-Object {
+        if ($killed -contains $_.ProcessId) { return }
+        Write-Host "  Stopping leftover uvicorn/python (PID $($_.ProcessId))..." -ForegroundColor Yellow
+        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        $killed += $_.ProcessId
+    }
+    if ($killed.Count -gt 0) { Start-Sleep -Seconds 2 }
+}
+
+Clear-PortListeners -Port $BackendPort
+
 Start-Process powershell -ArgumentList @(
     "-NoExit", "-Command",
     "cd '$BackendDir'; & '.\.venv\Scripts\Activate.ps1'; python -m uvicorn app.main:app --host 0.0.0.0 --port $BackendPort --reload"
 ) -WindowStyle Normal
 Start-Sleep -Seconds 3
 $backendOk = $false
-for ($i = 1; $i -le 30; $i++) {
+for ($i = 1; $i -le 45; $i++) {
     try {
         $null = Invoke-WebRequest -Uri "http://127.0.0.1:$BackendPort/health" -UseBasicParsing -TimeoutSec 2
         $backendOk = $true
@@ -351,6 +385,7 @@ if ($backendOk) {
 } else {
     Write-StepFail "Backend not responding on port $BackendPort"
     Write-Host "  Check the Backend PowerShell window for errors (MySQL connection, import errors)." -ForegroundColor Yellow
+    Write-Host "  Tip: close old Backend windows, then: Get-NetTCPConnection -LocalPort $BackendPort" -ForegroundColor DarkGray
     exit 1
 }
 
