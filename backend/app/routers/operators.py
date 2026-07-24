@@ -529,8 +529,8 @@ def _ensure_operator_login_user(db: Session, op: Operator, password: str) -> Use
     Username = employee_code so they can sign into the PMS web/tablet app.
     Never silently overwrite passwords for elevated web roles.
     """
-    if len(password) < 4:
-        raise HTTPException(400, "Password must be at least 4 characters")
+    from ..password_policy import validate_password_or_raise
+    validate_password_or_raise(password)
     pwd_hash = hash_password(password)
     protected_roles = ("admin", "superadmin", "supervisor", "quality", "maintenance")
 
@@ -544,6 +544,7 @@ def _ensure_operator_login_user(db: Session, op: Operator, password: str) -> Use
                     "change password in User Management, not Operator Directory.",
                 )
             user.password_hash = pwd_hash
+            user.password_must_change = 0
             if user.role != "operator":
                 user.role = "operator"
             return user
@@ -569,6 +570,7 @@ def _ensure_operator_login_user(db: Session, op: Operator, password: str) -> Use
         # Re-link an existing operator login only (safe for web-only sites)
         existing.password_hash = pwd_hash
         existing.role = "operator"
+        existing.password_must_change = 0
         op.linked_user_id = existing.id
         return existing
 
@@ -577,6 +579,7 @@ def _ensure_operator_login_user(db: Session, op: Operator, password: str) -> Use
         password_hash=pwd_hash,
         role="operator",
         reference_photo_url=op.reference_photo_url,
+        password_must_change=0,
     )
     db.add(user)
     db.flush()
@@ -591,7 +594,7 @@ class OperatorCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     is_temporary: bool = False
     is_active: bool = True
-    password: str = Field(..., min_length=4, description="PMS web/app login password (username = employee code)")
+    password: str = Field(..., min_length=8, description="PMS web/app login password (username = employee code)")
     pin: Optional[str] = None  # optional tablet PIN; defaults to password if omitted
     notes: Optional[str] = None
     linked_user_id: Optional[int] = None

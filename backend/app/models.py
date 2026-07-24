@@ -52,7 +52,7 @@ ensure_oee_schema()
 
 
 def ensure_users_schema(bind=None):
-    """Add operator reference photo column for mobile face verification."""
+    """Add operator reference photo + one-time password-upgrade flag columns."""
     if bind is None:
         bind = engine
     try:
@@ -62,9 +62,15 @@ def ensure_users_schema(bind=None):
         if not inspector.has_table("users"):
             return False
         cols = {c["name"] for c in inspector.get_columns("users")}
-        if "reference_photo_url" not in cols:
-            with bind.begin() as conn:
+        with bind.begin() as conn:
+            if "reference_photo_url" not in cols:
                 conn.execute(text("ALTER TABLE users ADD COLUMN reference_photo_url VARCHAR(500) NULL"))
+            if "password_must_change" not in cols:
+                # Existing logins must set a policy-compliant password once after upgrade.
+                # DEFAULT 1 applies to current rows; new users are created with 0 in app code.
+                conn.execute(text(
+                    "ALTER TABLE users ADD COLUMN password_must_change INT NOT NULL DEFAULT 1"
+                ))
         return True
     except Exception:
         return False
@@ -94,6 +100,8 @@ class User(Base):
     password_hash = Column(String(255), nullable=False)
     role = Column(Enum("operator", "supervisor", "maintenance", "admin", "quality", "superadmin"), nullable=False)
     reference_photo_url = Column(String(500), nullable=True)
+    # 1 = must set a policy-compliant password once (upgrade); cleared after successful change
+    password_must_change = Column(Integer, default=0, nullable=False)
 
 
 class Operator(Base):

@@ -40,6 +40,7 @@ import MyWorkHours from './pages/MyWorkHours';
 function AuthenticatedShell() {
   const { user } = useAuth();
   if (!user) return <Navigate to="/login" replace />;
+  if (user.mustChangePassword) return <Navigate to="/login" replace />;
   return (
     <IdleTimeoutGuard>
       <FeatureRouteGuard>

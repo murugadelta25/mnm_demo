@@ -121,7 +121,10 @@ export default function PageHeader({ title, onRefresh, extra }) {
       marginBottom: 16,
       flexWrap: 'nowrap',
       minHeight: 'var(--titan-feature-title-height)',
-      contain: 'layout',
+      // Do not use CSS contain here — it clipped the notification dropdown under page cards
+      position: 'relative',
+      zIndex: 20,
+      overflow: 'visible',
     },
     title: { color: t.text, fontSize: 18, margin: 0, whiteSpace: 'nowrap' },
     extra: { flex: 1, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', minWidth: 0 },
@@ -129,6 +132,9 @@ export default function PageHeader({ title, onRefresh, extra }) {
       marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10,
       background: t.surface, borderRadius: 10, padding: '6px 14px',
       border: `1px solid ${t.border}`, flexShrink: 0, minHeight: 42,
+      position: 'relative',
+      zIndex: 21,
+      overflow: 'visible',
     },
     lastRefresh: { color: t.textFaint, fontSize: 11, whiteSpace: 'nowrap' },
     shiftBadge: {

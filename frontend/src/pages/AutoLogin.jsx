@@ -16,7 +16,13 @@ export default function AutoLogin() {
 
     // Always re-login to ensure a fresh valid token
     login(u, p)
-      .then(() => navigate(redirect, { replace: true }))
+      .then((data) => {
+        if (data?.must_change_password) {
+          navigate('/login', { replace: true });
+          return;
+        }
+        navigate(redirect, { replace: true });
+      })
       .catch(() => navigate('/login', { replace: true }));
   }, []);
 

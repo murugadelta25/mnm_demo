@@ -17,8 +17,9 @@ from ..models import (
     QcInspectionReport,
     get_db,
 )
-from ..auth import hash_password, get_current_user, require_role
+from ..auth import hash_password, get_current_user, require_role, verify_password
 from ..upload_limits import MAX_IMAGE_BYTES, save_upload_limited
+from ..password_policy import PASSWORD_HINT, validate_password_or_raise
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
@@ -65,12 +66,15 @@ def list_users(db: Session = Depends(get_db), _=Depends(get_current_user)):
 
 @router.get("/me")
 def get_me(current=Depends(get_current_user)):
+    must_change = bool(getattr(current, "password_must_change", 0)) if not getattr(current, "is_operator_principal", False) else False
     return {
         "id": current.id,
         "username": current.username,
         "role": current.role,
-        "reference_photo_url": current.reference_photo_url,
-        "has_reference_photo": bool(current.reference_photo_url),
+        "reference_photo_url": getattr(current, "reference_photo_url", None),
+        "has_reference_photo": bool(getattr(current, "reference_photo_url", None)),
+        "must_change_password": must_change,
+        "password_hint": PASSWORD_HINT if must_change else None,
     }
 
 @router.post("/")
@@ -82,9 +86,13 @@ def create_user(data: UserCreate, db: Session = Depends(get_db),
         raise HTTPException(403, "Only superadmin can create superadmin users")
     if db.query(User).filter(User.username == data.username).first():
         raise HTTPException(400, "Username already exists")
-    if len(data.password) < 4:
-        raise HTTPException(400, "Password must be at least 4 characters")
-    u = User(username=data.username, password_hash=hash_password(data.password), role=data.role)
+    validate_password_or_raise(data.password)
+    u = User(
+        username=data.username,
+        password_hash=hash_password(data.password),
+        role=data.role,
+        password_must_change=0,
+    )
     db.add(u)
     db.commit()
     db.refresh(u)
@@ -107,9 +115,9 @@ def update_user(user_id: int, data: UserUpdate, db: Session = Depends(get_db),
             raise HTTPException(403, "Only superadmin can modify superadmin users")
         u.role = data.role
     if data.password:
-        if len(data.password) < 4:
-            raise HTTPException(400, "Password must be at least 4 characters")
+        validate_password_or_raise(data.password)
         u.password_hash = hash_password(data.password)
+        u.password_must_change = 0
     db.commit()
     return {"id": u.id, "username": u.username, "role": u.role, "reference_photo_url": u.reference_photo_url}
 
@@ -223,11 +231,16 @@ def delete_user(user_id: int, db: Session = Depends(get_db),
 @router.post("/me/change-password")
 def change_own_password(data: PasswordChange, db: Session = Depends(get_db),
                         current=Depends(get_current_user)):
-    import bcrypt as _bcrypt
-    if not _bcrypt.checkpw(data.current_password.encode(), current.password_hash.encode()):
+    if getattr(current, "is_operator_principal", False):
+        raise HTTPException(400, "Operator PIN accounts change password via Operator Management")
+    if not verify_password(data.current_password, current.password_hash):
         raise HTTPException(400, "Current password is incorrect")
-    if len(data.new_password) < 4:
-        raise HTTPException(400, "New password must be at least 4 characters")
-    current.password_hash = hash_password(data.new_password)
+    validate_password_or_raise(data.new_password)
+    # Reload ORM user (current may be detached identity from get_current_user)
+    user = db.query(User).filter(User.id == current.id).first()
+    if not user:
+        raise HTTPException(404, "User not found")
+    user.password_hash = hash_password(data.new_password)
+    user.password_must_change = 0
     db.commit()
-    return {"ok": True}
+    return {"ok": True, "must_change_password": False, "message": "Password updated"}

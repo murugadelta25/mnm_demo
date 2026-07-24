@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import api from '../api/client';
 import { useTheme } from '../context/ThemeContext';
@@ -15,6 +16,11 @@ const SEV_ICON = {
   warning: '⚠',
   info: 'ℹ',
 };
+
+/** Above page cards / tables (often z-index 1–100) and modals below 2000 */
+const PANEL_Z = 5000;
+const PANEL_WIDTH = 360;
+const PANEL_MAX_H = 420;
 
 const BELL_SHAKE_CSS = `
 @keyframes pms-bell-shake {
@@ -50,6 +56,7 @@ export default function NotificationBell() {
   const [items, setItems] = useState([]);
   const [unread, setUnread] = useState(0);
   const [burst, setBurst] = useState(false);
+  const [panelPos, setPanelPos] = useState({ top: 0, left: 0, width: PANEL_WIDTH, maxHeight: PANEL_MAX_H });
   const panelRef = useRef(null);
   const btnRef = useRef(null);
   const prevUnreadRef = useRef(0);
@@ -63,6 +70,25 @@ export default function NotificationBell() {
     } catch {
       /* keep previous list on transient errors */
     }
+  }, []);
+
+  const placePanel = useCallback(() => {
+    const btn = btnRef.current;
+    if (!btn) return;
+    const rect = btn.getBoundingClientRect();
+    const width = Math.min(PANEL_WIDTH, window.innerWidth - 16);
+    const gap = 8;
+    let left = rect.right - width;
+    left = Math.max(8, Math.min(left, window.innerWidth - width - 8));
+    let top = rect.bottom + gap;
+    const spaceBelow = window.innerHeight - top - 8;
+    const spaceAbove = rect.top - 8;
+    let maxHeight = Math.min(PANEL_MAX_H, Math.max(160, spaceBelow));
+    if (spaceBelow < 180 && spaceAbove > spaceBelow) {
+      maxHeight = Math.min(PANEL_MAX_H, Math.max(160, spaceAbove));
+      top = Math.max(8, rect.top - gap - maxHeight);
+    }
+    setPanelPos({ top, left, width, maxHeight });
   }, []);
 
   // Stronger shake when unread count increases
@@ -106,14 +132,33 @@ export default function NotificationBell() {
     }
   }, [load]));
 
+  useLayoutEffect(() => {
+    if (!open) return undefined;
+    placePanel();
+    const onReposition = () => placePanel();
+    window.addEventListener('resize', onReposition);
+    window.addEventListener('scroll', onReposition, true);
+    return () => {
+      window.removeEventListener('resize', onReposition);
+      window.removeEventListener('scroll', onReposition, true);
+    };
+  }, [open, placePanel, items.length]);
+
   useEffect(() => {
     if (!open) return undefined;
     const onDoc = (e) => {
       if (panelRef.current?.contains(e.target) || btnRef.current?.contains(e.target)) return;
       setOpen(false);
     };
+    const onKey = (e) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
     document.addEventListener('mousedown', onDoc);
-    return () => document.removeEventListener('mousedown', onDoc);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDoc);
+      document.removeEventListener('keydown', onKey);
+    };
   }, [open]);
 
   const openItem = (item) => {
@@ -123,13 +168,110 @@ export default function NotificationBell() {
 
   const shouldShake = unread > 0 && !open;
 
+  const panel = open
+    ? createPortal(
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-label="Notifications"
+        style={{
+          position: 'fixed',
+          top: panelPos.top,
+          left: panelPos.left,
+          width: panelPos.width,
+          maxHeight: panelPos.maxHeight,
+          overflow: 'hidden',
+          display: 'flex',
+          flexDirection: 'column',
+          background: t.surface,
+          border: `1px solid ${t.border}`,
+          borderRadius: 10,
+          boxShadow: '0 16px 40px rgba(0,0,0,0.28)',
+          zIndex: PANEL_Z,
+        }}
+      >
+        <div style={{
+          padding: '10px 12px',
+          borderBottom: `1px solid ${t.border}`,
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+          flexShrink: 0,
+        }}
+        >
+          <strong style={{ fontSize: 13, color: t.text }}>Notifications</strong>
+          <button
+            type="button"
+            onClick={load}
+            style={{
+              border: 'none',
+              background: 'transparent',
+              color: t.accent,
+              cursor: 'pointer',
+              fontSize: 12,
+              fontWeight: 600,
+            }}
+          >
+            Refresh
+          </button>
+        </div>
+
+        <div style={{ overflowY: 'auto', flex: 1, minHeight: 0 }}>
+          {items.length === 0 && (
+            <div style={{ padding: 20, textAlign: 'center', color: t.textDim, fontSize: 13 }}>
+              No alerts or pending requests
+            </div>
+          )}
+          {items.map((item) => {
+            const color = SEV_COLOR[item.severity] || SEV_COLOR.info;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => openItem(item)}
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  textAlign: 'left',
+                  border: 'none',
+                  borderBottom: `1px solid ${t.border}`,
+                  background: t.surface,
+                  padding: '10px 12px',
+                  cursor: 'pointer',
+                }}
+              >
+                <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+                  <span style={{ fontSize: 14, lineHeight: 1.2 }}>{SEV_ICON[item.severity] || '•'}</span>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ fontSize: 12, fontWeight: 700, color, marginBottom: 2 }}>
+                      {item.kind === 'spc_alert' ? '⚠ ' : ''}{item.title}
+                    </div>
+                    <div style={{ fontSize: 12, color: t.text, lineHeight: 1.35 }}>
+                      {item.body}
+                    </div>
+                    <div style={{ fontSize: 10, color: t.textFaint, marginTop: 4 }}>
+                      Open {item.path?.replace('/', '') || 'page'} →
+                    </div>
+                  </div>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>,
+      document.body,
+    )
+    : null;
+
   return (
-    <div style={{ position: 'relative', flexShrink: 0 }}>
+    <div style={{ position: 'relative', flexShrink: 0, zIndex: 2 }}>
       <style>{BELL_SHAKE_CSS}</style>
       <button
         ref={btnRef}
         type="button"
         title={unread > 0 ? `${unread} notification${unread === 1 ? '' : 's'}` : 'Notifications'}
+        aria-expanded={open}
+        aria-haspopup="dialog"
         onClick={() => {
           setOpen((v) => !v);
           if (!open) load();
@@ -189,97 +331,7 @@ export default function NotificationBell() {
           </span>
         )}
       </button>
-
-      {open && (
-        <div
-          ref={panelRef}
-          style={{
-            position: 'absolute',
-            right: 0,
-            top: '100%',
-            marginTop: 8,
-            width: 360,
-            maxWidth: 'min(360px, 92vw)',
-            maxHeight: 420,
-            overflow: 'hidden',
-            display: 'flex',
-            flexDirection: 'column',
-            background: t.surface,
-            border: `1px solid ${t.border}`,
-            borderRadius: 10,
-            boxShadow: '0 12px 32px rgba(0,0,0,0.18)',
-            zIndex: 1300,
-          }}
-        >
-          <div style={{
-            padding: '10px 12px',
-            borderBottom: `1px solid ${t.border}`,
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-          }}
-          >
-            <strong style={{ fontSize: 13, color: t.text }}>Notifications</strong>
-            <button
-              type="button"
-              onClick={load}
-              style={{
-                border: 'none',
-                background: 'transparent',
-                color: t.accent,
-                cursor: 'pointer',
-                fontSize: 12,
-                fontWeight: 600,
-              }}
-            >
-              Refresh
-            </button>
-          </div>
-
-          <div style={{ overflowY: 'auto', flex: 1 }}>
-            {items.length === 0 && (
-              <div style={{ padding: 20, textAlign: 'center', color: t.textDim, fontSize: 13 }}>
-                No alerts or pending requests
-              </div>
-            )}
-            {items.map((item) => {
-              const color = SEV_COLOR[item.severity] || SEV_COLOR.info;
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => openItem(item)}
-                  style={{
-                    display: 'block',
-                    width: '100%',
-                    textAlign: 'left',
-                    border: 'none',
-                    borderBottom: `1px solid ${t.border}`,
-                    background: t.surface,
-                    padding: '10px 12px',
-                    cursor: 'pointer',
-                  }}
-                >
-                  <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
-                    <span style={{ fontSize: 14, lineHeight: 1.2 }}>{SEV_ICON[item.severity] || '•'}</span>
-                    <div style={{ minWidth: 0, flex: 1 }}>
-                      <div style={{ fontSize: 12, fontWeight: 700, color, marginBottom: 2 }}>
-                        {item.kind === 'spc_alert' ? '⚠ ' : ''}{item.title}
-                      </div>
-                      <div style={{ fontSize: 12, color: t.text, lineHeight: 1.35 }}>
-                        {item.body}
-                      </div>
-                      <div style={{ fontSize: 10, color: t.textFaint, marginTop: 4 }}>
-                        Open {item.path?.replace('/', '') || 'page'} →
-                      </div>
-                    </div>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
+      {panel}
     </div>
   );
 }

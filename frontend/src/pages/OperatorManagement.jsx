@@ -4,6 +4,7 @@ import { assetUrl } from '../api/config';
 import { useTheme } from '../context/ThemeContext';
 import { pageClass } from '../themes/tileHelpers';
 import PageHeader from '../components/PageHeader';
+import { PASSWORD_HINT, passwordPolicyError } from '../utils/passwordPolicy';
 
 const SHIFTS = ['A', 'B', 'C'];
 const STATUSES = ['Present', 'Absent', 'Leave', 'Week Off'];
@@ -578,13 +579,19 @@ function DirectoryPanel({ s, t, flash, onOpenDetail }) {
       flash('Employee code and name are required', false);
       return;
     }
-    if (!editingId && form.password.trim().length < 4) {
-      flash('Password is required (min 4 characters) for PMS web login', false);
-      return;
+    if (!editingId) {
+      const err = passwordPolicyError(form.password.trim());
+      if (err) {
+        flash(err, false);
+        return;
+      }
     }
-    if (editingId && form.password.trim() && form.password.trim().length < 4) {
-      flash('Password must be at least 4 characters', false);
-      return;
+    if (editingId && form.password.trim()) {
+      const err = passwordPolicyError(form.password.trim());
+      if (err) {
+        flash(err, false);
+        return;
+      }
     }
     setSaving(true);
     try {
@@ -671,9 +678,10 @@ function DirectoryPanel({ s, t, flash, onOpenDetail }) {
             style={{ ...s.inp, width: '100%', minWidth: 0, marginBottom: 6 }}
             value={form.password}
             onChange={(e) => setForm((f) => ({ ...f, password: e.target.value }))}
-            placeholder={editingId ? 'Set/change web login password' : 'Min 4 characters'}
+            placeholder={editingId ? 'Set/change web login password' : 'e.g. Password@123'}
             autoComplete="new-password"
           />
+          <div style={{ color: t.textFaint, fontSize: 11, marginTop: 4 }}>{PASSWORD_HINT}</div>
           <div style={{ fontSize: 11, color: t.textMuted, marginBottom: 10 }}>
             Login username = employee code (e.g. OP001). Role: operator. Creates User Management login automatically.
           </div>
