@@ -120,6 +120,46 @@ def _validate_may_start_plan(plan: ProductionPlan) -> None:
             f"Start is only allowed on or after the plan date (today: {today}).",
         )
 
+
+def _find_running_conflicts(db: Session, plan: ProductionPlan) -> list:
+    """Other running plans on the same machine (trial plans may run concurrently)."""
+    if not plan.machine_id or plan.plan_type == "trial":
+        return []
+    return (
+        db.query(ProductionPlan)
+        .filter(
+            ProductionPlan.machine_id == plan.machine_id,
+            ProductionPlan.id != plan.id,
+            ProductionPlan.status == "running",
+        )
+        .all()
+    )
+
+
+def _raise_if_part_already_running(db: Session, plan: ProductionPlan) -> None:
+    """Block starting a new plan while another part is already running on the machine."""
+    conflicts = _find_running_conflicts(db, plan)
+    if not conflicts:
+        return
+    names = []
+    for c in conflicts:
+        label = (c.model_variant or c.current_operation or f"Plan #{c.id}").strip()
+        names.append(label)
+    parts = ", ".join(names)
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "part_already_running",
+            "message": (
+                "A part is already running on this machine. "
+                "Please pause or complete the planned production before starting the new one."
+                + (f" (Running: {parts})" if parts else "")
+            ),
+            "conflicting_plan_ids": [c.id for c in conflicts],
+            "conflicting_parts": names,
+        },
+    )
+
 def _should_split(plan: ProductionPlan, data: RescheduleRequest) -> bool:
     if data.mode == "split_remaining" or data.split_remaining:
         return plan.actual_qty > 0 and plan.actual_qty < plan.planned_qty
@@ -441,6 +481,9 @@ async def update_status(plan_id: int, data: PlanUpdate, db: Session = Depends(ge
                 )
             plan.machine_id = machine.id
 
+        # Block start while another part is already running (trial may run concurrently)
+        _raise_if_part_already_running(db, plan)
+
         # Skip model-change interlock when the same part was already running
         # on this machine in the previous shift (no actual model change needed)
         same_part_continues = False
@@ -451,17 +494,7 @@ async def update_status(plan_id: int, data: PlanUpdate, db: Session = Depends(ge
             )
 
         if same_part_continues:
-            if plan.plan_type != "trial" and plan.machine_id:
-                conflicting = db.query(ProductionPlan).filter(
-                    ProductionPlan.machine_id == plan.machine_id,
-                    ProductionPlan.id != plan.id,
-                    ProductionPlan.status == "running",
-                ).all()
-                for conflict in conflicting:
-                    conflict.status = "paused"
-                    conflict.updated_at = now_ist()
-                    await manager.broadcast({"type": "plan_updated", "plan_id": conflict.id, "status": "paused"})
-
+            _raise_if_part_already_running(db, plan)
             plan.status = "running"
             plan.updated_at = now_ist()
             machine = db.query(Machine).filter(Machine.id == plan.machine_id).first()
@@ -512,16 +545,7 @@ async def update_status(plan_id: int, data: PlanUpdate, db: Session = Depends(ge
         )
         if existing_active:
             # Approval already applied plan start — treat as already running
-            # Auto-pause any other running plan on the same machine (unless trial)
-            if plan.plan_type != "trial" and plan.machine_id:
-                conflicting = db.query(ProductionPlan).filter(
-                    ProductionPlan.machine_id == plan.machine_id,
-                    ProductionPlan.id != plan.id,
-                    ProductionPlan.status == "running",
-                ).all()
-                for conflict in conflicting:
-                    conflict.status = "paused"
-                    conflict.updated_at = now_ist()
+            _raise_if_part_already_running(db, plan)
             plan.status = "running"
             plan.updated_at = now_ist()
             db.commit()
@@ -583,18 +607,8 @@ async def update_status(plan_id: int, data: PlanUpdate, db: Session = Depends(ge
 
     # Resume from paused (no new model-change gate)
     if data.status == "running":
-        # Auto-pause any other running plan on the same machine, unless this is a trial plan
-        # (trial = intentional concurrent run, e.g. setup verification alongside production)
-        if plan.plan_type != "trial" and plan.machine_id:
-            conflicting = db.query(ProductionPlan).filter(
-                ProductionPlan.machine_id == plan.machine_id,
-                ProductionPlan.id != plan.id,
-                ProductionPlan.status == "running",
-            ).all()
-            for conflict in conflicting:
-                conflict.status = "paused"
-                conflict.updated_at = now_ist()
-                await manager.broadcast({"type": "plan_updated", "plan_id": conflict.id, "status": "paused"})
+        # Block if another part is already running (trial plans may run concurrently)
+        _raise_if_part_already_running(db, plan)
 
         machine = db.query(Machine).filter(Machine.id == plan.machine_id).first()
         if machine and machine.status not in ("breakdown", "offline", "setting_change", "alarm"):

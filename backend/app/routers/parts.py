@@ -283,6 +283,7 @@ class PartCreate(BaseModel):
     model_variant: Optional[str] = None
     description: Optional[str] = None
     tool_no: Optional[str] = None
+    tool_group_id: Optional[int] = None
     no_of_cavity: int = 1
     production_section: Optional[str] = None
     input_material: Optional[str] = None
@@ -346,6 +347,7 @@ def _apply_part_fields(part: Part, data: PartCreate) -> None:
     part.model_variant = _normalize_model_variant(data.part_no, data.model_variant)
     part.description = data.description
     part.tool_no = data.tool_no
+    part.tool_group_id = data.tool_group_id
     part.no_of_cavity = data.no_of_cavity
     part.production_section = data.production_section
     part.input_material = (data.input_material or "").strip() or None
@@ -399,6 +401,7 @@ def _part_out(part: Part, db: Session) -> dict:
         "model_variant": part.model_variant,
         "description": part.description,
         "tool_no": part.tool_no,
+        "tool_group_id": getattr(part, "tool_group_id", None),
         "no_of_cavity": part.no_of_cavity,
         "production_section": part.production_section,
         "input_material": getattr(part, "input_material", None),

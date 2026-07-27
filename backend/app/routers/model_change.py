@@ -62,16 +62,8 @@ def _start_linked_plan(mcr, db):
     if not plan:
         return None
     if plan.status in ("pending", "paused"):
-        # Auto-pause any other running plan on the same machine (unless trial)
-        if plan.plan_type != "trial" and plan.machine_id:
-            conflicting = db.query(ProductionPlan).filter(
-                ProductionPlan.machine_id == plan.machine_id,
-                ProductionPlan.id != plan.id,
-                ProductionPlan.status == "running",
-            ).all()
-            for conflict in conflicting:
-                conflict.status = "paused"
-                conflict.updated_at = now_ist()
+        from .plans import _raise_if_part_already_running
+        _raise_if_part_already_running(db, plan)
         plan.status = "running"
         plan.updated_at = now_ist()
     return plan
@@ -120,6 +112,13 @@ async def approve_request(mcr_id: int, db: Session = Depends(get_db), user=Depen
     ).first()
     if active_bd:
         raise HTTPException(400, "Cannot approve model change while machine has an active breakdown ticket")
+
+    # Ensure linked plan can start before approving (another part may still be running)
+    from .plans import _raise_if_part_already_running
+    if getattr(mcr, "plan_id", None):
+        linked = db.query(ProductionPlan).filter(ProductionPlan.id == mcr.plan_id).first()
+        if linked and linked.status in ("pending", "paused"):
+            _raise_if_part_already_running(db, linked)
 
     mcr.status = "approved"
     mcr.approved_by = user.id

@@ -136,7 +136,9 @@
           "label": "My Work Hours",
           "path": "/my-work-hours",
           "navIcon": "hourlyOutput",
-          "roles": ["admin", "superadmin", "supervisor", "operator"]
+          "roles": ["operator"],
+          "roleToggleable": true,
+          "description": "Operator personal work-hours view. Disabled for supervisor/admin/superadmin by default; enable per role below if needed."
         }
       ]
     },

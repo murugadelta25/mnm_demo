@@ -829,11 +829,20 @@ export default function LossTracker() {
   const downloadReport = async (reportDate) => {
     const date = reportDate || todayStr();
     try {
-      const r = await api.get('/api/email/download/loss-tracker', {
-        params: { report_date: date },
-        responseType: 'blob',
-      });
-      await downloadAxiosBlob(r, `loss_tracker_${date}.xlsx`);
+      const [lossTracker, tpmLogger] = await Promise.all([
+        api.get('/api/email/download/loss-tracker', {
+          params: { report_date: date },
+          responseType: 'blob',
+        }),
+        api.get('/api/email/download/tpm-loss-logger', {
+          params: { report_date: date },
+          responseType: 'blob',
+        }),
+      ]);
+      await downloadAxiosBlob(lossTracker, `loss_tracker_${date}.xlsx`);
+      // Small delay so browsers allow the second save dialog / download
+      await new Promise((r) => setTimeout(r, 400));
+      await downloadAxiosBlob(tpmLogger, `TPM_Loss_logger_${date}.xlsx`);
     } catch (err) {
       alert(`Download failed: ${err.message}`);
     }

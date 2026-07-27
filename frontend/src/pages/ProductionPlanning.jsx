@@ -503,9 +503,14 @@ export default function ProductionPlanning() {
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err) {
       const detail = err.response?.data?.detail;
-      const errText = Array.isArray(detail)
-        ? detail.map((d) => d.msg || d).join(', ')
-        : (detail || err.message);
+      let errText;
+      if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
+        errText = detail.message || detail.code || JSON.stringify(detail);
+      } else if (Array.isArray(detail)) {
+        errText = detail.map((d) => d.msg || d).join(', ');
+      } else {
+        errText = detail || err.message;
+      }
       setMsg(`❌ ${errText}`);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
@@ -1410,7 +1415,8 @@ export default function ProductionPlanning() {
                   <div style={{ fontSize: 11, color: '#8b5cf6', marginTop: 4, padding: '4px 8px',
                                 background: '#8b5cf615', borderRadius: 4, border: '1px solid #8b5cf644' }}>
                     ⚠ Trial mode: this plan will run concurrently with any existing running plan on the same machine.
-                    For normal production, use Scheduled — it will auto-pause the previous plan.
+                    For normal production, use Scheduled — if another part is already running on the machine,
+                    you must pause or complete it before starting the new plan.
                   </div>
                 )}
               </FField>

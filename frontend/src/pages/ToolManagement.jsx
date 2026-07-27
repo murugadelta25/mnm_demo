@@ -4,6 +4,7 @@ import PageHeader from '../components/PageHeader';
 import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
 import { pageClass, surfaceClass } from '../themes/tileHelpers';
+import ToolGroupsPanel from '../components/ToolGroupsPanel';
 
 const EMPTY_FORM = {
   tool_code: '',
@@ -333,6 +334,7 @@ export default function ToolManagement() {
         {[
           { id: 'inventory', label: 'Inventory & Life' },
           { id: 'alerts', label: `Alerts (${alerts.length})` },
+          { id: 'groups', label: 'Tool Groups' },
           { id: 'monitor', label: 'Monitoring Help' },
         ].map((x) => (
           <button key={x.id} type="button" onClick={() => setTab(x.id)}
@@ -396,6 +398,12 @@ export default function ToolManagement() {
               )}
             </div>
           ))}
+        </div>
+      )}
+
+      {tab === 'groups' && (
+        <div className={surfaceClass(t)} style={{ background: t.surface, border: `1px solid ${t.border}`, borderRadius: 12, padding: 16 }}>
+          <ToolGroupsPanel t={t} canEdit={canEdit} />
         </div>
       )}
 

@@ -376,6 +376,7 @@ class BreakdownTicket(Base):
     id = Column(Integer, primary_key=True, index=True)
     machine_id = Column(Integer, ForeignKey("machines.id"), nullable=False)
     raised_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+    raised_by_name = Column(String(120), nullable=True)  # denormalized: "operator 01 (OP001)"
     acknowledged_by = Column(Integer, ForeignKey("users.id"))
     description = Column(Text)
     status = Column(Enum("raised", "acknowledged", "in_progress", "resolved"), default="raised")
@@ -394,6 +395,7 @@ class Part(Base):
     model_variant = Column(String(100))
     description = Column(String(255))
     tool_no = Column(String(50))
+    tool_group_id = Column(Integer, ForeignKey("tool_groups.id"), nullable=True)
     no_of_cavity = Column(Integer, default=1)
     production_section = Column(String(100))
     input_material = Column(String(255))
@@ -589,6 +591,33 @@ class ToolAlert(Base):
     acknowledged_at = Column(DateTime)
     meta_json = Column(Text)
     created_at = Column(TIMESTAMP)
+
+
+class ToolGroup(Base):
+    """Reusable set of tools shared across parts (selected on Part Master)."""
+    __tablename__ = "tool_groups"
+    id = Column(Integer, primary_key=True, index=True)
+    group_code = Column(String(50), unique=True, nullable=False, index=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text)
+    active = Column(Integer, default=1)
+    created_at = Column(TIMESTAMP)
+    updated_at = Column(TIMESTAMP)
+
+
+class ToolGroupMember(Base):
+    """Tools belonging to a group, with optional process-sheet defaults."""
+    __tablename__ = "tool_group_members"
+    id = Column(Integer, primary_key=True, index=True)
+    group_id = Column(Integer, ForeignKey("tool_groups.id"), nullable=False, index=True)
+    tool_id = Column(Integer, ForeignKey("tool_stocks.id"), nullable=False, index=True)
+    sort_order = Column(Integer, default=0)
+    approx_tool_life = Column(String(100))
+    rpm = Column(String(100))
+    feed_mm_rev = Column(String(100))
+    depth_of_cut = Column(String(100))
+    cutting_speed = Column(String(100))
+    notes = Column(String(255))
 
 
 class MobileDevice(Base):

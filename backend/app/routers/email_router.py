@@ -1165,6 +1165,7 @@ def build_tools_xlsx(db: Session, report_date=None) -> bytes:
 
 
 def build_attachments_for_report_types(report_types: str, db: Session, report_date=None) -> dict:
+    from datetime import date as date_type, timedelta
     rts = [r.strip() for r in report_types.split(",")]
     attachments = {}
     if "oee"         in rts: attachments["oee_report.xlsx"]         = build_oee_xlsx(db, report_date)
@@ -1172,7 +1173,16 @@ def build_attachments_for_report_types(report_types: str, db: Session, report_da
     if "breakdown"   in rts: attachments["breakdown_report.xlsx"]   = build_breakdown_xlsx(db)
     if "maintenance" in rts: attachments["maintenance_report.xlsx"] = build_maintenance_xlsx(db)
     if "data_entry"    in rts: attachments["data_entry_report.xlsx"]    = build_data_entry_xlsx(db, report_date)
-    if "loss_tracker"  in rts: attachments["loss_tracker_report.xlsx"]  = build_loss_tracker_xlsx(db, report_date)
+    if "loss_tracker" in rts:
+        # Pair Loss Tracker with TPM Loss Logger (same date) for scheduled + manual sends
+        if report_date is None:
+            date_str = (date_type.today() - timedelta(days=1)).isoformat()
+        elif isinstance(report_date, str):
+            date_str = report_date[:10]
+        else:
+            date_str = report_date.isoformat()
+        attachments[f"loss_tracker_{date_str}.xlsx"] = build_loss_tracker_xlsx(db, report_date)
+        attachments[f"TPM_Loss_logger_{date_str}.xlsx"] = build_tpm_loss_logger_xlsx(db, report_date)
     if "tools"         in rts: attachments["tool_management_report.xlsx"] = build_tools_xlsx(db, report_date)
     return attachments
 
@@ -1456,4 +1466,174 @@ def download_loss_tracker(
         content=data,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+
+def build_tpm_loss_logger_xlsx(db: Session, report_date=None) -> bytes:
+    """
+    TPM Loss Logger workbook from tablet OperatorLossLog rows.
+    Sheet 1: All TPM losses for the date.
+    Sheet 2+: one sheet per Loss Assigner type (LOSS-1 … LOSS-16).
+    """
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+    from datetime import date as date_type, timedelta, datetime as dt
+    from ..models import OperatorLossLog, Machine, Station, Operator
+    from ..loss_mapping import TPM_LOSS_ASSIGNER_TYPES
+
+    if report_date is None:
+        target = date_type.today() - timedelta(days=1)
+    elif isinstance(report_date, str):
+        target = date_type.fromisoformat(report_date)
+    else:
+        target = report_date
+
+    rows = (
+        db.query(OperatorLossLog)
+        .filter(OperatorLossLog.entry_date == target)
+        .order_by(OperatorLossLog.started_at.asc(), OperatorLossLog.id.asc())
+        .all()
+    )
+
+    machine_map = {m.id: m for m in db.query(Machine).all()}
+    station_map = {p.id: (p.display_name or p.name) for p in db.query(Station).all()}
+    op_map = {o.id: o for o in db.query(Operator).all()}
+
+    def fmt_ist(val):
+        if not val:
+            return ""
+        if hasattr(val, "strftime"):
+            return val.strftime("%d-%m-%Y %H:%M:%S")
+        return str(val)
+
+    def operator_label(row: OperatorLossLog) -> str:
+        if row.operator_id and row.operator_id in op_map:
+            op = op_map[row.operator_id]
+            name = (op.name or "").strip()
+            code = (op.employee_code or "").strip()
+            if name and code and name.lower() != code.lower():
+                return f"{name} ({code})"
+            return name or code
+        return row.username or ""
+
+    def minutes_of(row: OperatorLossLog) -> float:
+        if row.status == "open" and row.started_at:
+            now = dt.now(_IST).replace(tzinfo=None)
+            return round(max(0.0, (now - row.started_at).total_seconds() / 60.0), 2)
+        if row.minutes is not None:
+            return float(row.minutes)
+        if row.started_at and row.ended_at:
+            return round(max(0.0, (row.ended_at - row.started_at).total_seconds() / 60.0), 2)
+        return 0.0
+
+    HEADERS = [
+        "ID", "Machine", "Station", "Operator", "Tab ID",
+        "Loss Code", "Loss Description", "Sub-division / Detail",
+        "Minutes", "Status", "Shift", "Entry Date",
+        "Started At", "Ended At", "OEE Field", "Notes",
+    ]
+
+    hdr_fill = PatternFill("solid", fgColor="0F3D68")
+    hdr_font = Font(bold=True, color="FFFFFF")
+    open_fill = PatternFill("solid", fgColor="FEF3C7")
+
+    def sheet_title(code: str, label: str) -> str:
+        # Excel sheet name max 31 chars
+        raw = f"{code} {label}".replace("/", "-")
+        return raw[:31]
+
+    def write_sheet(ws, loss_rows, empty_msg: str):
+        ws.append(HEADERS)
+        for col in range(1, len(HEADERS) + 1):
+            c = ws.cell(1, col)
+            c.fill = hdr_fill
+            c.font = hdr_font
+            c.alignment = Alignment(horizontal="center", wrap_text=True)
+        if not loss_rows:
+            ws.append([empty_msg])
+            return
+        for row in loss_rows:
+            mach = machine_map.get(row.machine_id)
+            station = station_map.get(mach.station_id, "") if mach else ""
+            ws.append([
+                row.id,
+                mach.name if mach else row.machine_id,
+                station,
+                operator_label(row),
+                row.tab_id or "",
+                row.loss_code or "",
+                row.loss_description or "",
+                row.sub_division or "",
+                minutes_of(row),
+                row.status or "",
+                row.shift or "",
+                row.entry_date.isoformat() if row.entry_date else "",
+                fmt_ist(row.started_at),
+                fmt_ist(row.ended_at) if row.ended_at else ("(open)" if row.status == "open" else ""),
+                row.oee_field or "",
+                (row.notes or "")[:500],
+            ])
+            if row.status == "open":
+                for col in range(1, len(HEADERS) + 1):
+                    ws.cell(ws.max_row, col).fill = open_fill
+        widths = [8, 16, 14, 22, 16, 12, 28, 22, 10, 10, 8, 12, 20, 20, 16, 36]
+        for i, w in enumerate(widths, 1):
+            ws.column_dimensions[get_column_letter(i)].width = w
+
+    wb = openpyxl.Workbook()
+    # Sheet 1 — all tablet TPM losses
+    ws_all = wb.active
+    ws_all.title = "All TPM Losses"
+    write_sheet(
+        ws_all,
+        rows,
+        f"No TPM losses recorded on tablets for {target.isoformat()}",
+    )
+
+    # Sheet 2+ — one per Loss Assigner type
+    by_code = {}
+    for r in rows:
+        code = (r.loss_code or "").strip().upper()
+        by_code.setdefault(code, []).append(r)
+
+    for loss_type in TPM_LOSS_ASSIGNER_TYPES:
+        code = loss_type["code"]
+        title = sheet_title(code, loss_type["label"])
+        ws = wb.create_sheet(title)
+        write_sheet(
+            ws,
+            by_code.get(code, []),
+            f"No {code} · {loss_type['description']} records for {target.isoformat()}",
+        )
+
+    # Any codes not in the standard 16 (legacy / manual)
+    known = {t["code"] for t in TPM_LOSS_ASSIGNER_TYPES}
+    extras = sorted(c for c in by_code.keys() if c and c not in known)
+    for code in extras:
+        title = sheet_title(code, "Other")
+        ws = wb.create_sheet(title)
+        write_sheet(ws, by_code[code], f"No records for {code}")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+@router.get("/download/tpm-loss-logger")
+def download_tpm_loss_logger(
+    report_date: str = None,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    from fastapi.responses import Response
+    from datetime import date as date_type, timedelta
+    if not report_date:
+        report_date = (date_type.today() - timedelta(days=1)).isoformat()
+    data = build_tpm_loss_logger_xlsx(db, report_date)
+    filename = f"TPM_Loss_logger_{report_date}.xlsx"
+    return Response(
+        content=data,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )

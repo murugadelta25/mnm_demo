@@ -1,17 +1,32 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import api from '../api/client';
-import { getDefaultFeatureModules } from '../config/featureRegistry';
+import {
+  getDefaultFeatureModules,
+  getDefaultFeatureRoleAccess,
+  canRoleAccessFeature,
+} from '../config/featureRegistry';
+import { getAccessMatrixRoleDefaults } from '../config/accessMatrix';
 
 const FeatureFlagsCtx = createContext({
   modules: getDefaultFeatureModules(),
+  roleAccess: { ...getDefaultFeatureRoleAccess(), ...getAccessMatrixRoleDefaults() },
+  accessMatrix: [],
+  toggleableRoles: [],
   registry: null,
   loading: true,
   reload: () => {},
   isEnabled: () => true,
+  canAccess: () => true,
 });
 
 export function FeatureFlagsProvider({ children }) {
   const [modules, setModules] = useState(getDefaultFeatureModules);
+  const [roleAccess, setRoleAccess] = useState(() => ({
+    ...getDefaultFeatureRoleAccess(),
+    ...getAccessMatrixRoleDefaults(),
+  }));
+  const [accessMatrix, setAccessMatrix] = useState([]);
+  const [toggleableRoles, setToggleableRoles] = useState([]);
   const [registry, setRegistry] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -19,10 +34,18 @@ export function FeatureFlagsProvider({ children }) {
     return api.get('/api/features/')
       .then(r => {
         setModules({ ...getDefaultFeatureModules(), ...(r.data?.modules || {}) });
+        setRoleAccess({
+          ...getDefaultFeatureRoleAccess(),
+          ...getAccessMatrixRoleDefaults(),
+          ...(r.data?.roleAccess || {}),
+        });
+        setAccessMatrix(r.data?.accessMatrix || []);
+        setToggleableRoles(r.data?.toggleableRoles || []);
         if (r.data?.registry) setRegistry(r.data.registry);
       })
       .catch(() => {
         setModules(getDefaultFeatureModules());
+        setRoleAccess({ ...getDefaultFeatureRoleAccess(), ...getAccessMatrixRoleDefaults() });
       })
       .finally(() => setLoading(false));
   }, []);
@@ -36,8 +59,23 @@ export function FeatureFlagsProvider({ children }) {
     [modules],
   );
 
+  const canAccess = useCallback(
+    (featureId, role) => canRoleAccessFeature(featureId, role, modules, roleAccess),
+    [modules, roleAccess],
+  );
+
   return (
-    <FeatureFlagsCtx.Provider value={{ modules, registry, loading, reload, isEnabled }}>
+    <FeatureFlagsCtx.Provider value={{
+      modules,
+      roleAccess,
+      accessMatrix,
+      toggleableRoles,
+      registry,
+      loading,
+      reload,
+      isEnabled,
+      canAccess,
+    }}>
       {children}
     </FeatureFlagsCtx.Provider>
   );

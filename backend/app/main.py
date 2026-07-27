@@ -22,6 +22,7 @@ from .routers import machine_kpi as machine_kpi_router
 from .routers import archive as archive_router
 from .routers import mobile as mobile_router
 from .routers import operators as operators_router
+from .routers import tool_groups as tool_groups_router
 from .ws_manager import manager
 from sqlalchemy import text, inspect
 from sqlalchemy.orm import Session
@@ -168,6 +169,12 @@ async def lifespan(app: FastAPI):
     _ensure_work_instruction_tables()
     _ensure_deviation_alert_table()
     try:
+        from .routers.tool_groups import ensure_tool_groups_schema
+        ensure_tool_groups_schema()
+        print("[OK] tool_groups schema ensured")
+    except Exception as e:
+        print(f"[WARN] tool_groups schema: {e}")
+    try:
         db = next(get_db())
         try:
             start_scheduler(db)
@@ -209,6 +216,7 @@ app.include_router(machine_kpi_router.router)
 app.include_router(archive_router.router)
 app.include_router(mobile_router.router)
 app.include_router(operators_router.router)
+app.include_router(tool_groups_router.router)
 
 # Serve uploaded machine images — pathlib works on both Windows and Linux
 STATIC_DIR = Path(__file__).parent.parent / "static"

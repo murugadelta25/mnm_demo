@@ -31,6 +31,7 @@ import {
   docTypeLabel,
 } from '../utils/docTypes';
 import SymbolInput, { isSpecColumn } from '../components/SymbolInput';
+import ToolsParamTable from '../components/ToolsParamTable';
 
 const PARTS_PAGE_SIZE = 50;
 
@@ -53,6 +54,7 @@ const EMPTY_PART = {
   model_variant: '',
   description: '',
   tool_no: '',
+  tool_group_id: null,
   production_section: '',
   input_material: '',
   previous_operation: '',
@@ -129,6 +131,7 @@ function partFormFromApi(p, { includeImages = true } = {}) {
     model_variant: includeImages ? (p.model_variant || p.part_no || '') : '',
     description: p.description || '',
     tool_no: p.tool_no || '',
+    tool_group_id: p.tool_group_id || null,
     production_section: p.production_section || '',
     input_material: p.input_material || '',
     previous_operation: p.previous_operation || '',
@@ -676,6 +679,7 @@ export default function PartManagement() {
         model_variant: form.part_no,
         description: form.description || null,
         tool_no: form.tool_no || null,
+        tool_group_id: form.tool_group_id || null,
         production_section: form.production_section || null,
         input_material: form.input_material,
         previous_operation: form.previous_operation,
@@ -1053,14 +1057,18 @@ export default function PartManagement() {
             </div>
           </div>
 
-          <DynamicParamTable
-            title="TOOLS PARAMETERS"
+          <ToolsParamTable
             table={form.tools_parameters}
             onChange={(tools_parameters) => setForm({ ...form, tools_parameters })}
+            toolGroupId={form.tool_group_id}
+            onToolGroupChange={(tool_group_id) => setForm((f) => ({ ...f, tool_group_id }))}
             t={t}
             s={s}
             inp={inp}
-            defaultOpen={false}
+            CollapsibleSection={CollapsibleSection}
+            SymbolInput={SymbolInput}
+            isSpecColumn={isSpecColumn}
+            emptyRowFromColumns={emptyRowFromColumns}
           />
 
           <DynamicParamTable

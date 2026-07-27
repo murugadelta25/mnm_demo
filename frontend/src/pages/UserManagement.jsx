@@ -3,11 +3,13 @@ import { Link } from 'react-router-dom';
 import api from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
+import { useFeatureFlags } from '../context/FeatureFlagsContext';
 import { pageClass } from '../themes/tileHelpers';
 import PageHeader from '../components/PageHeader';
 import { PASSWORD_HINT, passwordPolicyError } from '../utils/passwordPolicy';
+import { ACCESS_MATRIX, ACCESS_MATRIX_ROLES, getAccessMatrixRoleDefaults } from '../config/accessMatrix';
 
-const ROLES = ['superadmin', 'admin', 'supervisor', 'operator', 'maintenance', 'quality'];
+const ROLES = ACCESS_MATRIX_ROLES;
 
 const ROLE_CFG = {
   superadmin:  { color: '#dc2626', label: 'Super Admin', icon: '🛡', desc: 'Full access + factory setup, data backup & archive' },
@@ -17,23 +19,6 @@ const ROLE_CFG = {
   maintenance: { color: '#10b981', label: 'Maintenance', icon: '🛠', desc: 'Acknowledge and resolve breakdown tickets' },
   quality:     { color: '#8b5cf6', label: 'Quality',     icon: '✓', desc: 'QC inspection sheet — inspector approval' },
 };
-
-const ACCESS_MATRIX = [
-  { feature: 'View Dashboard',         superadmin: true,  admin: true,  supervisor: true,  operator: true,  maintenance: true,  quality: false },
-  { feature: 'Production Planning',    superadmin: true,  admin: true,  supervisor: true,  operator: true,  maintenance: false, quality: false },
-  { feature: 'Data Entry',             superadmin: true,  admin: true,  supervisor: true,  operator: true,  maintenance: false, quality: false },
-  { feature: 'Model Change Request',   superadmin: true,  admin: true,  supervisor: true,  operator: true,  maintenance: false, quality: false },
-  { feature: 'Approve Model Change',   superadmin: true,  admin: true,  supervisor: true,  operator: false, maintenance: false, quality: false },
-  { feature: 'Raise Breakdown Ticket', superadmin: true,  admin: true,  supervisor: true,  operator: true,  maintenance: false, quality: false },
-  { feature: 'Acknowledge Breakdown',  superadmin: true,  admin: true,  supervisor: false, operator: false, maintenance: true,  quality: false },
-  { feature: 'Resolve Breakdown',      superadmin: true,  admin: true,  supervisor: false, operator: false, maintenance: true,  quality: false },
-  { feature: 'Email Alerts Config',    superadmin: true,  admin: true,  supervisor: true,  operator: false, maintenance: false, quality: false },
-  { feature: 'Machine Configuration',  superadmin: true,  admin: true,  supervisor: true,  operator: false, maintenance: false, quality: false },
-  { feature: 'User Management',        superadmin: true,  admin: true,  supervisor: false, operator: false, maintenance: false, quality: false },
-  { feature: 'System Configuration',   superadmin: true,  admin: true,  supervisor: false, operator: false, maintenance: false, quality: false },
-  { feature: 'Factory Setup / Backup', superadmin: true,  admin: false, supervisor: false, operator: false, maintenance: false, quality: false },
-  { feature: 'QC Approvals',           superadmin: true,  admin: true,  supervisor: true,  operator: false, maintenance: false, quality: true },
-];
 
 const INIT_FORM = { username: '', password: '', role: 'supervisor' };
 
@@ -133,6 +118,7 @@ function SectionToggle({ open, onToggle, label, count }) {
 export default function UserManagement() {
   const { theme: t } = useTheme();
   const { user: me } = useAuth();
+  const { roleAccess, reload: reloadFeatures } = useFeatureFlags();
   const [users, setUsers]       = useState([]);
   const [form, setForm]         = useState(INIT_FORM);
   const [editId, setEditId]     = useState(null);
@@ -141,10 +127,12 @@ export default function UserManagement() {
   const [showPwForm, setShowPwForm] = useState(false);
   const [msg, setMsg]           = useState({ text: '', ok: true });
   const [photoUploadId, setPhotoUploadId] = useState(null);
-  const [showMatrix, setShowMatrix] = useState(false);
+  const [showMatrix, setShowMatrix] = useState(true);
   const [showUsers, setShowUsers] = useState(true);
   const [roleFilter, setRoleFilter] = useState(null);
   const [search, setSearch] = useState('');
+  const [roleAccessEdit, setRoleAccessEdit] = useState({});
+  const [roleAccessSaving, setRoleAccessSaving] = useState(false);
   const editFormRef = useRef(null);
   const addFormRef = useRef(null);
 
@@ -152,6 +140,16 @@ export default function UserManagement() {
     setMsg({ text, ok });
     setTimeout(() => setMsg({ text: '', ok: true }), 4000);
   };
+
+  useEffect(() => {
+    const defaults = getAccessMatrixRoleDefaults();
+    const merged = { ...defaults, ...(roleAccess || {}) };
+    // Ensure every matrix row id has a roles map
+    for (const row of ACCESS_MATRIX) {
+      if (!merged[row.id]) merged[row.id] = { ...row.roles };
+    }
+    setRoleAccessEdit(merged);
+  }, [roleAccess]);
 
   const fetchUsers = useCallback(async () => {
     try {
@@ -293,6 +291,72 @@ export default function UserManagement() {
   const selectRole = (role) => {
     setRoleFilter((prev) => (prev === role ? null : role));
     setShowUsers(true);
+  };
+
+  const toggleFeatureRole = (featureId, role) => {
+    setRoleAccessEdit((prev) => {
+      const current = { ...(prev[featureId] || {}) };
+      current[role] = !current[role];
+      const next = { ...prev, [featureId]: current };
+      const row = ACCESS_MATRIX.find((r) => r.id === featureId);
+      if (row?.registryId && row.registryId !== featureId) {
+        next[row.registryId] = { ...current };
+      }
+      return next;
+    });
+  };
+
+  const setRoleForAllFeatures = (role, enabled) => {
+    setRoleAccessEdit((prev) => {
+      const next = { ...prev };
+      for (const row of ACCESS_MATRIX) {
+        const current = { ...(next[row.id] || { ...row.roles }) };
+        current[role] = enabled;
+        next[row.id] = current;
+        if (row.registryId && row.registryId !== row.id) {
+          next[row.registryId] = { ...current };
+        }
+      }
+      return next;
+    });
+  };
+
+  const setAllRolesForFeature = (featureId, enabled) => {
+    setRoleAccessEdit((prev) => {
+      const current = { ...(prev[featureId] || {}) };
+      for (const role of ROLES) current[role] = enabled;
+      const next = { ...prev, [featureId]: current };
+      const row = ACCESS_MATRIX.find((r) => r.id === featureId);
+      if (row?.registryId && row.registryId !== featureId) {
+        next[row.registryId] = { ...current };
+      }
+      return next;
+    });
+  };
+
+  const resetRoleAccessToDefaults = () => {
+    setRoleAccessEdit(getAccessMatrixRoleDefaults());
+    flash('Restored default role access (click Save to apply)');
+  };
+
+  const saveRoleAccess = async () => {
+    setRoleAccessSaving(true);
+    try {
+      const payload = {};
+      for (const row of ACCESS_MATRIX) {
+        if (roleAccessEdit[row.id]) payload[row.id] = roleAccessEdit[row.id];
+        if (row.registryId && roleAccessEdit[row.registryId]) {
+          payload[row.registryId] = roleAccessEdit[row.registryId];
+        }
+      }
+      await api.put('/api/features/role-access', { roleAccess: payload });
+      await reloadFeatures();
+      flash('✅ Feature access matrix saved');
+    } catch (e) {
+      flash('❌ ' + (e.response?.data?.detail || e.message || 'Failed to save role access'), false);
+    } finally {
+      setRoleAccessSaving(false);
+    }
   };
 
   const userFormCard = (opts = {}) => {
@@ -650,7 +714,7 @@ export default function UserManagement() {
         )}
       </div>
 
-      {/* Access Matrix — hidden by default */}
+      {/* Feature Access Matrix — editable checkboxes */}
       <div style={s.card}>
         <SectionToggle
           open={showMatrix}
@@ -658,34 +722,145 @@ export default function UserManagement() {
           label="📋 Feature Access Matrix"
         />
         {showMatrix && (
-          <div style={{ overflowX: 'auto' }}>
-            <table style={s.table}>
-              <thead>
-                <tr>
-                  <th style={s.th}>Feature</th>
-                  {ROLES.map(r => (
-                    <th key={r} style={{ ...s.th, color: ROLE_CFG[r].color, textAlign: 'center' }}>
-                      {ROLE_CFG[r].icon} {ROLE_CFG[r].label}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {ACCESS_MATRIX.map(row => (
-                  <tr key={row.feature}>
-                    <td style={{ ...s.td, fontWeight: 500, color: t.text }}>{row.feature}</td>
-                    {ROLES.map(r => (
-                      <td key={r} style={{ ...s.td, textAlign: 'center' }}>
-                        {row[r]
-                          ? <span style={{ color: '#10b981', fontSize: 16 }}>✓</span>
-                          : <span style={{ color: t.textFaint, fontSize: 14 }}>—</span>}
-                      </td>
-                    ))}
+          <>
+            <p style={{ color: t.textMuted, fontSize: 12, margin: '0 0 10px', lineHeight: 1.45 }}>
+              Tick roles for each feature. Under each checkbox, <strong>Default</strong> shows the system baseline
+              (✓ / —) as a reference. Cells that differ from default are highlighted. Column header selects a role
+              for all features; row checkbox selects all roles for that feature.
+            </p>
+            <div style={{
+              display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center',
+              justifyContent: 'space-between', marginBottom: 12,
+            }}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, fontSize: 11, color: t.textMuted }}>
+                <span><strong style={{ color: t.text }}>Checkbox</strong> = current access</span>
+                <span><strong style={{ color: '#10b981' }}>✓</strong> / <strong>—</strong> under it = default reference</span>
+                <span style={{
+                  padding: '2px 8px', borderRadius: 4,
+                  background: `${t.accent}22`, border: `1px solid ${t.accent}55`,
+                }}>
+                  Highlighted = changed from default
+                </span>
+              </div>
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  style={s.cancelBtn}
+                  onClick={resetRoleAccessToDefaults}
+                  disabled={roleAccessSaving}
+                >
+                  Reset to defaults
+                </button>
+                <button
+                  type="button"
+                  style={{ ...s.submitBtn, opacity: roleAccessSaving ? 0.7 : 1 }}
+                  disabled={roleAccessSaving}
+                  onClick={saveRoleAccess}
+                >
+                  {roleAccessSaving ? 'Saving…' : 'Save access matrix'}
+                </button>
+              </div>
+            </div>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={s.table}>
+                <thead>
+                  <tr>
+                    <th style={s.th}>Feature</th>
+                    {ROLES.map((r) => {
+                      const allOn = ACCESS_MATRIX.every((row) => !!roleAccessEdit[row.id]?.[r]);
+                      const someOn = ACCESS_MATRIX.some((row) => !!roleAccessEdit[row.id]?.[r]);
+                      return (
+                        <th key={r} style={{ ...s.th, color: ROLE_CFG[r].color, textAlign: 'center' }}>
+                          <label
+                            style={{
+                              display: 'inline-flex',
+                              flexDirection: 'column',
+                              alignItems: 'center',
+                              gap: 4,
+                              cursor: 'pointer',
+                              whiteSpace: 'nowrap',
+                            }}
+                            title={`${allOn ? 'Clear' : 'Select'} ${ROLE_CFG[r].label} for all features`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={allOn}
+                              ref={(el) => { if (el) el.indeterminate = someOn && !allOn; }}
+                              onChange={(e) => setRoleForAllFeatures(r, e.target.checked)}
+                            />
+                            <span>{ROLE_CFG[r].icon} {ROLE_CFG[r].label}</span>
+                          </label>
+                        </th>
+                      );
+                    })}
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {ACCESS_MATRIX.map((row) => {
+                    const rolesMap = roleAccessEdit[row.id] || row.roles;
+                    const defaults = row.roles || {};
+                    const allRolesOn = ROLES.every((r) => !!rolesMap[r]);
+                    const someRolesOn = ROLES.some((r) => !!rolesMap[r]);
+                    return (
+                      <tr key={row.id}>
+                        <td style={{ ...s.td, fontWeight: 500, color: t.text }}>
+                          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+                            <input
+                              type="checkbox"
+                              checked={allRolesOn}
+                              ref={(el) => { if (el) el.indeterminate = someRolesOn && !allRolesOn; }}
+                              onChange={(e) => setAllRolesForFeature(row.id, e.target.checked)}
+                              title="Select / clear all roles for this feature"
+                            />
+                            {row.feature}
+                          </label>
+                        </td>
+                        {ROLES.map((r) => {
+                          const current = !!rolesMap[r];
+                          const defOn = !!defaults[r];
+                          const changed = current !== defOn;
+                          return (
+                            <td
+                              key={r}
+                              style={{
+                                ...s.td,
+                                textAlign: 'center',
+                                background: changed ? `${t.accent}18` : 'transparent',
+                                verticalAlign: 'middle',
+                              }}
+                              title={
+                                changed
+                                  ? `Changed from default (${defOn ? 'on' : 'off'})`
+                                  : `Default: ${defOn ? 'allowed' : 'not allowed'}`
+                              }
+                            >
+                              <div style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'center', gap: 2 }}>
+                                <input
+                                  type="checkbox"
+                                  checked={current}
+                                  onChange={() => toggleFeatureRole(row.id, r)}
+                                  aria-label={`${row.feature} — ${ROLE_CFG[r].label}`}
+                                />
+                                <span style={{
+                                  fontSize: 10,
+                                  lineHeight: 1.2,
+                                  color: defOn ? '#10b981' : t.textFaint,
+                                  fontWeight: defOn ? 700 : 500,
+                                }}>
+                                  {defOn ? '✓' : '—'}
+                                  <span style={{ color: t.textFaint, fontWeight: 400 }}> def</span>
+                                </span>
+                              </div>
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </div>
     </div>

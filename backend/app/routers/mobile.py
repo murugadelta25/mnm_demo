@@ -475,15 +475,29 @@ async def verify_face(
     data = await file.read()
     if len(data) > MAX_IMAGE_BYTES:
         raise HTTPException(413, f"Image too large (max {MAX_IMAGE_BYTES // (1024 * 1024)} MB)")
+    if not data:
+        raise HTTPException(400, "Empty image upload")
 
     suffix = Path(file.filename or "live.jpg").suffix.lower()
     if suffix not in {".jpg", ".jpeg", ".png", ".webp"}:
         suffix = ".jpg"
     # Lazy import — OpenCV only needed for face verify (web app runs without mobile/OpenCV)
-    from ..face_verify import compare_faces, save_temp_upload
+    try:
+        from ..face_verify import compare_faces, save_temp_upload
+    except Exception as e:
+        raise HTTPException(
+            503,
+            f"Face verification unavailable on server ({e}). Use password-only login, "
+            "or install: pip install opencv-python-headless numpy pillow",
+        ) from e
+
     live_path = save_temp_upload(data, suffix)
     try:
-        verified, score, message = compare_faces(ref_path, live_path)
+        try:
+            verified, score, message = compare_faces(ref_path, live_path)
+        except Exception as e:
+            # Never return opaque HTTP 500 to the tablet
+            raise HTTPException(400, f"Face verification error: {e}") from e
     finally:
         live_path.unlink(missing_ok=True)
 

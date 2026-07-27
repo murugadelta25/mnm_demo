@@ -326,7 +326,7 @@ export default function Breakdown() {
                   </div>
                   {(tk.raised_by_username || tk.raised_by) && (
                     <div style={{ color: t.textMuted, fontSize: 12, marginBottom: 4 }}>
-                      👤 Raised by: <b>{tk.raised_by_username || tk.raised_by}</b>
+                      👤 Raised by: <b>{tk.raised_by_name || tk.raised_by_username || tk.raised_by}</b>
                     </div>
                   )}
                   <div style={{ color: t.textMuted, fontSize: 13, marginBottom: 8 }}>{tk.description}</div>
