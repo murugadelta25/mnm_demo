@@ -8,8 +8,12 @@ backend/app/routers/__pycache__/
 *.pyo
 
 # Node
+node_modules/
 frontend/node_modules/
 frontend/dist/
+# Accidental root npm install (EAP PMS deps live under frontend/)
+/package.json
+/package-lock.json
 
 # Logs
 *.log
@@ -55,9 +59,26 @@ frontend/src/pages/bug_*
 # Bundled nginx binary (use scripts/install-nginx.sh on server)
 deploy/nginx-win/
 
-# Uploaded work-instruction PDFs (runtime data)
-backend/static/work-instructions/
+# Uploaded work-instruction PDFs / images (runtime uploads via parts API)
+backend/static/work-instructions/*
+!backend/static/work-instructions/.gitkeep
+
+# Part images / sketches uploaded via API
+backend/static/parts/*
+!backend/static/parts/.gitkeep
+
+# Machine images uploaded via API
+backend/static/machines/*
+!backend/static/machines/.gitkeep
 
 # Operator / user face-verification reference photos (runtime uploads via API)
 backend/static/operator-reference/*
 !backend/static/operator-reference/.gitkeep
+
+# Factory logos uploaded via API (runtime uploads via /api/config/factory-logo)
+backend/static/factory/*
+!backend/static/factory/.gitkeep
+
+# Operator session photos uploaded via mobile API
+backend/static/operator-sessions/*
+!backend/static/operator-sessions/.gitkeep
