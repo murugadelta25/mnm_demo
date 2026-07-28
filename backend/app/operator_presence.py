@@ -16,7 +16,21 @@ def get_live_operator_map(
     """
     Map machine_id → { operator_id, operator_name, operator_code, source }.
     Priority: active OperatorSession, then MachineAllocation for date+shift.
+
+    Returns {} if mobile/operator tables are missing — must never break /api/machines.
     """
+    try:
+        return _get_live_operator_map_impl(db, entry_date=entry_date, shift_id=shift_id)
+    except Exception as exc:
+        print(f"[WARN] get_live_operator_map failed (dashboard continues): {exc}")
+        return {}
+
+
+def _get_live_operator_map_impl(
+    db: Session,
+    entry_date=None,
+    shift_id: Optional[str] = None,
+) -> Dict[int, dict]:
     now = now_ist()
     if entry_date is None or not shift_id:
         try:

@@ -169,6 +169,12 @@ async def lifespan(app: FastAPI):
     _ensure_work_instruction_tables()
     _ensure_deviation_alert_table()
     try:
+        from .models import ensure_mobile_schema
+        ensure_mobile_schema()
+        print("[OK] mobile/operator schema ensured")
+    except Exception as e:
+        print(f"[WARN] mobile schema: {e}")
+    try:
         from .routers.tool_groups import ensure_tool_groups_schema
         ensure_tool_groups_schema()
         print("[OK] tool_groups schema ensured")

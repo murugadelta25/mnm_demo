@@ -102,109 +102,123 @@ def list_notifications(db: Session = Depends(get_db), user=Depends(get_current_u
     items = []
     role = getattr(user, "role", None) or ""
 
-    # Pending model-change approvals (planning interlock + manual)
-    pending_mcr = (
-        db.query(ModelChangeRequest)
-        .filter(ModelChangeRequest.status == "pending")
-        .order_by(ModelChangeRequest.created_at.desc())
-        .limit(50)
-        .all()
-    )
-    for mcr in pending_mcr:
-        machine = db.query(Machine).filter(Machine.id == mcr.machine_id).first()
-        mname = machine.name if machine else f"Machine #{mcr.machine_id}"
-        source = "Planning" if mcr.plan_id else "Manual"
-        needs_action = role in ("supervisor", "admin")
-        items.append({
-            "id": f"mcr-pending-{mcr.id}",
-            "kind": "model_change",
-            "severity": "warning" if needs_action else "info",
-            "title": "Model change approval required" if needs_action else "Model change awaiting approval",
-            "body": f"{mcr.from_model} → {mcr.to_model} on {mname} ({source}"
-                    + (f", plan #{mcr.plan_id}" if mcr.plan_id else "")
-                    + ")",
-            "path": "/model-change",
-            "created_at": _iso(mcr.created_at),
-            "meta": {"mcr_id": mcr.id, "plan_id": mcr.plan_id, "machine_id": mcr.machine_id},
-        })
-
-    # Active model change (setting change in progress)
-    active_mcr = (
-        db.query(ModelChangeRequest)
-        .filter(ModelChangeRequest.status.in_(["approved", "in_progress"]))
-        .order_by(ModelChangeRequest.start_time.desc())
-        .limit(30)
-        .all()
-    )
-    for mcr in active_mcr:
-        machine = db.query(Machine).filter(Machine.id == mcr.machine_id).first()
-        mname = machine.name if machine else f"Machine #{mcr.machine_id}"
-        elapsed = 0
-        if mcr.start_time:
-            elapsed = max(0, int((_now() - mcr.start_time).total_seconds() / 60))
-        over = elapsed > (mcr.ideal_minutes or 60)
-        items.append({
-            "id": f"mcr-active-{mcr.id}",
-            "kind": "setting_change",
-            "severity": "alert" if over else "info",
-            "title": "Setting change in progress" + (" — exceeded ideal time" if over else ""),
-            "body": f"{mname}: {mcr.from_model} → {mcr.to_model} · {elapsed} min"
-                    + (f" / ideal {mcr.ideal_minutes} min" if mcr.ideal_minutes else ""),
-            "path": "/model-change",
-            "created_at": _iso(mcr.start_time or mcr.created_at),
-            "meta": {"mcr_id": mcr.id, "elapsed_minutes": elapsed},
-        })
-
-    # Open breakdown tickets
-    tickets = (
-        db.query(BreakdownTicket)
-        .filter(BreakdownTicket.status.in_(["raised", "acknowledged", "in_progress"]))
-        .order_by(BreakdownTicket.id.desc())
-        .limit(40)
-        .all()
-    )
-    for tk in tickets:
-        machine = db.query(Machine).filter(Machine.id == tk.machine_id).first()
-        mname = machine.name if machine else f"Machine #{tk.machine_id}"
-        sev = "alert" if tk.status == "raised" else "warning"
-        items.append({
-            "id": f"bd-{tk.id}",
-            "kind": "breakdown",
-            "severity": sev,
-            "title": f"Breakdown #{tk.id} — {tk.status}",
-            "body": f"{mname}: {(tk.description or 'No description')[:120]}",
-            "path": "/breakdown",
-            "created_at": _iso(tk.created_at),
-            "meta": {"ticket_id": tk.id, "machine_id": tk.machine_id},
-        })
-
-    # Plans waiting on model-change approval
-    pending_plan_ids = [
-        mcr.plan_id for mcr in pending_mcr if mcr.plan_id
-    ]
-    if pending_plan_ids:
-        plans = (
-            db.query(ProductionPlan)
-            .filter(
-                ProductionPlan.id.in_(pending_plan_ids),
-                ProductionPlan.status == "pending",
-            )
+    try:
+        # Pending model-change approvals (planning interlock + manual)
+        pending_mcr = (
+            db.query(ModelChangeRequest)
+            .filter(ModelChangeRequest.status == "pending")
+            .order_by(ModelChangeRequest.created_at.desc())
+            .limit(50)
             .all()
         )
-        for plan in plans:
+        for mcr in pending_mcr:
+            machine = db.query(Machine).filter(Machine.id == mcr.machine_id).first()
+            mname = machine.name if machine else f"Machine #{mcr.machine_id}"
+            source = "Planning" if mcr.plan_id else "Manual"
+            needs_action = role in ("supervisor", "admin", "superadmin")
             items.append({
-                "id": f"plan-await-{plan.id}",
-                "kind": "planning",
-                "severity": "warning",
-                "title": f"Plan #{plan.id} awaiting model change",
-                "body": f"{plan.model_variant or plan.current_operation} · shift {plan.shift} · {plan.plan_date}",
-                "path": "/planning",
-                "created_at": _iso(plan.updated_at or plan.created_at),
-                "meta": {"plan_id": plan.id},
+                "id": f"mcr-pending-{mcr.id}",
+                "kind": "model_change",
+                "severity": "warning" if needs_action else "info",
+                "title": "Model change approval required" if needs_action else "Model change awaiting approval",
+                "body": f"{mcr.from_model} → {mcr.to_model} on {mname} ({source}"
+                        + (f", plan #{mcr.plan_id}" if mcr.plan_id else "")
+                        + ")",
+                "path": "/model-change",
+                "created_at": _iso(mcr.created_at),
+                "meta": {"mcr_id": mcr.id, "plan_id": mcr.plan_id, "machine_id": mcr.machine_id},
             })
 
+        # Active model change (setting change in progress)
+        active_mcr = (
+            db.query(ModelChangeRequest)
+            .filter(ModelChangeRequest.status.in_(["approved", "in_progress"]))
+            .order_by(ModelChangeRequest.start_time.desc())
+            .limit(30)
+            .all()
+        )
+        for mcr in active_mcr:
+            machine = db.query(Machine).filter(Machine.id == mcr.machine_id).first()
+            mname = machine.name if machine else f"Machine #{mcr.machine_id}"
+            elapsed = 0
+            if mcr.start_time:
+                elapsed = max(0, int((_now() - mcr.start_time).total_seconds() / 60))
+            over = elapsed > (mcr.ideal_minutes or 60)
+            items.append({
+                "id": f"mcr-active-{mcr.id}",
+                "kind": "setting_change",
+                "severity": "alert" if over else "info",
+                "title": "Setting change in progress" + (" — exceeded ideal time" if over else ""),
+                "body": f"{mname}: {mcr.from_model} → {mcr.to_model} · {elapsed} min"
+                        + (f" / ideal {mcr.ideal_minutes} min" if mcr.ideal_minutes else ""),
+                "path": "/model-change",
+                "created_at": _iso(mcr.start_time or mcr.created_at),
+                "meta": {"mcr_id": mcr.id, "elapsed_minutes": elapsed},
+            })
+
+        # Open breakdown tickets
+        tickets = (
+            db.query(BreakdownTicket)
+            .filter(BreakdownTicket.status.in_(["raised", "acknowledged", "in_progress"]))
+            .order_by(BreakdownTicket.id.desc())
+            .limit(40)
+            .all()
+        )
+        for tk in tickets:
+            machine = db.query(Machine).filter(Machine.id == tk.machine_id).first()
+            mname = machine.name if machine else f"Machine #{tk.machine_id}"
+            sev = "alert" if tk.status == "raised" else "warning"
+            items.append({
+                "id": f"bd-{tk.id}",
+                "kind": "breakdown",
+                "severity": sev,
+                "title": f"Breakdown #{tk.id} — {tk.status}",
+                "body": f"{mname}: {(tk.description or 'No description')[:120]}",
+                "path": "/breakdown",
+                "created_at": _iso(tk.created_at),
+                "meta": {"ticket_id": tk.id, "machine_id": tk.machine_id},
+            })
+
+        # Plans waiting on model-change approval
+        pending_plan_ids = [
+            mcr.plan_id for mcr in pending_mcr if mcr.plan_id
+        ]
+        if pending_plan_ids:
+            plans = (
+                db.query(ProductionPlan)
+                .filter(
+                    ProductionPlan.id.in_(pending_plan_ids),
+                    ProductionPlan.status == "pending",
+                )
+                .all()
+            )
+            for plan in plans:
+                items.append({
+                    "id": f"plan-await-{plan.id}",
+                    "kind": "planning",
+                    "severity": "warning",
+                    "title": f"Plan #{plan.id} awaiting model change",
+                    "body": f"{plan.model_variant or plan.current_operation} · shift {plan.shift} · {plan.plan_date}",
+                    "path": "/planning",
+                    "created_at": _iso(plan.updated_at or plan.created_at),
+                    "meta": {"plan_id": plan.id},
+                })
+    except Exception as exc:
+        print(f"[Notifications] core alerts skipped: {exc}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
     # SPC / QC parameter deviations
-    _append_spc_notifications(db, items)
+    try:
+        _append_spc_notifications(db, items)
+    except Exception as exc:
+        print(f"[Notifications] SPC block skipped: {exc}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
     # Tool low-stock / near-EOL (skip suppressed)
     try:
@@ -235,6 +249,10 @@ def list_notifications(db: Session = Depends(get_db), user=Depends(get_current_u
             })
     except Exception as exc:
         print(f"[Notifications] tool alerts skipped: {exc}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
     items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
 

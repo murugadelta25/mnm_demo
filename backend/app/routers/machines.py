@@ -257,14 +257,24 @@ def update_reason(log_id: int, data: ReasonUpdate, db: Session = Depends(get_db)
 def list_machines(db: Session = Depends(get_db), _=Depends(get_current_user)):
     from ..operator_presence import get_live_operator_map, operator_fields_for_machine
 
-    machines = db.query(Machine).order_by(Machine.station_id, Machine.id).all()
+    try:
+        machines = db.query(Machine).order_by(Machine.station_id, Machine.id).all()
+    except Exception as exc:
+        db.rollback()
+        print(f"[ERROR] list_machines query failed: {exc}")
+        raise HTTPException(500, f"Failed to load machines: {exc}")
+
     op_map = get_live_operator_map(db)
     result = []
     for m in machines:
-        live_status = _compute_status(m, db)
-        if m.status != live_status:
-            m.status = live_status
-            _log_status(m.id, live_status, "sync", db)
+        try:
+            live_status = _compute_status(m, db)
+            if m.status != live_status:
+                m.status = live_status
+                _log_status(m.id, live_status, "sync", db)
+        except Exception as exc:
+            print(f"[WARN] status compute failed for machine {m.id}: {exc}")
+            live_status = m.status or "idle"
         station = db.query(Station).filter(Station.id == m.station_id).first()
         row = {
             "id": m.id,
@@ -282,7 +292,10 @@ def list_machines(db: Session = Depends(get_db), _=Depends(get_current_user)):
         }
         row.update(operator_fields_for_machine(op_map, m.id))
         result.append(row)
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
     return result
 
 
