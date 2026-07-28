@@ -90,6 +90,19 @@ cmd_logs() {
   sudo journalctl -u "${BACKEND_SERVICE}" -u "${FRONTEND_SERVICE}" -f --no-pager
 }
 
+cmd_preflight() {
+  ensure_deploy_config
+  print_banner
+  log_step "[preflight] Running safe deployment checks..."
+  bash "$SCRIPTS_DIR/install-deps.sh"
+  ensure_backend_env
+  configure_frontend_env
+  bash "$SCRIPTS_DIR/setup-database.sh"
+  log_ok "Preflight complete"
+  log_info "Dependencies verified, DB backup created if needed, migrations/schema guard applied"
+  log_info "Next steps: git pull && ./run.sh restart"
+}
+
 cmd_restart() {
   ensure_deploy_config
   print_banner
@@ -155,11 +168,12 @@ case "$ACTION" in
   stop)    cmd_stop ;;
   status)  cmd_status ;;
   logs)    cmd_logs ;;
+  preflight) cmd_preflight ;;
   restart) cmd_restart ;;
   start|"") cmd_start ;;
   *)
     echo "Unknown command: $ACTION"
-    echo "Usage: ./run.sh [start|stop|restart|status|logs]"
+    echo "Usage: ./run.sh [start|stop|restart|status|logs|preflight]"
     exit 1
     ;;
 esac

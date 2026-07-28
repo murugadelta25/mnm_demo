@@ -1,6 +1,13 @@
 # Titan OEE + CPLM UI - Windows quick launcher
-# Usage: .\run.ps1
+# Usage:
+#   .\run.ps1
+#   .\run.ps1 preflight
+#   .\run.ps1 help
 # Note: ASCII-only output for Windows PowerShell encoding compatibility
+
+param(
+    [string]$Action = "start"
+)
 
 $ErrorActionPreference = "Stop"
 $ProjectDir = $PSScriptRoot
@@ -59,6 +66,18 @@ function Write-StepFail {
     Write-Host "  [FAIL] $Message" -ForegroundColor Red
 }
 
+function Show-Usage {
+    Write-BannerLine
+    Write-Host "  EAP PMS - Windows launcher" -ForegroundColor Cyan
+    Write-BannerLine
+    Write-Host ""
+    Write-Host "Usage:" -ForegroundColor White
+    Write-Host "  .\run.ps1           Start application" -ForegroundColor Gray
+    Write-Host "  .\run.ps1 preflight Safe DB backup + schema checks only" -ForegroundColor Gray
+    Write-Host "  .\run.ps1 help      Show this help" -ForegroundColor Gray
+    Write-Host ""
+}
+
 function Get-DatabaseCredentials {
     $configFile = Join-Path $ProjectDir "database\db.config.json"
     if (Test-Path $configFile) {
@@ -98,6 +117,20 @@ function Get-MySqlExe {
     return $null
 }
 
+function Get-MySqlDumpExe {
+    $candidates = @(
+        "C:\Program Files\MySQL\MySQL Server 8.0\bin\mysqldump.exe",
+        "C:\Program Files\MySQL\MySQL Server 8.4\bin\mysqldump.exe",
+        "C:\xampp\mysql\bin\mysqldump.exe"
+    )
+    foreach ($path in $candidates) {
+        if (Test-Path $path) { return $path }
+    }
+    $cmd = Get-Command mysqldump -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    return $null
+}
+
 function Get-NetworkIPs {
     $ips = [System.Collections.Generic.List[string]]::new()
     try {
@@ -132,6 +165,33 @@ function Invoke-MySql {
     Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue
     if ($LASTEXITCODE -ne 0) { throw ($output | Out-String) }
     return $output
+}
+
+function Backup-Database {
+    param(
+        [string]$MySqlDumpExe,
+        [hashtable]$DbCreds,
+        [string]$ProjectDir
+    )
+    if (-not $MySqlDumpExe) {
+        Write-Host "  [WARN] mysqldump not found - skipping preflight backup" -ForegroundColor Yellow
+        return
+    }
+    $backupDir = Join-Path $ProjectDir "database\backups\preflight"
+    New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
+    $ts = Get-Date -Format "yyyyMMdd_HHmmss"
+    $backupFile = Join-Path $backupDir ("{0}_preflight_{1}.sql" -f $DbCreds.Database, $ts)
+    $env:MYSQL_PWD = $DbCreds.Password
+    try {
+        & $MySqlDumpExe "--user=$($DbCreds.User)" "--host=localhost" "--single-transaction" "--routines" "--triggers" $DbCreds.Database "--result-file=$backupFile" 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0 -and (Test-Path $backupFile)) {
+            Write-StepOk ("Backup created: {0}" -f $backupFile)
+        } else {
+            Write-Host "  [WARN] Backup failed - continuing" -ForegroundColor Yellow
+        }
+    } finally {
+        Remove-Item Env:MYSQL_PWD -ErrorAction SilentlyContinue
+    }
 }
 
 function Get-FileHashHex {
@@ -254,6 +314,17 @@ function Ensure-FrontendDependencies {
     }
 }
 
+if ($Action -ieq "help" -or $Action -ieq "--help" -or $Action -ieq "-h") {
+    Show-Usage
+    exit 0
+}
+
+if (@("start", "preflight") -notcontains $Action.ToLowerInvariant()) {
+    Write-StepFail ("Unknown action: {0}" -f $Action)
+    Show-Usage
+    exit 1
+}
+
 Write-BannerLine
 Write-Host "  EAP PMS - Starting Application" -ForegroundColor Cyan
 Write-BannerLine
@@ -297,6 +368,8 @@ if (-not (Test-Path (Join-Path $ProjectDir "database\db.config.json"))) {
     exit 1
 }
 try {
+    $mySqlDumpExe = Get-MySqlDumpExe
+    Backup-Database -MySqlDumpExe $mySqlDumpExe -DbCreds $dbCreds -ProjectDir $ProjectDir
     & $initScript -ProjectDir $ProjectDir | Out-Host
     $dbCreds = Get-DatabaseCredentials
     $schema = $dbCreds.Database
@@ -307,10 +380,34 @@ try {
         Write-Host "  Database looks empty - run database\restore_from_package.ps1 to import package data" -ForegroundColor Yellow
     }
     Write-StepOk ("Database ready ({0}, {1} tables)" -f $schema, $tableCount)
+    Write-Host "  Running schema guard (web + mobile integration)..." -ForegroundColor Yellow
+    Push-Location $BackendDir
+    try {
+        & $venvPython "ensure_schema.py" | Out-Host
+        if ($LASTEXITCODE -ne 0) { throw "ensure_schema.py failed with exit code $LASTEXITCODE" }
+    } finally {
+        Pop-Location
+    }
+    Write-StepOk "Schema guard complete"
 } catch {
     Write-StepFail ("Database setup failed: {0}" -f $_.Exception.Message)
     Write-Host "  Tip: edit database\db.config.json or run database\setup_new_client.ps1" -ForegroundColor Yellow
     exit 1
+}
+
+if ($Action -ieq "preflight") {
+    Write-Host ""
+    Write-BannerLine
+    Write-Host "  Preflight complete" -ForegroundColor Green
+    Write-BannerLine
+    Write-Host ""
+    Write-Host "  Verified dependencies, created DB backup if needed," -ForegroundColor White
+    Write-Host "  applied migrations, and ran schema guard." -ForegroundColor White
+    Write-Host ""
+    Write-Host "  Next steps:" -ForegroundColor White
+    Write-Host "    git pull" -ForegroundColor Green
+    Write-Host "    .\run.ps1" -ForegroundColor Green
+    exit 0
 }
 
 # [4/8] Network + frontend env (Vite proxy mode for LAN access)
