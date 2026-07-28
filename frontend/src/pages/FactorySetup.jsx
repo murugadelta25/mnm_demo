@@ -42,6 +42,9 @@ export default function FactorySetup() {
   const [saved, setSaved] = useState(false);
   const [err, setErr] = useState('');
   const [logoFiles, setLogoFiles] = useState({});
+  const [logoPreview, setLogoPreview] = useState(null);
+  const [uploadingLogo, setUploadingLogo] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [editingFactoryId, setEditingFactoryId] = useState(null);
   const [showFactoryForm, setShowFactoryForm] = useState(false);
   const [draftFactory, setDraftFactory] = useState(null);
@@ -53,11 +56,11 @@ export default function FactorySetup() {
 
   useEffect(() => {
     const fc = config?.factory;
-    if (fc) {
-      setSiteTitle(fc.siteTitle || DEFAULT_APP_NAME);
-      setFaviconFactoryId(fc.faviconFactoryId || null);
-      if (fc.factories?.length) setFactories(fc.factories);
-    }
+    if (!fc) return;
+    setSiteTitle(fc.siteTitle || DEFAULT_APP_NAME);
+    setFaviconFactoryId(fc.faviconFactoryId || null);
+    // Always sync — including empty list after removals
+    setFactories(Array.isArray(fc.factories) ? fc.factories : []);
   }, [config]);
 
   const fetchStations = useCallback(async () => {
@@ -68,16 +71,22 @@ export default function FactorySetup() {
   useEffect(() => { fetchStations(); }, [fetchStations]);
 
   const openAddFactory = () => {
-    setDraftFactory({ ...EMPTY_FACTORY, id: uid(), departments: [] });
+    setDraftFactory({ ...EMPTY_FACTORY, id: uid(), location: { address: '', lat: '', lng: '' }, departments: [] });
     setEditingFactoryId(null);
     setShowFactoryForm(true);
+    setLogoPreview(null);
     setErr('');
   };
 
   const openEditFactory = (factory) => {
-    setDraftFactory(JSON.parse(JSON.stringify(factory)));
+    setDraftFactory(JSON.parse(JSON.stringify({
+      ...factory,
+      location: factory.location || { address: '', lat: '', lng: '' },
+      departments: factory.departments || [],
+    })));
     setEditingFactoryId(factory.id);
     setShowFactoryForm(true);
+    setLogoPreview(null);
     setErr('');
   };
 
@@ -85,19 +94,62 @@ export default function FactorySetup() {
     setDraftFactory(prev => ({ ...prev, ...patch }));
   };
 
+  const uploadLogoForFactory = async (factoryId, file) => {
+    if (!file) return null;
+    setUploadingLogo(true);
+    setErr('');
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const up = await api.post('/api/config/factory-logo', fd, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      const logoUrl = up.data.logoUrl;
+      // Keep draft + list in sync immediately so Save persists the URL
+      setDraftFactory(prev => (prev && prev.id === factoryId ? { ...prev, logoUrl } : prev));
+      setFactories(prev => prev.map(f => (f.id === factoryId ? { ...f, logoUrl } : f)));
+      setLogoPreview(URL.createObjectURL(file));
+      return logoUrl;
+    } catch (e) {
+      setErr(e.response?.data?.detail || 'Logo upload failed');
+      return null;
+    } finally {
+      setUploadingLogo(false);
+    }
+  };
+
   const commitDraftFactory = () => {
     if (!draftFactory?.name?.trim()) {
       setErr('Factory name is required');
       return;
     }
+    const next = {
+      ...draftFactory,
+      name: draftFactory.name.trim(),
+      location: {
+        address: draftFactory.location?.address || '',
+        lat: draftFactory.location?.lat || '',
+        lng: draftFactory.location?.lng || '',
+      },
+      departments: (draftFactory.departments || []).map(d => ({
+        ...d,
+        name: (d.name || '').trim(),
+        lines: (d.lines || []).map(l => ({
+          ...l,
+          name: (l.name || '').trim(),
+          stationIds: l.stationIds || [],
+        })),
+      })),
+    };
     if (editingFactoryId) {
-      setFactories(prev => prev.map(f => (f.id === editingFactoryId ? draftFactory : f)));
+      setFactories(prev => prev.map(f => (f.id === editingFactoryId ? next : f)));
     } else {
-      setFactories(prev => [...prev, draftFactory]);
+      setFactories(prev => [...prev, next]);
     }
     setShowFactoryForm(false);
     setDraftFactory(null);
     setEditingFactoryId(null);
+    setLogoPreview(null);
     setErr('');
   };
 
@@ -105,10 +157,21 @@ export default function FactorySetup() {
     if (!window.confirm('Remove this factory from configuration?')) return;
     setFactories(prev => prev.filter(f => f.id !== id));
     if (faviconFactoryId === id) setFaviconFactoryId(null);
+    if (draftFactory?.id === id) {
+      setShowFactoryForm(false);
+      setDraftFactory(null);
+      setEditingFactoryId(null);
+    }
   };
 
   const save = async () => {
+    if (showFactoryForm && draftFactory) {
+      setErr('Finish or cancel the open factory form before saving configuration');
+      return;
+    }
+    setSaving(true);
     try {
+      // Upload any logos still pending as local files (fallback if immediate upload missed)
       const updatedFactories = [];
       for (const f of factories) {
         let logoUrl = f.logoUrl || '';
@@ -132,20 +195,25 @@ export default function FactorySetup() {
           factories: updatedFactories,
         },
       };
-      await api.put('/api/config/', { config: payload });
-      reload();
+      const { data: savedCfg } = await api.put('/api/config/', { config: payload });
+      const savedFactories = savedCfg?.factory?.factories || updatedFactories;
+      setFactories(savedFactories);
+      await reload();
       reloadBranding();
       applySiteBranding({
         siteTitle: payload.factory.siteTitle,
-        factories: updatedFactories,
+        factories: savedFactories,
         faviconFactoryId,
       });
       setLogoFiles({});
+      setLogoPreview(null);
       setSaved(true);
       setErr('');
-      setTimeout(() => setSaved(false), 2000);
+      setTimeout(() => setSaved(false), 2500);
     } catch (e) {
       setErr(e.response?.data?.detail || 'Failed to save factory setup');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -232,10 +300,31 @@ export default function FactorySetup() {
           </div>
           <div>
             <label style={s.label}>Factory Logo</label>
-            <input type="file" accept="image/*"
-              onChange={e => setLogoFiles(p => ({ ...p, [fi.id]: e.target.files?.[0] || null }))} />
+            <input
+              type="file"
+              accept="image/png,image/jpeg,image/jpg,image/gif,image/webp,image/svg+xml"
+              disabled={uploadingLogo}
+              onChange={async (e) => {
+                const file = e.target.files?.[0] || null;
+                if (!file) return;
+                setLogoFiles(p => ({ ...p, [fi.id]: file }));
+                setLogoPreview(URL.createObjectURL(file));
+                await uploadLogoForFactory(fi.id, file);
+                e.target.value = '';
+              }}
+            />
+            {uploadingLogo && (
+              <p style={{ fontSize: 11, color: t.textFaint, marginTop: 4 }}>Uploading logo...</p>
+            )}
+            {(logoPreview || fi.logoUrl) && (
+              <img
+                src={logoPreview || assetUrl(fi.logoUrl)}
+                alt="logo"
+                style={{ height: 56, marginTop: 8, objectFit: 'contain', display: 'block' }}
+              />
+            )}
             {fi.logoUrl && (
-              <img src={assetUrl(fi.logoUrl)} alt="logo" style={{ height: 48, marginTop: 8 }} />
+              <p style={{ fontSize: 11, color: t.textFaint, marginTop: 4 }}>Saved: {fi.logoUrl}</p>
             )}
             <label style={{ ...s.label, marginTop: 8, display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
               <input type="checkbox" checked={faviconFactoryId === fi.id}
@@ -273,10 +362,18 @@ export default function FactorySetup() {
           </div>
           {(fi.departments || []).map((dept, di) => (
             <div key={dept.id} style={{ border: `1px solid ${t.border}`, borderRadius: 8, padding: 12, marginBottom: 10 }}>
-              <label style={s.label}>Department Name</label>
-              <input style={s.inp} value={dept.name}
-                onChange={e => setDept(di, { name: e.target.value })} />
-              <div style={{ marginTop: 10 }}>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+                <div style={{ flex: 1 }}>
+                  <label style={s.label}>Department Name</label>
+                  <input style={s.inp} value={dept.name}
+                    onChange={e => setDept(di, { name: e.target.value })} />
+                </div>
+                <button type="button" style={{ ...s.miniBtn, background: '#ef4444', marginBottom: 1 }}
+                  onClick={() => {
+                    updateDraft({ departments: fi.departments.filter((_, i) => i !== di) });
+                  }}>Remove</button>
+              </div>
+              <div style={{ marginTop: 10, display: 'flex', gap: 8 }}>
                 <button type="button" style={s.subBtn}
                   onClick={() => {
                     const departments = [...fi.departments];
@@ -286,31 +383,58 @@ export default function FactorySetup() {
               </div>
               {(dept.lines || []).map((line, li) => (
                 <div key={line.id} style={{ marginTop: 10, paddingLeft: 12, borderLeft: `3px solid ${t.accent}` }}>
-                  <label style={s.label}>Line Name</label>
-                  <input style={s.inp} value={line.name}
-                    onChange={e => {
-                      const departments = [...fi.departments];
-                      const lines = [...dept.lines];
-                      lines[li] = { ...line, name: e.target.value };
-                      departments[di] = { ...dept, lines };
-                      updateDraft({ departments });
-                    }} />
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+                    <div style={{ flex: 1 }}>
+                      <label style={s.label}>Line Name</label>
+                      <input style={s.inp} value={line.name}
+                        onChange={e => {
+                          const departments = [...fi.departments];
+                          const lines = [...dept.lines];
+                          lines[li] = { ...line, name: e.target.value };
+                          departments[di] = { ...dept, lines };
+                          updateDraft({ departments });
+                        }} />
+                    </div>
+                    <button type="button" style={{ ...s.miniBtn, background: '#ef4444', marginBottom: 1 }}
+                      onClick={() => {
+                        const departments = [...fi.departments];
+                        departments[di] = { ...dept, lines: dept.lines.filter((_, i) => i !== li) };
+                        updateDraft({ departments });
+                      }}>Remove</button>
+                  </div>
                   <label style={{ ...s.label, marginTop: 8 }}>Stations on this line</label>
-                  <select multiple style={{ ...s.inp, minHeight: 90 }}
-                    value={(line.stationIds || []).map(String)}
-                    onChange={e => {
-                      const selected = Array.from(e.target.selectedOptions).map(o => parseInt(o.value, 10));
-                      const departments = [...fi.departments];
-                      const lines = [...dept.lines];
-                      lines[li] = { ...line, stationIds: selected };
-                      departments[di] = { ...dept, lines };
-                      updateDraft({ departments });
+                  {stations.length === 0 ? (
+                    <p style={{
+                      margin: '6px 0 0',
+                      padding: '10px 12px',
+                      borderRadius: 8,
+                      border: `1px dashed ${t.border}`,
+                      background: t.surface2 || t.surface,
+                      fontSize: 12,
+                      color: t.textMuted || t.textFaint,
+                      lineHeight: 1.45,
                     }}>
-                    {stations.map(st => (
-                      <option key={st.id} value={st.id}>{st.display_name || st.name}</option>
-                    ))}
-                  </select>
-                  <p style={{ fontSize: 11, color: t.textFaint }}>Hold Ctrl/Cmd to select multiple stations</p>
+                      No stations available yet. Add a station from the <strong>Stations</strong> section below, then come back here to assign it to this line.
+                    </p>
+                  ) : (
+                    <>
+                      <select multiple style={{ ...s.inp, minHeight: 90 }}
+                        value={(line.stationIds || []).map(String)}
+                        onChange={e => {
+                          const selected = Array.from(e.target.selectedOptions).map(o => parseInt(o.value, 10));
+                          const departments = [...fi.departments];
+                          const lines = [...dept.lines];
+                          lines[li] = { ...line, stationIds: selected };
+                          departments[di] = { ...dept, lines };
+                          updateDraft({ departments });
+                        }}>
+                        {stations.map(st => (
+                          <option key={st.id} value={st.id}>{st.display_name || st.name}</option>
+                        ))}
+                      </select>
+                      <p style={{ fontSize: 11, color: t.textFaint }}>Hold Ctrl/Cmd to select multiple stations</p>
+                    </>
+                  )}
                 </div>
               ))}
             </div>
@@ -453,8 +577,13 @@ export default function FactorySetup() {
       </div>
 
       {err && <p style={{ color: '#ef4444' }}>{err}</p>}
-      {saved && <p style={{ color: t.brand }}>Factory configuration saved.</p>}
-      <button type="button" style={s.btn} onClick={save}>Save Factory Configuration</button>
+      {saved && <p style={{ color: t.brand }}>Factory configuration saved. Logos, departments, and lines are live across the app.</p>}
+      <button type="button" style={{ ...s.btn, opacity: saving ? 0.7 : 1 }} onClick={save} disabled={saving || uploadingLogo}>
+        {saving ? 'Saving...' : 'Save Factory Configuration'}
+      </button>
+      <p style={{ fontSize: 11, color: t.textFaint, marginTop: 8 }}>
+        Add factories with logo, location, departments, and lines, then click Save. Machine Config and Hourly Output will use the saved lines dynamically.
+      </p>
     </div>
   );
 }

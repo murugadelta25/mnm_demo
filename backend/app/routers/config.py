@@ -1,6 +1,6 @@
 import json
 import os
-from fastapi import APIRouter, Depends, UploadFile, File
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from pathlib import Path
@@ -228,6 +228,18 @@ def save_config(payload: ConfigPayload, db: Session = Depends(get_db), _=Depends
             **incoming["mobile_integration"],
         }
 
+    # Nested merge for factory only when the client explicitly sent a factory object
+    incoming_factory = (payload.config or {}).get("factory")
+    if isinstance(incoming_factory, dict) and incoming_factory not in (None, {}):
+        incoming["factory"] = {
+            **DEFAULT_CONFIG["factory"],
+            **(existing.get("factory") or {}),
+            **incoming_factory,
+        }
+        # Explicit factories list from client always wins (including empty list)
+        if "factories" in incoming_factory:
+            incoming["factory"]["factories"] = list(incoming_factory.get("factories") or [])
+
     if row:
         row.config_json = json.dumps(incoming)
     else:
@@ -237,10 +249,23 @@ def save_config(payload: ConfigPayload, db: Session = Depends(get_db), _=Depends
 
 
 @router.post("/factory-logo")
-def upload_factory_logo(file: UploadFile = File(...), _=Depends(require_role("admin"))):
-    ext = Path(file.filename).suffix or ".png"
+def upload_factory_logo(file: UploadFile = File(...), _=Depends(require_role("admin", "superadmin"))):
+    """Upload a factory logo image; returns a public /static/factory/... URL."""
+    if not file.filename:
+        raise HTTPException(400, "No file provided")
+    ext = (Path(file.filename).suffix or ".png").lower()
+    if ext not in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}:
+        raise HTTPException(400, "Unsupported image type. Use PNG, JPG, GIF, WEBP, or SVG.")
+    FACTORY_DIR.mkdir(parents=True, exist_ok=True)
     fname = f"factory_logo_{uuid.uuid4().hex[:8]}{ext}"
     fpath = FACTORY_DIR / fname
     with open(fpath, "wb") as f:
         shutil.copyfileobj(file.file, f)
-    return {"logoUrl": f"/static/factory/{fname}"}
+    size = fpath.stat().st_size
+    if size <= 0:
+        fpath.unlink(missing_ok=True)
+        raise HTTPException(400, "Uploaded file is empty")
+    if size > 8 * 1024 * 1024:
+        fpath.unlink(missing_ok=True)
+        raise HTTPException(400, "Logo must be under 8 MB")
+    return {"logoUrl": f"/static/factory/{fname}", "filename": fname, "size": size}
