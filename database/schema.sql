@@ -132,6 +132,7 @@ CREATE TABLE IF NOT EXISTS breakdown_tickets (
     id INT AUTO_INCREMENT PRIMARY KEY,
     machine_id INT NOT NULL,
     raised_by INT NOT NULL,
+    raised_by_name VARCHAR(100),
     acknowledged_by INT,
     description TEXT,
     status ENUM('raised','acknowledged','in_progress','resolved') DEFAULT 'raised',
