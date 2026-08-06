@@ -1,6 +1,7 @@
 /**
  * CPLM AppBar pattern — logo, system name, theme toggle, user (layout.md).
  */
+import { useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useBranding } from '../../context/BrandingContext';
 import { useAuth } from '../../context/AuthContext';
@@ -9,6 +10,7 @@ import { useFeatureFlags } from '../../context/FeatureFlagsContext';
 import LogoIcon from '../graphics/LogoIcon';
 import { MENU_ICON, NAV_ICONS, renderNavIcon } from '../icons/NavIcon';
 import ThemeModeToggler from './ThemeModeToggler';
+import MonitorSetupModal from './MonitorSetupModal';
 
 export default function AppBar({ onMenuClick, isIntegration = false, navVisible = true }) {
   const { user } = useAuth();
@@ -20,6 +22,7 @@ export default function AppBar({ onMenuClick, isIntegration = false, navVisible 
 
   const showMonitor = Boolean(user) && canAccess('overview.monitor', user.role);
   const monitorActive = location.pathname.startsWith('/overview/monitor');
+  const [showSetup, setShowSetup] = useState(false);
 
   const menuTitle = isIntegration
     ? navVisible
@@ -107,36 +110,72 @@ export default function AppBar({ onMenuClick, isIntegration = false, navVisible 
       <div style={{ flex: 1 }} />
 
       {showMonitor ? (
-        <button
-          type="button"
-          title="Monitor Mode"
-          aria-label="Monitor Mode"
-          aria-pressed={monitorActive}
-          onClick={() => navigate('/overview/monitor')}
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 8,
-            height: 36,
-            padding: '0 12px',
-            borderRadius: 'var(--titan-radius-sm)',
-            border: `1px solid ${monitorActive ? (theme.accent || '#22cae7') : theme.border}`,
-            background: monitorActive
-              ? `${theme.accent || '#22cae7'}22`
-              : (theme.isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)'),
-            color: monitorActive ? (theme.accent || '#22cae7') : theme.text,
-            fontSize: 12,
-            fontWeight: 700,
-            letterSpacing: '0.03em',
-            cursor: 'pointer',
-            whiteSpace: 'nowrap',
-            marginRight: 4,
-          }}
-        >
-          {renderNavIcon(NAV_ICONS.monitor)}
-          Monitor
-        </button>
+        <div style={{ display: 'inline-flex', alignItems: 'center', gap: 2, marginRight: 4 }}>
+          <button
+            type="button"
+            title="Monitor Mode"
+            aria-label="Monitor Mode"
+            aria-pressed={monitorActive}
+            onClick={() => navigate('/overview/monitor')}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 8,
+              height: 36,
+              padding: '0 12px',
+              borderRadius: 'var(--titan-radius-sm) 0 0 var(--titan-radius-sm)',
+              border: `1px solid ${monitorActive ? (theme.accent || '#22cae7') : theme.border}`,
+              borderRight: 'none',
+              background: monitorActive
+                ? `${theme.accent || '#22cae7'}22`
+                : (theme.isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)'),
+              color: monitorActive ? (theme.accent || '#22cae7') : theme.text,
+              fontSize: 12,
+              fontWeight: 700,
+              letterSpacing: '0.03em',
+              cursor: 'pointer',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {renderNavIcon(NAV_ICONS.monitor)}
+            Monitor
+          </button>
+          <button
+            type="button"
+            title="Monitor Mode Setup"
+            aria-label="Monitor Mode Setup"
+            onClick={() => setShowSetup(true)}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              height: 36,
+              width: 30,
+              borderRadius: '0 var(--titan-radius-sm) var(--titan-radius-sm) 0',
+              border: `1px solid ${monitorActive ? (theme.accent || '#22cae7') : theme.border}`,
+              background: monitorActive
+                ? `${theme.accent || '#22cae7'}22`
+                : (theme.isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)'),
+              color: monitorActive ? (theme.accent || '#22cae7') : theme.textDim,
+              fontSize: 14,
+              cursor: 'pointer',
+            }}
+          >
+            ⚙
+          </button>
+        </div>
       ) : null}
+
+      {showSetup && (
+        <MonitorSetupModal
+          theme={theme}
+          onClose={() => setShowSetup(false)}
+          onStart={(ordered, sec) => {
+            setShowSetup(false);
+            navigate('/overview/monitor');
+          }}
+        />
+      )}
 
       <ThemeModeToggler />
 
