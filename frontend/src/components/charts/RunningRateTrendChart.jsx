@@ -8,7 +8,8 @@ export default function RunningRateTrendChart({ data, theme, onLineClick }) {
   const isDark = theme?.isDark !== false && theme?.id !== 'light';
   const textColor = theme?.text || (isDark ? '#e2e8f0' : '#1e293b');
   const dimColor = theme?.textDim || (isDark ? '#94a3b8' : '#64748b');
-  const gridColor = isDark ? '#334155' : '#e2e8f0';
+  const gridColor = isDark ? '#475569' : '#cbd5e1';
+  const axisColor = isDark ? '#64748b' : '#94a3b8';
   const bgColor = isDark ? (theme?.surface || '#0f172a') : '#ffffff';
 
   const slots = data?.slots || [];
@@ -55,19 +56,19 @@ export default function RunningRateTrendChart({ data, theme, onLineClick }) {
   return (
     <ResponsiveContainer width="100%" height="100%">
       <LineChart data={chartData} margin={{ top: 8, right: 24, bottom: 4, left: 0 }}>
-        <CartesianGrid strokeDasharray="3 4" stroke={gridColor} strokeOpacity={0.5} />
+        <CartesianGrid strokeDasharray="3 4" stroke={gridColor} strokeOpacity={0.7} />
         <XAxis
           dataKey="slot"
           tick={{ fill: dimColor, fontSize: 11, fontWeight: 600 }}
-          axisLine={{ stroke: gridColor }}
-          tickLine={false}
+          axisLine={{ stroke: axisColor, strokeWidth: 1.5 }}
+          tickLine={{ stroke: axisColor, strokeWidth: 1 }}
         />
         <YAxis
           domain={[0, 100]}
           tickFormatter={(v) => `${v}%`}
           tick={{ fill: dimColor, fontSize: 11, fontWeight: 600 }}
-          axisLine={false}
-          tickLine={false}
+          axisLine={{ stroke: axisColor, strokeWidth: 1.5 }}
+          tickLine={{ stroke: axisColor, strokeWidth: 1 }}
           width={42}
         />
         <Tooltip content={<CustomTooltip />} />

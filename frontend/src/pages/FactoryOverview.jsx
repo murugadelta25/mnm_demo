@@ -135,7 +135,7 @@ export default function FactoryOverview() {
       style: cardShell,
       header: (
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 10px 4px' }}>
-          <h3 style={{ ...s.cardTitle, padding: 0 }}>Running Rate by Line</h3>
+          <h3 style={{ ...s.cardTitle, padding: 0 }}>Hourly Running Rate by Line</h3>
           {trendData?.shift_name && (
             <span style={{ fontSize: 11, fontWeight: 700, color: t.textDim }}>
               {trendData.shift_name} · {trendData.shift_start}–{trendData.shift_end}
