@@ -647,6 +647,140 @@ def _overview_payload(db: Session) -> dict:
     }
 
 
+@router.get("/factory/running-rate-trend")
+def factory_running_rate_trend(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """Per-line hourly running rate (%) for the current shift, hour 1 to hour N.
+    Running rate per slot = running_minutes / slot_available_minutes * 100.
+    Uses machine_status_log segments — same source as loss tracker / hourly output.
+    """
+    cfg = _load_config(db)
+    sh, shift_start, effective_end, now = _current_shift_window(cfg)
+    if not sh:
+        return {"shift_name": "—", "slots": [], "lines": []}
+
+    # Build hourly slot boundaries for the shift
+    from .hourly_output import _shift_slots, _break_windows, _mins_available
+    slots = _shift_slots(sh)
+    break_cfg = (cfg.get("breaks") or {}).get(sh.get("id") or "", {})
+    breaks = _break_windows(break_cfg)
+
+    stations = {s.id: s for s in db.query(Station).all()}
+    enabled_station_ids = {sid for sid, st in stations.items() if int(getattr(st, "is_enabled", 1) or 0) != 0}
+    all_machines = (
+        db.query(Machine)
+        .filter(Machine.is_enabled == 1)
+        .order_by(Machine.station_id, Machine.name)
+        .all()
+    )
+    all_machines = [m for m in all_machines if m.station_id in enabled_station_ids or m.station_id is None]
+    machine_by_id = {m.id: m for m in all_machines}
+
+    lines_meta = _build_lines_meta(cfg, stations)
+
+    # Determine how many slots have started (cap at effective_end)
+    completed_slots = []
+    for s in slots:
+        slot_start = shift_start + timedelta(hours=s["slot_index"])
+        slot_end = shift_start + timedelta(hours=s["slot_index"] + 1)
+        if slot_start >= effective_end:
+            break
+        completed_slots.append({
+            "label": s["label"],
+            "slot_index": s["slot_index"],
+            "slot_start": slot_start,
+            "slot_end": min(slot_end, effective_end),
+            "avail_min": _mins_available(slot_start, min(slot_end, effective_end), breaks),
+        })
+
+    # Cache segments per machine (avoid re-querying)
+    seg_cache: dict[int, list] = {}
+
+    def _get_segs(machine_id: int) -> list:
+        if machine_id not in seg_cache:
+            seg_cache[machine_id] = _machine_shift_segments(db, machine_id, shift_start, effective_end)
+        return seg_cache[machine_id]
+
+    def _running_min_in_slot(machine_id: int, slot_start: datetime, slot_end: datetime) -> float:
+        total = 0.0
+        for seg in _get_segs(machine_id):
+            if seg["status"] != "running":
+                continue
+            # _machine_shift_segments returns {status, seconds, reason} — no start/end
+            # We need start/end; rebuild from the raw log instead via a helper
+            pass
+        return total
+
+    # _machine_shift_segments returns segments without absolute start/end timestamps.
+    # Re-use the raw timeline approach directly here.
+    def _running_min_in_slot_direct(machine_id: int, slot_start: datetime, slot_end: datetime) -> float:
+        """Sum running seconds in [slot_start, slot_end] from MachineStatusLog."""
+        prior = (
+            db.query(MachineStatusLog)
+            .filter(MachineStatusLog.machine_id == machine_id,
+                    MachineStatusLog.changed_at < shift_start)
+            .order_by(MachineStatusLog.changed_at.desc())
+            .first()
+        )
+        logs = (
+            db.query(MachineStatusLog)
+            .filter(MachineStatusLog.machine_id == machine_id,
+                    MachineStatusLog.changed_at >= shift_start,
+                    MachineStatusLog.changed_at <= effective_end)
+            .order_by(MachineStatusLog.changed_at.asc())
+            .all()
+        )
+        if not prior and not logs:
+            return 0.0
+        timeline: list[tuple] = []
+        if prior:
+            timeline.append((shift_start, prior.status or "offline"))
+        elif logs:
+            timeline.append((shift_start, logs[0].status or "offline"))
+        for log in (logs[1:] if (not prior and logs) else logs):
+            if timeline and timeline[-1][0] == log.changed_at and timeline[-1][1] == log.status:
+                continue
+            timeline.append((_as_naive_ist(log.changed_at), log.status or "offline"))
+        total = 0.0
+        for i, (t_start, status) in enumerate(timeline):
+            t_end = timeline[i + 1][0] if i + 1 < len(timeline) else effective_end
+            lo = max(t_start, slot_start)
+            hi = min(t_end, slot_end)
+            if hi > lo and status == "running":
+                total += (hi - lo).total_seconds() / 60.0
+        return total
+
+    line_rows = []
+    for idx, line in enumerate(lines_meta):
+        sids = set(line.get("station_ids") or [])
+        line_machines = [m for m in all_machines if m.station_id in sids]
+        if not line_machines:
+            continue
+        hourly_pct = []
+        for sl in completed_slots:
+            total_running = sum(
+                _running_min_in_slot_direct(m.id, sl["slot_start"], sl["slot_end"])
+                for m in line_machines
+            )
+            # Available = avail_min × number of machines
+            total_avail = sl["avail_min"] * len(line_machines)
+            pct = round(100.0 * total_running / total_avail, 1) if total_avail > 0 else 0.0
+            hourly_pct.append(pct)
+        line_rows.append({
+            "id": line["id"],
+            "name": line["name"],
+            "color": LINE_COLORS[idx % len(LINE_COLORS)],
+            "hourly_pct": hourly_pct,
+        })
+
+    return {
+        "shift_name": sh.get("name") or sh.get("id") or "—",
+        "shift_start": sh.get("start"),
+        "shift_end": sh.get("end"),
+        "slots": [s["label"] for s in completed_slots],
+        "lines": line_rows,
+    }
+
+
 @router.get("/factory")
 def factory_overview(db: Session = Depends(get_db), _=Depends(get_current_user)):
     return _overview_payload(db)

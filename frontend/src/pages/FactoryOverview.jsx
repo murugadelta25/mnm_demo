@@ -5,9 +5,9 @@ import PageHeader from '../components/PageHeader';
 import OverviewSelector, { FactoryTitleBanner } from '../components/OverviewSelector';
 import FreeformTileBoard from '../components/FreeformTileBoard';
 import DonutGauge from '../components/charts/DonutGauge';
-import MultiLineChart from '../components/charts/MultiLineChart';
 import LineUtilizationBarChart from '../components/charts/LineUtilizationBarChart';
 import LineAchievementBarChart from '../components/charts/LineAchievementBarChart';
+import RunningRateTrendChart from '../components/charts/RunningRateTrendChart';
 import { useTheme } from '../context/ThemeContext';
 import { pageClass, surfaceClass } from '../themes/tileHelpers';
 import { seriesColor } from '../utils/heatMap';
@@ -17,13 +17,18 @@ export default function FactoryOverview() {
   const { theme: t } = useTheme();
   const navigate = useNavigate();
   const [data, setData] = useState(null);
+  const [trendData, setTrendData] = useState(null);
   const [err, setErr] = useState('');
   const resetTilesRef = useRef(null);
 
   const load = useCallback(async () => {
     try {
-      const r = await api.get('/api/overview/factory');
+      const [r, tr] = await Promise.all([
+        api.get('/api/overview/factory'),
+        api.get('/api/overview/factory/running-rate-trend'),
+      ]);
       setData(r.data);
+      setTrendData(tr.data);
       setErr('');
     } catch (e) {
       setErr(e.response?.data?.detail || e.message || 'Failed to load factory overview');
@@ -40,8 +45,9 @@ export default function FactoryOverview() {
   const lineBars = useMemo(
     () => lines.map((ln, idx) => ({
       name: ln.name,
-      pct: ln.running_pct,
-      running: ln.running,
+      pct: ln.running_pct ?? 0,
+      running: ln.running ?? 0,
+      total: ln.total ?? 0,
       id: ln.id,
       color: seriesColor(idx),
     })),
@@ -127,15 +133,22 @@ export default function FactoryOverview() {
     {
       id: 'runningByLine',
       style: cardShell,
-      header: <h3 style={s.cardTitle}>Running Rate by Line</h3>,
+      header: (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 10px 4px' }}>
+          <h3 style={{ ...s.cardTitle, padding: 0 }}>Running Rate by Line</h3>
+          {trendData?.shift_name && (
+            <span style={{ fontSize: 11, fontWeight: 700, color: t.textDim }}>
+              {trendData.shift_name} · {trendData.shift_start}–{trendData.shift_end}
+            </span>
+          )}
+        </div>
+      ),
       body: (
         <div style={s.tileBody}>
-          <MultiLineChart
-            items={lineBars}
+          <RunningRateTrendChart
+            data={trendData}
             theme={t}
-            yLabel="Running %"
-            xLabel="Line"
-            onPointClick={(item) => navigate(`/overview/line/${encodeURIComponent(item.id)}`)}
+            onLineClick={(ln) => navigate(`/overview/line/${encodeURIComponent(ln.id)}`)}
           />
         </div>
       ),
