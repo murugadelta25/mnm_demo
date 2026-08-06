@@ -6,7 +6,6 @@ import { useFeatureFlags } from '../context/FeatureFlagsContext';
 import { useAuth } from '../context/AuthContext';
 import { pageClass } from '../themes/tileHelpers';
 import MonitorSetupModal, { INTERVAL_MIN, INTERVAL_MAX, loadPrefs } from '../components/layout/MonitorSetupModal';
-import REGISTRY from '../config/feature-registry.json';
 
 const INTERVAL_MIN_SEC = INTERVAL_MIN;
 const INTERVAL_MAX_SEC = INTERVAL_MAX;
@@ -22,23 +21,6 @@ function embedUrl(path) {
   return `${path}${sep}embed=1&hideNav=1`;
 }
 
-function buildAvailable(canAccess, role) {
-  const pages = [];
-  for (const item of REGISTRY.standalone || []) {
-    if (item.path && item.id !== 'overview.monitor' && canAccess(item.id, role)) {
-      pages.push({ path: item.path, label: item.label, featureId: item.id });
-    }
-  }
-  for (const group of REGISTRY.groups || []) {
-    for (const item of group.items || []) {
-      if (item.path && item.id !== 'overview.monitor' && canAccess(item.id, role)) {
-        pages.push({ path: item.path, label: item.label, featureId: item.id });
-      }
-    }
-  }
-  return pages;
-}
-
 // ── Main component ────────────────────────────────────────────────────────────
 export default function MonitorMode() {
   const { theme: t } = useTheme();
@@ -46,8 +28,6 @@ export default function MonitorMode() {
   const { setNavHidden } = useEmbed();
   const { canAccess } = useFeatureFlags();
   const { user } = useAuth();
-
-  const available = buildAvailable(canAccess, user?.role);
 
   // null = setup screen; array = running
   const [playlist, setPlaylist] = useState(null);
@@ -122,16 +102,12 @@ export default function MonitorMode() {
             Exit
           </button>
         </div>
-        {available.length === 0
-          ? <div style={s.empty}>No enabled screens available.</div>
-          : (
-            <MonitorSetupModal
+                <MonitorSetupModal
               inline
               theme={t}
               onClose={() => { setNavHidden?.(false); navigate('/overview/factory'); }}
               onStart={handleStart}
             />
-          )}
       </div>
     );
   }

@@ -7,27 +7,24 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useFeatureFlags } from '../../context/FeatureFlagsContext';
-import REGISTRY from '../../config/feature-registry.json';
 
 export const LS_KEY = 'monitorMode_v1';
 export const INTERVAL_MIN = 30;
 export const INTERVAL_MAX = 300;
 
+const MONITOR_PAGES = [
+  { path: '/dashboard',          label: 'OEE Dashboard',     featureId: 'dashboard' },
+  { path: '/overview/factory',   label: 'Factory Overview',  featureId: 'overview.factory' },
+  { path: '/overview/line',      label: 'Line Overview',     featureId: 'overview.line' },
+  { path: '/overview/equipment', label: 'Equipment Overview',featureId: 'overview.equipment' },
+  { path: '/hourly-output',      label: 'Hourly Output',     featureId: 'production.hourly_output' },
+  { path: '/breakdown',          label: 'Breakdown',         featureId: 'maintenance.breakdown' },
+  { path: '/maintenance',        label: 'Maintenance',       featureId: 'maintenance.dashboard' },
+  { path: '/loss-tracker',       label: 'Loss Tracker',      featureId: 'maintenance.loss_tracker' },
+];
+
 function getAllPages() {
-  const pages = [];
-  for (const item of REGISTRY.standalone || []) {
-    if (item.path && item.id !== 'overview.monitor') {
-      pages.push({ path: item.path, label: item.label, featureId: item.id });
-    }
-  }
-  for (const group of REGISTRY.groups || []) {
-    for (const item of group.items || []) {
-      if (item.path && item.id !== 'overview.monitor') {
-        pages.push({ path: item.path, label: item.label, featureId: item.id, group: group.label });
-      }
-    }
-  }
-  return pages;
+  return MONITOR_PAGES;
 }
 
 export function loadPrefs() {
