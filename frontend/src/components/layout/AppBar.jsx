@@ -138,17 +138,6 @@ export default function AppBar({ onMenuClick, isIntegration = false, navVisible 
         </button>
       ) : null}
 
-      {showSetup && (
-        <MonitorSetupModal
-          theme={theme}
-          onClose={() => setShowSetup(false)}
-          onStart={(ordered, sec) => {
-            setShowSetup(false);
-            navigate('/overview/monitor');
-          }}
-        />
-      )}
-
       <ThemeModeToggler />
 
       {user && (
