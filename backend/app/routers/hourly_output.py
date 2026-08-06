@@ -70,7 +70,7 @@ def _find_continuous_same_part_prior(
             ProductionPlan.machine_id == machine_id,
             ProductionPlan.plan_date >= since,
             ProductionPlan.plan_date <= entry_date,
-            ProductionPlan.status.in_(['running', 'completed', 'paused']),
+            ProductionPlan.status.in_(['running', 'completed', 'paused', 'incomplete', 'aborted']),
         )
         .all()
     )
@@ -141,7 +141,7 @@ def auto_transition_shift_plans(db: Session, entry_date: date, shift_id: str, cf
                         ProductionPlan.plan_date == prev_date,
                         ProductionPlan.shift == prev_shift_id,
                         ProductionPlan.model_variant == plan.model_variant,
-                        ProductionPlan.status.in_(['running', 'completed', 'paused']),
+                        ProductionPlan.status.in_(['running', 'completed', 'paused', 'incomplete', 'aborted']),
                     )
                     .first()
                 )
@@ -152,7 +152,12 @@ def auto_transition_shift_plans(db: Session, entry_date: date, shift_id: str, cf
         plan.updated_at = _now
 
         if prev_plan.status in ('running', 'paused'):
-            prev_plan.status = 'completed'
+            prev_actual = int(prev_plan.actual_qty or 0)
+            prev_planned = int(prev_plan.planned_qty or 0)
+            # Shift/continuity handoff: full qty → completed, shortfall → incomplete
+            prev_plan.status = (
+                'completed' if prev_planned > 0 and prev_actual >= prev_planned else 'incomplete'
+            )
             prev_plan.updated_at = _now
 
         conflicting = (
@@ -426,7 +431,7 @@ def _oee_variant(e) -> str:
 
 def _collect_variants(plans: list, oee_entries: list, mcrs: list) -> list:
     variants, seen = [], set()
-    active_plans = [p for p in plans if getattr(p, 'status', None) in ('running', 'completed', 'paused')]
+    active_plans = [p for p in plans if getattr(p, 'status', None) in ('running', 'completed', 'paused', 'incomplete', 'aborted')]
     for p in sorted(active_plans, key=lambda x: (getattr(x, 'priority', None) or 1, x.id)):
         v = _plan_variant(p)
         if v and v not in seen:
@@ -451,7 +456,7 @@ def _collect_variants(plans: list, oee_entries: list, mcrs: list) -> list:
 def _collect_cycle_times(plans: list, oee_entries: list) -> list:
     """Cycle times from active plans; OEE only if no active plan."""
     cts, seen = [], set()
-    active = [p for p in plans if getattr(p, 'status', None) in ('running', 'completed', 'paused')]
+    active = [p for p in plans if getattr(p, 'status', None) in ('running', 'completed', 'paused', 'incomplete', 'aborted')]
     for p in sorted(active, key=lambda x: (getattr(x, 'priority', None) or 1, x.id)):
         ct = round(_plan_ct(p), 2)
         if ct > 0 and ct not in seen:
@@ -487,7 +492,7 @@ def _production_windows(
             ct = _ct_for_plan_variant(plans, variant) or _float_ct(e.process_time, e.loading_unloading)
             windows.append({'start': ws, 'end': we, 'ct': ct, 'variant': variant})
     else:
-        active = [p for p in plans if getattr(p, 'status', None) in ('running', 'completed', 'paused')]
+        active = [p for p in plans if getattr(p, 'status', None) in ('running', 'completed', 'paused', 'incomplete', 'aborted')]
         if active:
             completed = [p for p in active if getattr(p, 'status', None) in ('completed', 'paused')]
             running = [p for p in active if getattr(p, 'status', None) == 'running']
@@ -517,7 +522,7 @@ def _effective_ct(windows: list) -> float:
 def _variant_planned_qty(plans: list, variant: str) -> int:
     return sum(
         p.planned_qty or 0 for p in plans
-        if _plan_variant(p) == variant and getattr(p, 'status', None) in ('running', 'completed', 'paused')
+        if _plan_variant(p) == variant and getattr(p, 'status', None) in ('running', 'completed', 'paused', 'incomplete', 'aborted')
     )
 
 
@@ -941,9 +946,13 @@ def _build_status_segments(
     if prior:
         timeline.append((shift_start, prior.status))
     elif logs:
+        # No prior carry-over: project first in-shift status back to shift open.
+        # Do not also append logs[0] below — timestamps differ so dedup would miss it.
         timeline.append((shift_start, logs[0].status))
 
-    for log in logs:
+    # When we seeded from logs[0] at shift_start, skip that log to avoid a duplicate
+    # segment boundary at logs[0].changed_at with the same status.
+    for log in (logs[1:] if (not prior and logs) else logs):
         if timeline and timeline[-1][0] == log.changed_at and timeline[-1][1] == log.status:
             continue
         timeline.append((log.changed_at, log.status))
@@ -1109,7 +1118,7 @@ def sync_plan_actuals_from_status_logs(
 
     q = db.query(ProductionPlan).filter(
         ProductionPlan.machine_id.isnot(None),
-        ProductionPlan.status.in_(['running', 'completed', 'paused']),
+        ProductionPlan.status.in_(['running', 'completed', 'paused', 'incomplete', 'aborted']),
     )
     if entry_date:
         q = q.filter(ProductionPlan.plan_date == entry_date)
@@ -1283,6 +1292,8 @@ def _line_meta(cfg: dict, line_id: str):
     for factory in (cfg.get('factory') or {}).get('factories') or []:
         for dept in factory.get('departments') or []:
             for line in dept.get('lines') or []:
+                if line.get('enabled') is False:
+                    continue
                 if line.get('id') == line_id:
                     label = ' / '.join(filter(None, [factory.get('name'), dept.get('name'), line.get('name')]))
                     return {
@@ -1374,6 +1385,10 @@ def build_hourly_output(
     shift_total_mins = int((shift_end - shift_start).total_seconds() / 60)
 
     all_machines = db.query(Machine).order_by(Machine.station_id, Machine.id).all()
+    all_machines = [
+        m for m in all_machines
+        if int(getattr(m, 'is_enabled', 1) or 0) != 0
+    ]
     machines = _filter_machines(all_machines, cfg, scope, station_id, line_id, factory_id)
 
     plans = db.query(ProductionPlan).filter(
@@ -1430,7 +1445,7 @@ def build_hourly_output(
         cycle_profile = None
         active_variants = [
             _plan_variant(p) for p in machine_plans
-            if getattr(p, 'status', None) in ('running', 'completed', 'paused')
+            if getattr(p, 'status', None) in ('running', 'completed', 'paused', 'incomplete', 'aborted')
         ]
         if active_variants:
             profiles = [_get_cycle_profile(db, v) for v in active_variants]

@@ -12,6 +12,43 @@
   ],
   "groups": [
     {
+      "id": "overview",
+      "label": "Overview",
+      "navIcon": "overview",
+      "roles": ["admin", "superadmin", "supervisor", "operator", "maintenance"],
+      "items": [
+        {
+          "id": "overview.factory",
+          "label": "Factory Overview",
+          "path": "/overview/factory",
+          "navIcon": "factoryOverview",
+          "roles": ["admin", "superadmin", "supervisor", "operator", "maintenance"]
+        },
+        {
+          "id": "overview.line",
+          "label": "Line Overview",
+          "path": "/overview/line",
+          "navIcon": "lineOverview",
+          "roles": ["admin", "superadmin", "supervisor", "operator", "maintenance"]
+        },
+        {
+          "id": "overview.equipment",
+          "label": "Equipment Overview",
+          "path": "/overview/equipment",
+          "navIcon": "machines",
+          "roles": ["admin", "superadmin", "supervisor", "operator", "maintenance"]
+        },
+        {
+          "id": "overview.monitor",
+          "label": "Monitor Mode",
+          "path": "/overview/monitor",
+          "navIcon": "monitor",
+          "hideFromNav": true,
+          "roles": ["admin", "superadmin", "supervisor", "maintenance"]
+        }
+      ]
+    },
+    {
       "id": "production",
       "label": "Production",
       "navIcon": "production",
@@ -71,7 +108,8 @@
           "id": "qc.work_instructions",
           "label": "Work Instructions",
           "path": "/work-instructions",
-          "navIcon": "workInstructions"
+          "navIcon": "workInstructions",
+          "roles": ["admin", "superadmin", "supervisor", "quality", "operator"]
         }
       ]
     },

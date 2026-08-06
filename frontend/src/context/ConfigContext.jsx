@@ -30,6 +30,10 @@ const DEFAULT_CONFIG = {
     },
   },
   checkDataDaysBack: 1,
+  // auto = live PLC/status capture (default); manual = Data Entry + missing-shift alerts
+  data_capture: {
+    mode: 'auto',
+  },
   mobile_integration: {
     enabled: true,
   },
@@ -119,4 +123,9 @@ export function useConfig() {
 /** True when Configuration → Mobile App Integration is ON (default true). */
 export function isMobileIntegrationEnabled(config) {
   return config?.mobile_integration?.enabled !== false;
+}
+
+/** True when Configuration → Data Capture mode is Manual (default Auto / false). */
+export function isManualDataEntryEnabled(config) {
+  return (config?.data_capture?.mode || 'auto') === 'manual';
 }

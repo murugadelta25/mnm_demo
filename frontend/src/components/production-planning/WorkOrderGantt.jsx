@@ -69,20 +69,28 @@ export default function WorkOrderGantt({ t, overview, expandedIds, onToggleExpan
     };
   };
 
-  const statusBadge = (status) => {
+  const statusBadge = (wo) => {
+    const status = wo.status;
+    const leftoverQty = wo.outstanding_qty ?? wo.remaining_qty ?? 0;
+    const isClosedLeftover = status === 'closed' && leftoverQty > 0;
     const colors = {
-      draft: '#64748b', in_progress: '#0ea5e9', completed: '#10b981', cancelled: '#ef4444',
+      draft: '#64748b', in_progress: '#0ea5e9', completed: '#10b981', cancelled: '#ef4444', closed: '#dc2626',
     };
     const labels = {
-      draft: 'Draft', in_progress: 'In Progress', completed: 'Completed', cancelled: 'Cancelled',
+      draft: 'Draft', in_progress: 'In Progress', completed: 'Completed', cancelled: 'Cancelled', closed: 'Closed',
     };
+    const color = isClosedLeftover ? '#dc2626' : (colors[status] || '#64748b');
     return (
       <span style={{
-        padding: '2px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600,
-        background: (colors[status] || '#64748b') + '22',
-        color: colors[status] || '#64748b',
+        padding: '2px 8px', borderRadius: 10, fontSize: 11, fontWeight: 700,
+        background: color + '22',
+        color,
       }}>
-        {labels[status] || status}
+        {wo.status_label || (
+          isClosedLeftover
+            ? `Closed with leftover qty (${leftoverQty})`
+            : (labels[status] || status)
+        )}
       </span>
     );
   };
@@ -142,11 +150,20 @@ export default function WorkOrderGantt({ t, overview, expandedIds, onToggleExpan
                     </div>
                   </div>
                   <div style={{ padding: '2px 8px 6px 30px', fontSize: 10, lineHeight: 1.5 }}>
-                    {statusBadge(wo.status)}
+                    {statusBadge(wo)}
                     <div style={{ color: t.textMuted, marginTop: 2 }}>
                       {wo.complete_pct}% ({wo.completed_qty} / {wo.target_qty})
                     </div>
-                    <div style={{ color: t.textDim }}>Remaining: {wo.remaining_qty} pcs</div>
+                    <div style={{
+                      color: wo.status === 'closed' && (wo.outstanding_qty ?? wo.remaining_qty) > 0
+                        ? '#dc2626'
+                        : t.textDim,
+                      fontWeight: wo.status === 'closed' ? 700 : 400,
+                    }}>
+                      {wo.status === 'closed'
+                        ? `Leftover: ${wo.outstanding_qty ?? wo.remaining_qty ?? 0} pcs`
+                        : `Remaining: ${wo.remaining_qty} pcs`}
+                    </div>
                   </div>
                   {planRows.map((p) => (
                     <div key={p.id} style={{ padding: '3px 8px 3px 30px', fontSize: 10, color: t.textMuted, borderTop: `1px dashed ${t.border}` }}>

@@ -28,6 +28,10 @@ fi
 HTTPS_REDIRECT=""
 HTTPS_SERVER_BLOCK=""
 
+if [ "$APP_USE_HTTPS" = "yes" ]; then
+  ensure_ssl_certificates || true
+fi
+
 if [ "$APP_USE_HTTPS" = "yes" ] && [ -f "$APP_SSL_CERT" ] && [ -f "$APP_SSL_KEY" ]; then
   HTTPS_REDIRECT="    return 301 https://\$host\$request_uri;"
   HTTPS_SERVER_BLOCK=$(cat <<EOF

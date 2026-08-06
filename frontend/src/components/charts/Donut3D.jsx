@@ -21,16 +21,18 @@ function segmentArcs(cx, cy, r, count, spanDeg, startOffset = 0) {
 }
 
 /**
- * Animated HUD-style donut gauge — 150×150 upright circle with rotating orbit rings.
+ * Animated HUD-style donut gauge — upright circle with rotating outer/inner orbit rings.
+ * Matches OEE Dashboard Donut3D look; `size` scales the canvas (default 150).
  */
 export default function Donut3D({
   value = 0,
   color = '#0ea5e9',
   trackColor = '#1e293b',
+  size = DONUT_CANVAS,
 }) {
   const gid = useId().replace(/:/g, '');
   const pct = Math.min(100, Math.max(0, value));
-  const canvas = DONUT_CANVAS;
+  const canvas = Math.max(120, Number(size) || DONUT_CANVAS);
   const cx = canvas / 2;
   const cy = canvas / 2;
   const radius = canvas * 0.28;

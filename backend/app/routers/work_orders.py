@@ -13,7 +13,7 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 
 from ..auth import get_current_user, require_role
-from ..models import WorkOrder, ProductionPlan, Machine, Part, get_db, now_ist
+from ..models import WorkOrder, ProductionPlan, Machine, Part, ToolEvent, get_db, now_ist
 from ..ws_manager import manager
 
 router = APIRouter(prefix="/api/work-orders", tags=["work-orders"])
@@ -36,18 +36,27 @@ class WorkOrderCreate(BaseModel):
     model_variant: Optional[str] = None
     description: Optional[str] = None
     target_qty: int = Field(gt=0)
-    start_date: Optional[date] = None
-    end_date: Optional[date] = None
+    start_date: date
+    end_date: date
     spares_tools: Optional[List[SpareToolItem]] = None
+    # Closed WOs whose remaining qty is clubbed / consumed into this new order
+    source_wo_ids: Optional[List[int]] = None
 
 
 class WorkOrderUpdate(BaseModel):
+    work_order_no: Optional[str] = None
+    part_id: Optional[int] = None
+    model_variant: Optional[str] = None
     description: Optional[str] = None
     target_qty: Optional[int] = None
     start_date: Optional[date] = None
     end_date: Optional[date] = None
     status: Optional[str] = None
     spares_tools: Optional[List[SpareToolItem]] = None
+
+
+class OutstandingDiscardBody(BaseModel):
+    wo_ids: List[int] = Field(min_length=1)
 
 
 class WorkOrderExportParams(BaseModel):
@@ -88,9 +97,100 @@ def _wo_stats(db: Session, wo: WorkOrder) -> dict:
     }
 
 
+def _effective_end_date(db: Session, wo: WorkOrder) -> Optional[date]:
+    """WO end_date, else latest linked plan date (so overdue still closes without end_date)."""
+    if wo.end_date:
+        return wo.end_date
+    row = (
+        db.query(func.max(ProductionPlan.plan_date))
+        .filter(
+            ProductionPlan.work_order_id == wo.id,
+            ProductionPlan.status != "cancelled",
+        )
+        .scalar()
+    )
+    return row
+
+
+def _mark_closed_outstanding(wo: WorkOrder, remaining: int):
+    wo.status = "closed"
+    wo.outstanding_qty = max(int(remaining), 0)
+    # Do not revive discarded/consumed leftovers when syncing again
+    if (wo.outstanding_status or "none") in ("none", "available", None):
+        wo.outstanding_status = "available" if wo.outstanding_qty > 0 else "none"
+
+
+def _sync_wo_status(db: Session, wo_id: int):
+    wo = db.query(WorkOrder).filter(WorkOrder.id == wo_id).first()
+    if not wo or wo.status == "cancelled":
+        return
+    stats = _wo_stats(db, wo)
+    today = date.today()
+    end = _effective_end_date(db, wo)
+    remaining = stats["remaining_qty"]
+
+    if stats["completed_qty"] >= wo.target_qty:
+        wo.status = "completed"
+        wo.outstanding_qty = 0
+        if (wo.outstanding_status or "none") == "available":
+            wo.outstanding_status = "none"
+    elif end and end < today and remaining > 0:
+        # Planned window passed with unfinished qty → closed + outstanding
+        if (wo.outstanding_status or "none") in ("consumed", "discarded"):
+            wo.status = "closed"
+            wo.outstanding_qty = remaining
+        else:
+            _mark_closed_outstanding(wo, remaining)
+    elif wo.status == "closed" and (wo.outstanding_status or "none") in ("consumed", "discarded"):
+        # Keep closed once disposition decided
+        wo.outstanding_qty = remaining
+    elif stats["plan_count"] > 0 or stats["completed_qty"] > 0:
+        wo.status = "in_progress"
+        if (wo.outstanding_status or "none") == "available":
+            wo.outstanding_qty = 0
+            wo.outstanding_status = "none"
+    elif wo.status == "completed":
+        wo.status = "in_progress"
+    wo.updated_at = now_ist()
+
+
+def _close_overdue_for_part(db: Session, part_id: Optional[int], except_wo_id: Optional[int] = None):
+    """When a new WO starts for a part, close any overdue incomplete WOs for that part."""
+    if not part_id:
+        return
+    today = date.today()
+    candidates = (
+        db.query(WorkOrder)
+        .filter(
+            WorkOrder.part_id == part_id,
+            WorkOrder.status.in_(("draft", "in_progress")),
+        )
+        .all()
+    )
+    for wo in candidates:
+        if except_wo_id and wo.id == except_wo_id:
+            continue
+        end = _effective_end_date(db, wo)
+        if not end or end >= today:
+            continue
+        stats = _wo_stats(db, wo)
+        if stats["remaining_qty"] > 0:
+            _mark_closed_outstanding(wo, stats["remaining_qty"])
+            wo.updated_at = now_ist()
+
+
 def _serialize_wo(db: Session, wo: WorkOrder, include_plans: bool = False) -> dict:
     part = db.query(Part).filter(Part.id == wo.part_id).first() if wo.part_id else None
     stats = _wo_stats(db, wo)
+    out_status = wo.outstanding_status or "none"
+    out_qty = int(wo.outstanding_qty or 0)
+    if out_status == "available" and out_qty <= 0:
+        out_qty = stats["remaining_qty"]
+    status_label = (
+        f"Closed with leftover qty ({out_qty})"
+        if wo.status == "closed" and out_qty > 0
+        else wo.status.replace("_", " ").title()
+    )
     out = {
         "id": wo.id,
         "work_order_no": wo.work_order_no,
@@ -102,7 +202,11 @@ def _serialize_wo(db: Session, wo: WorkOrder, include_plans: bool = False) -> di
         "start_date": str(wo.start_date) if wo.start_date else None,
         "end_date": str(wo.end_date) if wo.end_date else None,
         "status": wo.status,
+        "status_label": status_label,
         "spares_tools": _parse_spares(wo.spares_tools_json),
+        "outstanding_qty": out_qty,
+        "outstanding_status": out_status,
+        "consumed_by_wo_id": wo.consumed_by_wo_id,
         "created_at": wo.created_at,
         "updated_at": wo.updated_at,
         **stats,
@@ -135,20 +239,6 @@ def _serialize_plan(p: ProductionPlan, machines: dict) -> dict:
         "plan_type": p.plan_type,
         "notes": p.notes,
     }
-
-
-def _sync_wo_status(db: Session, wo_id: int):
-    wo = db.query(WorkOrder).filter(WorkOrder.id == wo_id).first()
-    if not wo or wo.status == "cancelled":
-        return
-    stats = _wo_stats(db, wo)
-    if stats["completed_qty"] >= wo.target_qty:
-        wo.status = "completed"
-    elif stats["plan_count"] > 0 or stats["completed_qty"] > 0:
-        wo.status = "in_progress"
-    elif wo.status == "completed":
-        wo.status = "in_progress"
-    wo.updated_at = now_ist()
 
 
 def _apply_wo_date_range(q, date_from: Optional[date], date_to: Optional[date]):
@@ -185,6 +275,46 @@ def _apply_active_in_range(q, db: Session, date_from: date, date_to: date):
     return q.filter(overlap)
 
 
+def _consume_source_wos(db: Session, source_ids: List[int], new_wo_id: int, part_id: Optional[int]) -> int:
+    """Mark selected closed/available outstanding WOs as consumed. Returns clubbed qty."""
+    if not source_ids:
+        return 0
+    rows = (
+        db.query(WorkOrder)
+        .filter(WorkOrder.id.in_(source_ids))
+        .all()
+    )
+    total = 0
+    for src in rows:
+        if part_id and src.part_id and src.part_id != part_id:
+            raise HTTPException(
+                400,
+                f"Source work order {src.work_order_no} belongs to a different part",
+            )
+        # Ensure overdue incomplete rows are closed first
+        _sync_wo_status(db, src.id)
+        db.refresh(src)
+        status = src.outstanding_status or "none"
+        qty = int(src.outstanding_qty or 0)
+        if status != "available" or qty <= 0:
+            # Allow consuming freshly closed remaining even if status sync lagged
+            stats = _wo_stats(db, src)
+            if src.status == "closed" and stats["remaining_qty"] > 0 and status in ("none", "available"):
+                qty = stats["remaining_qty"]
+            else:
+                raise HTTPException(
+                    400,
+                    f"Work order {src.work_order_no} has no available outstanding qty",
+                )
+        src.status = "closed"
+        src.outstanding_qty = qty
+        src.outstanding_status = "consumed"
+        src.consumed_by_wo_id = new_wo_id
+        src.updated_at = now_ist()
+        total += qty
+    return total
+
+
 @router.post("/")
 async def create_work_order(
     data: WorkOrderCreate,
@@ -197,6 +327,18 @@ async def create_work_order(
         part = db.query(Part).filter(Part.id == data.part_id).first()
         if not part:
             raise HTTPException(404, "Part not found")
+    # New work orders require both dates and may only be scheduled from today onward.
+    today = now_ist().date()
+    if not data.start_date:
+        raise HTTPException(400, "Period Start is required")
+    if not data.end_date:
+        raise HTTPException(400, "Period End is required")
+    if data.start_date < today:
+        raise HTTPException(400, "Period Start cannot be before today")
+    if data.end_date < today:
+        raise HTTPException(400, "Period End cannot be before today")
+    if data.end_date < data.start_date:
+        raise HTTPException(400, "Period End cannot be before Period Start")
     spares_json = json.dumps([s.model_dump() for s in data.spares_tools]) if data.spares_tools else None
     wo = WorkOrder(
         work_order_no=data.work_order_no.strip(),
@@ -208,15 +350,104 @@ async def create_work_order(
         end_date=data.end_date,
         spares_tools_json=spares_json,
         status="draft",
+        outstanding_qty=0,
+        outstanding_status="none",
         created_by=user.id,
         created_at=now_ist(),
         updated_at=now_ist(),
     )
     db.add(wo)
+    db.flush()
+
+    clubbed = 0
+    if data.source_wo_ids:
+        clubbed = _consume_source_wos(db, data.source_wo_ids, wo.id, data.part_id)
+        if clubbed > 0:
+            note = f"Clubbed outstanding qty {clubbed}."
+            combined = f"{wo.description} {note}".strip() if wo.description else note
+            wo.description = combined[:255]
+
+    # New order for this part → close any other overdue incomplete WOs
+    _close_overdue_for_part(db, data.part_id, except_wo_id=wo.id)
+
     db.commit()
     db.refresh(wo)
-    await manager.broadcast({"type": "work_order_created", "work_order_id": wo.id})
-    return _serialize_wo(db, wo)
+    await manager.broadcast({
+        "type": "work_order_created",
+        "work_order_id": wo.id,
+        "clubbed_outstanding_qty": clubbed,
+    })
+    out = _serialize_wo(db, wo)
+    out["clubbed_outstanding_qty"] = clubbed
+    return out
+
+
+@router.get("/outstanding")
+def list_outstanding_work_orders(
+    part_id: Optional[int] = None,
+    model_variant: Optional[str] = None,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Available outstanding (closed leftover) work orders, optionally filtered by part."""
+    # Heal overdue rows first so UI sees fresh outstanding
+    q_heal = db.query(WorkOrder).filter(WorkOrder.status.in_(("draft", "in_progress", "closed")))
+    if part_id:
+        q_heal = q_heal.filter(WorkOrder.part_id == part_id)
+    for wo in q_heal.all():
+        _sync_wo_status(db, wo.id)
+    db.commit()
+
+    q = db.query(WorkOrder).filter(
+        WorkOrder.status == "closed",
+        WorkOrder.outstanding_status == "available",
+        WorkOrder.outstanding_qty > 0,
+    )
+    if part_id:
+        q = q.filter(WorkOrder.part_id == part_id)
+    if model_variant:
+        q = q.filter(WorkOrder.model_variant.ilike(f"%{model_variant}%"))
+    rows = q.order_by(WorkOrder.end_date.asc(), WorkOrder.id.asc()).all()
+    items = [_serialize_wo(db, wo) for wo in rows]
+    return {
+        "items": items,
+        "count": len(items),
+        "total_outstanding_qty": sum(i.get("outstanding_qty") or 0 for i in items),
+    }
+
+
+@router.post("/outstanding/discard")
+def discard_outstanding(
+    data: OutstandingDiscardBody,
+    db: Session = Depends(get_db),
+    _=Depends(require_role("admin", "superadmin", "supervisor")),
+):
+    """Discard leftover qty so it is no longer offered for reuse/clubbing."""
+    discarded = []
+    for wo_id in data.wo_ids:
+        wo = db.query(WorkOrder).filter(WorkOrder.id == wo_id).first()
+        if not wo:
+            raise HTTPException(404, f"Work order {wo_id} not found")
+        _sync_wo_status(db, wo.id)
+        db.refresh(wo)
+        if wo.status != "closed" and (wo.outstanding_status or "none") != "available":
+            # Still allow discard of overdue incomplete by closing first
+            stats = _wo_stats(db, wo)
+            end = _effective_end_date(db, wo)
+            if end and end < date.today() and stats["remaining_qty"] > 0:
+                _mark_closed_outstanding(wo, stats["remaining_qty"])
+            else:
+                raise HTTPException(400, f"{wo.work_order_no} has no outstanding qty to discard")
+        wo.status = "closed"
+        wo.outstanding_status = "discarded"
+        wo.updated_at = now_ist()
+        discarded.append({
+            "id": wo.id,
+            "work_order_no": wo.work_order_no,
+            "outstanding_qty": wo.outstanding_qty or 0,
+        })
+    db.commit()
+    return {"ok": True, "discarded": discarded, "count": len(discarded)}
 
 
 @router.get("/")
@@ -308,6 +539,7 @@ def work_order_overview(
 
     items = []
     for wo in orders:
+        _sync_wo_status(db, wo.id)
         stats = _wo_stats(db, wo)
         plans = db.query(ProductionPlan).filter(
             ProductionPlan.work_order_id == wo.id,
@@ -321,7 +553,13 @@ def work_order_overview(
         if not bar_end:
             bar_end = date_to
 
-        delay = wo.end_date and wo.end_date < today and stats["completed_qty"] < wo.target_qty
+        out_qty = int(wo.outstanding_qty or 0)
+        if (wo.outstanding_status or "none") == "available" and out_qty <= 0:
+            out_qty = stats["remaining_qty"]
+        delay = (
+            wo.status == "closed"
+            or (wo.end_date and wo.end_date < today and stats["completed_qty"] < wo.target_qty)
+        )
         gantt_status = "completed" if wo.status == "completed" else (
             "delay" if delay else ("running" if stats["completed_qty"] > 0 else "schedule")
         )
@@ -352,8 +590,14 @@ def work_order_overview(
             "target_qty": wo.target_qty,
             "completed_qty": stats["completed_qty"],
             "remaining_qty": stats["remaining_qty"],
+            "outstanding_qty": out_qty,
             "complete_pct": stats["complete_pct"],
             "status": wo.status,
+            "status_label": (
+                f"Closed with leftover qty ({out_qty})"
+                if wo.status == "closed" and out_qty > 0
+                else wo.status.replace("_", " ").title()
+            ),
             "gantt_status": gantt_status,
             "bar_start": str(bar_start),
             "bar_end": str(bar_end),
@@ -361,6 +605,7 @@ def work_order_overview(
             "plans": [_serialize_plan(p, machines) for p in plans],
         })
 
+    db.commit()
     return {
         "date_from": str(date_from),
         "date_to": str(date_to),
@@ -411,7 +656,7 @@ def list_planned_work_orders(
         if not wo or wo.status in ("completed", "cancelled"):
             continue
         _sync_wo_status(db, wo.id)
-        if wo.status in ("completed", "cancelled"):
+        if wo.status in ("completed", "cancelled", "closed"):
             continue
         stats = _wo_stats(db, wo)
         if stats["completed_qty"] >= wo.target_qty:
@@ -449,7 +694,7 @@ def list_planned_work_orders(
         if wo.id in seen_ids:
             continue
         _sync_wo_status(db, wo.id)
-        if wo.status in ("completed", "cancelled"):
+        if wo.status in ("completed", "cancelled", "closed"):
             continue
         stats = _wo_stats(db, wo)
         if stats["completed_qty"] >= wo.target_qty:
@@ -785,14 +1030,53 @@ async def update_work_order(
     wo = db.query(WorkOrder).filter(WorkOrder.id == wo_id).first()
     if not wo:
         raise HTTPException(404, "Work order not found")
+
+    if data.work_order_no is not None:
+        new_no = data.work_order_no.strip()
+        if not new_no:
+            raise HTTPException(400, "Work order number is required")
+        clash = (
+            db.query(WorkOrder)
+            .filter(WorkOrder.work_order_no == new_no, WorkOrder.id != wo_id)
+            .first()
+        )
+        if clash:
+            raise HTTPException(400, "Work order number already exists")
+        wo.work_order_no = new_no
+
+    if data.part_id is not None:
+        if data.part_id:
+            part = db.query(Part).filter(Part.id == data.part_id).first()
+            if not part:
+                raise HTTPException(404, "Part not found")
+        wo.part_id = data.part_id
+
+    if data.model_variant is not None:
+        wo.model_variant = data.model_variant
     if data.description is not None:
         wo.description = data.description
     if data.target_qty is not None:
+        if data.target_qty <= 0:
+            raise HTTPException(400, "Target qty must be greater than 0")
         wo.target_qty = data.target_qty
+
+    new_start = data.start_date if data.start_date is not None else wo.start_date
+    new_end = data.end_date if data.end_date is not None else wo.end_date
+    if new_start is None or new_end is None:
+        raise HTTPException(400, "Period Start and Period End are both required")
+    if new_end < new_start:
+        raise HTTPException(400, "Period End cannot be before Period Start")
+    today = now_ist().date()
+    # Do not allow moving dates into the past relative to today (existing past dates may be kept).
+    if data.start_date is not None and data.start_date < today and data.start_date != wo.start_date:
+        raise HTTPException(400, "Period Start cannot be before today")
+    if data.end_date is not None and data.end_date < today and data.end_date != wo.end_date:
+        raise HTTPException(400, "Period End cannot be before today")
     if data.start_date is not None:
         wo.start_date = data.start_date
     if data.end_date is not None:
         wo.end_date = data.end_date
+
     if data.status is not None:
         wo.status = data.status
     if data.spares_tools is not None:
@@ -803,6 +1087,45 @@ async def update_work_order(
     db.refresh(wo)
     await manager.broadcast({"type": "work_order_updated", "work_order_id": wo_id})
     return _serialize_wo(db, wo, include_plans=True)
+
+
+@router.delete("/{wo_id}")
+async def delete_work_order(
+    wo_id: int,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("supervisor", "admin")),
+):
+    """Delete a work order. Linked plans/tool events are unlinked (not deleted)."""
+    wo = db.query(WorkOrder).filter(WorkOrder.id == wo_id).first()
+    if not wo:
+        raise HTTPException(404, "Work order not found")
+
+    wo_no = wo.work_order_no
+
+    # Restore outstanding WOs that were clubbed into this one
+    sources = db.query(WorkOrder).filter(WorkOrder.consumed_by_wo_id == wo_id).all()
+    for src in sources:
+        src.consumed_by_wo_id = None
+        if (src.outstanding_status or "") == "consumed":
+            src.outstanding_status = "available"
+            src.status = "closed"
+        src.updated_at = now_ist()
+
+    # Unlink production plans (keep history; remove WO association)
+    db.query(ProductionPlan).filter(ProductionPlan.work_order_id == wo_id).update(
+        {ProductionPlan.work_order_id: None},
+        synchronize_session=False,
+    )
+    # Unlink tool events
+    db.query(ToolEvent).filter(ToolEvent.work_order_id == wo_id).update(
+        {ToolEvent.work_order_id: None},
+        synchronize_session=False,
+    )
+
+    db.delete(wo)
+    db.commit()
+    await manager.broadcast({"type": "work_order_deleted", "work_order_id": wo_id})
+    return {"ok": True, "deleted_id": wo_id, "work_order_no": wo_no}
 
 
 def sync_work_order_after_plan_change(db: Session, work_order_id: Optional[int]):

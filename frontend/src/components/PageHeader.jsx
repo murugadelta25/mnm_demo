@@ -13,7 +13,7 @@ const AUTO_REFRESH_SEC = 60;
  *                Pass undefined while a modal/sheet is open to halt the timer
  *   extra      – optional JSX rendered between title and clock (e.g. action buttons)
  */
-export default function PageHeader({ title, onRefresh, extra }) {
+export default function PageHeader({ title, onRefresh, extra, compact = false }) {
   const [now, setNow] = useState(new Date());
   const { config, ready: configReady } = useConfig();
   const [countdown, setCountdown] = useState(AUTO_REFRESH_SEC);
@@ -117,21 +117,37 @@ export default function PageHeader({ title, onRefresh, extra }) {
     bar: {
       display: 'flex',
       alignItems: 'center',
-      gap: 12,
-      marginBottom: 16,
+      gap: compact ? 8 : 12,
+      marginBottom: compact ? 0 : 16,
       flexWrap: 'nowrap',
-      minHeight: 'var(--titan-feature-title-height)',
+      minHeight: compact ? 40 : 'var(--titan-feature-title-height)',
       // Do not use CSS contain here — it clipped the notification dropdown under page cards
       position: 'relative',
       zIndex: 20,
       overflow: 'visible',
     },
-    title: { color: t.text, fontSize: 18, margin: 0, whiteSpace: 'nowrap' },
+    title: { color: t.text, fontSize: compact ? 16 : 18, margin: 0, whiteSpace: 'nowrap', flexShrink: 0 },
+    center: {
+      flex: 1,
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      gap: compact ? 10 : 14,
+      flexWrap: 'wrap',
+      minWidth: 0,
+    },
+    extraInner: {
+      display: 'flex',
+      gap: 8,
+      flexWrap: 'wrap',
+      alignItems: 'center',
+      minWidth: 0,
+    },
     extra: { flex: 1, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center', minWidth: 0 },
     right: {
-      marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 10,
-      background: t.surface, borderRadius: 10, padding: '6px 14px',
-      border: `1px solid ${t.border}`, flexShrink: 0, minHeight: 42,
+      marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: compact ? 8 : 10,
+      background: t.surface, borderRadius: 10, padding: compact ? '4px 10px' : '6px 14px',
+      border: `1px solid ${t.border}`, flexShrink: 0, minHeight: compact ? 36 : 42,
       position: 'relative',
       zIndex: 21,
       overflow: 'visible',
@@ -139,9 +155,15 @@ export default function PageHeader({ title, onRefresh, extra }) {
     lastRefresh: { color: t.textFaint, fontSize: 11, whiteSpace: 'nowrap' },
     shiftBadge: {
       background: t.bg, color: t.brand, fontSize: 11, fontWeight: 700,
-      padding: '2px 10px', borderRadius: 10, border: `1px solid ${t.brand}44`,
-      whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 6,
-      minWidth: 88, minHeight: 22, justifyContent: 'center',
+      padding: '3px 10px 3px 8px', borderRadius: 10, border: `1px solid ${t.brand}44`,
+      whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 5,
+      minHeight: 22, flexShrink: 0, lineHeight: 1.2,
+    },
+    shiftIcon: {
+      width: 14,
+      height: 14,
+      flexShrink: 0,
+      display: 'block',
     },
     refreshBtn: {
       position: 'relative', width: 30, height: 30, borderRadius: 6,
@@ -158,31 +180,34 @@ export default function PageHeader({ title, onRefresh, extra }) {
   return (
     <div style={{ ...s.bar, borderBottom: `1px solid ${t.border}` }}>
       <h3 style={{ ...s.title, color: t.text }}>{title}</h3>
-      {extra && <div style={s.extra}>{extra}</div>}
+      <div style={s.center}>
+        {extra && <div style={s.extraInner}>{extra}</div>}
+      </div>
       <div style={{ ...s.right, background: t.surface, border: `1px solid ${t.border}` }}>
-        <span
-          style={{
-            ...s.shiftBadge,
-            background: t.bg,
-            borderColor: currentShift ? '#f59e0b44' : t.border,
-            color: currentShift ? '#f59e0b' : t.textFaint,
-            visibility: currentShift ? 'visible' : 'hidden',
-          }}
-          aria-hidden={!currentShift}
-        >
-          <svg width={14} height={14} viewBox="0 0 14 14" aria-hidden="true">
-            <circle cx={7} cy={7} r={5.5} fill="none" stroke="#f59e0b55" strokeWidth={1.5} />
-            <circle
-              cx={7} cy={7} r={5.5} fill="none" stroke="#f59e0b" strokeWidth={1.5}
-              strokeDasharray={2 * Math.PI * 5.5}
-              strokeDashoffset={0}
-              strokeLinecap="round"
-              transform="rotate(-90 7 7)"
-            />
-            <circle cx={7} cy={3.2} r={0.9} fill="#f59e0b" />
-          </svg>
-          {currentShift?.name || 'Shift'}
-        </span>
+        {currentShift ? (
+          <span
+            style={{
+              ...s.shiftBadge,
+              background: t.bg,
+              borderColor: '#f59e0b44',
+              color: '#f59e0b',
+            }}
+            title={`Current shift: ${currentShift.name}`}
+          >
+            <svg style={s.shiftIcon} width={14} height={14} viewBox="0 0 14 14" aria-hidden="true">
+              <circle cx={7} cy={7} r={5.5} fill="none" stroke="#f59e0b55" strokeWidth={1.5} />
+              <circle
+                cx={7} cy={7} r={5.5} fill="none" stroke="#f59e0b" strokeWidth={1.5}
+                strokeDasharray={2 * Math.PI * 5.5}
+                strokeDashoffset={0}
+                strokeLinecap="round"
+                transform="rotate(-90 7 7)"
+              />
+              <circle cx={7} cy={3.2} r={0.9} fill="#f59e0b" />
+            </svg>
+            {currentShift.name || 'Shift'}
+          </span>
+        ) : null}
         <NotificationBell />
         <span style={{ ...s.lastRefresh, color: t.textFaint }}>↻ {fmtShort(lastRefresh)}</span>
         <button

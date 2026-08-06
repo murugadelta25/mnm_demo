@@ -21,10 +21,11 @@ TRUNCATE_ORDER = [
 ]
 
 SEED_USERS = [
-    ("admin",        "admin123",  "admin"),
-    ("supervisor1",  "sup123",    "supervisor"),
-    ("operator1",    "op123",     "operator"),
-    ("maintenance1", "maint123",  "maintenance"),
+    ("SuperAdmin",   "Password@123", "superadmin"),
+    ("admin",        "admin123",     "admin"),
+    ("supervisor1",  "sup123",       "supervisor"),
+    ("operator1",    "op123",        "operator"),
+    ("maintenance1", "maint123",     "maintenance"),
 ]
 
 with engine.begin() as conn:

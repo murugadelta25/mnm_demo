@@ -20,6 +20,30 @@ export const ACCESS_MATRIX = [
     roles: { superadmin: true, admin: true, supervisor: true, operator: true, maintenance: true, quality: false },
   },
   {
+    id: 'overview.factory',
+    feature: 'Factory Overview',
+    registryId: 'overview.factory',
+    roles: { superadmin: true, admin: true, supervisor: true, operator: true, maintenance: true, quality: false },
+  },
+  {
+    id: 'overview.line',
+    feature: 'Line Overview',
+    registryId: 'overview.line',
+    roles: { superadmin: true, admin: true, supervisor: true, operator: true, maintenance: true, quality: false },
+  },
+  {
+    id: 'overview.equipment',
+    feature: 'Equipment Overview',
+    registryId: 'overview.equipment',
+    roles: { superadmin: true, admin: true, supervisor: true, operator: true, maintenance: true, quality: false },
+  },
+  {
+    id: 'overview.monitor',
+    feature: 'Monitor Mode',
+    registryId: 'overview.monitor',
+    roles: { superadmin: true, admin: true, supervisor: true, operator: false, maintenance: true, quality: false },
+  },
+  {
     id: 'production.planning',
     feature: 'Production Planning',
     registryId: 'production.planning',
@@ -92,6 +116,12 @@ export const ACCESS_MATRIX = [
     feature: 'QC Approvals',
     registryId: 'qc.approvals',
     roles: { superadmin: true, admin: true, supervisor: true, operator: false, maintenance: false, quality: true },
+  },
+  {
+    id: 'qc.work_instructions',
+    feature: 'Work Instructions',
+    registryId: 'qc.work_instructions',
+    roles: { superadmin: true, admin: true, supervisor: true, operator: true, maintenance: false, quality: true },
   },
   {
     id: 'operators.my_work_hours',

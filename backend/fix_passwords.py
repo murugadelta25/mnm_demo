@@ -8,6 +8,7 @@ cur.execute('SELECT id, username, password_hash, role FROM users')
 users = cur.fetchall()
 
 test_passwords = {
+    'SuperAdmin': 'Password@123',
     'admin': 'admin123',
     'supervisor1': 'sup123',
     'operator1': 'op123',

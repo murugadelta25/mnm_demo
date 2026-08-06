@@ -85,11 +85,30 @@ Open any browser on any Windows PC on the same network:
 http://192.168.1.100:5173
 ```
 
-Default login: `admin` / `admin123`
+Default login: `SuperAdmin` / `Password@123` (superadmin). Also seeded: `admin` / `admin123`.
 
 ---
 
 ## Re-deploying (after updates)
+
+### Preferred — GitHub pull (existing DB kept)
+
+On the Ubuntu server (same clone that already has `deploy.env` / `database/db.config.json`):
+
+```bash
+cd /path/to/Groz_eap_pms
+git pull origin main
+./run.sh preflight    # backup existing DB + apply additive schema
+./run.sh restart      # deps + schema guard again + systemd restart
+```
+
+- Local secrets (`deploy.env`, `database/db.config.json`, `backend/.env`) are gitignored and stay in place.
+- Existing tables and rows are preserved.
+- Missing tables/columns are created automatically via `scripts/setup-database.sh` → `backend/ensure_schema.py` and app startup migrations in `backend/app/main.py`.
+
+See **`DEPLOY-SAFE-CHECKLIST.md`** for verification steps.
+
+### Alternate — zip package (legacy)
 
 On Windows, re-run the package script:
 ```powershell

@@ -40,11 +40,13 @@ export default function AppShell() {
         transition: 'background 0.2s',
       }}
     >
-      <AppBar
-        onMenuClick={onMenuClick}
-        isIntegration={isIntegration}
-        navVisible={sidebarExpanded}
-      />
+      {!isIntegration && (
+        <AppBar
+          onMenuClick={onMenuClick}
+          isIntegration={isIntegration}
+          navVisible={sidebarExpanded}
+        />
+      )}
 
       <div
         className="titan-lower"
@@ -56,7 +58,7 @@ export default function AppShell() {
           overflow: 'hidden',
         }}
       >
-        <Sidebar expanded={sidebarExpanded} />
+        {!isIntegration && <Sidebar expanded={sidebarExpanded} />}
         <main
           className="titan-app-content"
           style={{
@@ -104,6 +106,7 @@ export default function AppShell() {
               overflowX: 'hidden',
               WebkitOverflowScrolling: 'touch',
               scrollbarGutter: 'stable',
+              position: 'relative',
             }}
           >
             <Outlet />

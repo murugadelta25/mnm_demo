@@ -17,6 +17,7 @@ const STATUS_COLORS = {
   in_progress: '#0ea5e9',
   completed: '#10b981',
   cancelled: '#ef4444',
+  closed: '#dc2626',
 };
 
 const todayStr = () => new Date().toLocaleDateString('en-CA');
@@ -72,6 +73,8 @@ export default function WorkOrderManagement() {
   const [appliedRange, setAppliedRange] = useState(weekDefault);
   const [appliedSearch, setAppliedSearch] = useState('');
   const [showAddModal, setShowAddModal] = useState(false);
+  const [editingWo, setEditingWo] = useState(null);
+  const [deleting, setDeleting] = useState(false);
   const [msg, setMsg] = useState('');
   const [loading, setLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -80,6 +83,7 @@ export default function WorkOrderManagement() {
   const detailRef = useRef(null);
 
   const canCreate = user?.role !== 'maintenance';
+  const canManage = ['admin', 'superadmin', 'supervisor'].includes(user?.role);
 
   const fetchList = useCallback(async () => {
     const { from: rangeFrom, to: rangeTo } = appliedRange;
@@ -109,7 +113,7 @@ export default function WorkOrderManagement() {
       const r = await api.get('/api/work-orders/', { params });
       let list = r.data;
       if (mainTab === 'historic') {
-        list = list.filter((wo) => ['completed', 'cancelled'].includes(wo.status));
+        list = list.filter((wo) => ['completed', 'cancelled', 'closed'].includes(wo.status));
       }
       setWorkOrders(list);
     } catch {
@@ -209,7 +213,7 @@ export default function WorkOrderManagement() {
   }, []);
 
   useWebSocket(useCallback((m) => {
-    if (['work_order_created', 'work_order_updated', 'plan_created', 'plan_updated', 'plan_completed', 'actual_qty_updated'].includes(m.type)) {
+    if (['work_order_created', 'work_order_updated', 'work_order_deleted', 'plan_created', 'plan_updated', 'plan_completed', 'actual_qty_updated'].includes(m.type)) {
       fetchList();
       if (selectedId) fetchDetail(selectedId);
     }
@@ -234,6 +238,44 @@ export default function WorkOrderManagement() {
 
   const viewTrackRecord = (id) => {
     toggleWorkOrder(id);
+  };
+
+  const openEditWo = async (wo) => {
+    if (!wo?.id) return;
+    try {
+      const r = await api.get(`/api/work-orders/${wo.id}`);
+      setEditingWo(r.data);
+    } catch {
+      setEditingWo(wo);
+    }
+    setShowAddModal(true);
+  };
+
+  const closeWoModal = () => {
+    setShowAddModal(false);
+    setEditingWo(null);
+  };
+
+  const deleteWorkOrder = async (wo) => {
+    if (!wo?.id) return;
+    const ok = window.confirm(
+      `Delete work order ${wo.work_order_no}?\n\n`
+      + 'Linked production plans will be unlinked (not deleted).\n'
+      + 'Outstanding qty clubbed into this order will be restored as available.',
+    );
+    if (!ok) return;
+    setDeleting(true);
+    try {
+      await api.delete(`/api/work-orders/${wo.id}`);
+      setMsg(`✅ Work order ${wo.work_order_no} deleted`);
+      setTimeout(() => setMsg(''), 3000);
+      if (String(selectedId) === String(wo.id)) selectWorkOrder(null);
+      await fetchList();
+    } catch (err) {
+      setMsg('❌ ' + (err.response?.data?.detail || err.message));
+    } finally {
+      setDeleting(false);
+    }
   };
 
   const savePlanActual = async (planId, qty) => {
@@ -286,7 +328,7 @@ export default function WorkOrderManagement() {
               ⬇ Download Report
             </button>
             {canCreate && (
-              <button onClick={() => setShowAddModal(true)} style={styles.addWoBtn}>
+              <button onClick={() => { setEditingWo(null); setShowAddModal(true); }} style={styles.addWoBtn}>
                 + Add Work Order
               </button>
             )}
@@ -345,13 +387,21 @@ export default function WorkOrderManagement() {
 
       {showAddModal && (
         <AddWorkOrderModal
+          key={editingWo?.id || 'new'}
           t={t}
           parts={parts}
-          onClose={() => setShowAddModal(false)}
+          editWo={editingWo}
+          onClose={closeWoModal}
           onCreated={(wo) => {
             fetchList();
             selectWorkOrder(wo.id);
             setMsg(`✅ Work order ${wo.work_order_no} saved to database`);
+          }}
+          onUpdated={(wo) => {
+            fetchList();
+            selectWorkOrder(wo.id);
+            setMsg(`✅ Work order ${wo.work_order_no} updated`);
+            setTimeout(() => setMsg(''), 3000);
           }}
         />
       )}
@@ -370,6 +420,10 @@ export default function WorkOrderManagement() {
                 upcomingPlans={upcomingPlans}
                 scheduleOnly={scheduleOnly}
                 onClose={() => selectWorkOrder(null)}
+                canManage={canManage}
+                onEdit={openEditWo}
+                onDelete={deleteWorkOrder}
+                deleting={deleting}
               />
             </div>
           )}
@@ -391,7 +445,9 @@ export default function WorkOrderManagement() {
                   <tr>
                     {(mainTab === 'planned'
                       ? ['Work Order', 'Part / Variant', 'Next Plan', 'Future Plans', 'Future Qty', 'Unplanned', 'WO Status']
-                      : ['Work Order', 'Part / Variant', 'Target', 'Completed', 'Remaining', '%', 'Status']
+                      : mainTab === 'historic'
+                        ? ['Work Order', 'Part / Variant', 'Target', 'Completed', 'Outstanding', '%', 'Status']
+                        : ['Work Order', 'Part / Variant', 'Target', 'Completed', 'Remaining', '%', 'Status']
                     ).map((h) => (
                       <th key={h} style={styles.th(t)}>{h}</th>
                     ))}
@@ -422,17 +478,31 @@ export default function WorkOrderManagement() {
                         <>
                           <td style={styles.td(t)}>{wo.target_qty}</td>
                           <td style={styles.td(t)}>{wo.completed_qty}</td>
-                          <td style={styles.td(t)}>{wo.remaining_qty}</td>
+                          <td style={styles.td(t)}>
+                            {mainTab === 'historic'
+                              ? (wo.outstanding_status === 'available'
+                                ? (wo.outstanding_qty ?? wo.remaining_qty ?? 0)
+                                : (wo.outstanding_status === 'consumed'
+                                  ? `consumed (${wo.outstanding_qty || 0})`
+                                  : (wo.outstanding_status === 'discarded'
+                                    ? 'discarded'
+                                    : (wo.remaining_qty ?? 0))))
+                              : wo.remaining_qty}
+                          </td>
                           <td style={styles.td(t)}>{wo.complete_pct}%</td>
                         </>
                       )}
                       <td style={styles.td(t)}>
                         <span style={{
-                          padding: '2px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600,
+                          padding: '2px 8px', borderRadius: 10, fontSize: 11, fontWeight: 700,
                           background: (STATUS_COLORS[wo.status] || '#64748b') + '22',
-                          color: STATUS_COLORS[wo.status] || '#64748b',
+                          color: wo.status === 'closed' ? '#dc2626' : (STATUS_COLORS[wo.status] || '#64748b'),
                         }}>
-                          {wo.status}
+                          {wo.status_label || (
+                            wo.status === 'closed'
+                              ? `Closed with leftover qty (${wo.outstanding_qty ?? wo.remaining_qty ?? 0})`
+                              : wo.status
+                          )}
                         </span>
                       </td>
                     </tr>
@@ -458,6 +528,10 @@ export default function WorkOrderManagement() {
               scheduleOnly={scheduleOnly}
               onClose={() => selectWorkOrder(null)}
               onSaveActual={savePlanActual}
+              canManage={canManage}
+              onEdit={openEditWo}
+              onDelete={deleteWorkOrder}
+              deleting={deleting}
             />
           )}
         </div>

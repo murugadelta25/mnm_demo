@@ -31,6 +31,7 @@ npm run dev
 ## Default Users (update passwords after first login)
 | Username | Role | Default Password |
 |---|---|---|
+| SuperAdmin | superadmin | Password@123 |
 | admin | admin | admin123 |
 | supervisor1 | supervisor | sup123 |
 | operator1 | operator | op123 |

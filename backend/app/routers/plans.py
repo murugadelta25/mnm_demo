@@ -121,6 +121,75 @@ def _validate_may_start_plan(plan: ProductionPlan) -> None:
         )
 
 
+def _finalize_plan_at_shift_end(plan: ProductionPlan):
+    """Close a running/paused plan when its shift window has ended.
+
+    Full target met → completed; otherwise → incomplete (production incomplete).
+    """
+    actual = int(plan.actual_qty or 0)
+    planned = int(plan.planned_qty or 0)
+    if planned > 0 and actual >= planned:
+        plan.status = "completed"
+    else:
+        plan.status = "incomplete"
+    plan.updated_at = now_ist()
+
+
+def _heal_shift_ended_plans(db: Session) -> int:
+    """Mark running/paused plans whose shift has ended as completed or incomplete."""
+    today = now_ist().date()
+    now = now_ist()
+    candidates = (
+        db.query(ProductionPlan)
+        .filter(
+            ProductionPlan.status.in_(("running", "paused")),
+            ProductionPlan.plan_date <= today,
+        )
+        .all()
+    )
+    if not candidates:
+        return 0
+
+    try:
+        from .hourly_output import _load_config, _shift_window
+        cfg = _load_config(db)
+        shifts = (cfg or {}).get("shifts") or {}
+    except Exception:
+        shifts = {}
+
+    changed = 0
+    touched_wo = set()
+    for plan in candidates:
+        sh_def = shifts.get(plan.shift)
+        if sh_def:
+            try:
+                _start, shift_end = _shift_window(plan.plan_date, sh_def)
+                ended = now >= shift_end
+            except Exception:
+                ended = plan.plan_date < today
+        else:
+            ended = plan.plan_date < today
+        if not ended:
+            continue
+        _finalize_plan_at_shift_end(plan)
+        if plan.work_order_id:
+            touched_wo.add(plan.work_order_id)
+        changed += 1
+
+    if changed:
+        for wo_id in touched_wo:
+            sync_work_order_after_plan_change(db, wo_id)
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+            return 0
+    return changed
+
+
+TERMINAL_PLAN_STATUSES = frozenset({"completed", "cancelled", "aborted", "incomplete"})
+
+
 def _find_running_conflicts(db: Session, plan: ProductionPlan) -> list:
     """Other running plans on the same machine (trial plans may run concurrently)."""
     if not plan.machine_id or plan.plan_type == "trial":
@@ -293,6 +362,13 @@ def get_plans(
     if date_from:  q = q.filter(ProductionPlan.plan_date >= date_from)
     if date_to:    q = q.filter(ProductionPlan.plan_date <= date_to)
     if status:     q = q.filter(ProductionPlan.status == status)
+
+    # Close shift-ended running/paused plans (completed or production incomplete)
+    try:
+        _heal_shift_ended_plans(db)
+    except Exception as exc:
+        print(f"[Plans] shift-end heal skipped: {exc}")
+
     plans = q.order_by(ProductionPlan.plan_date, ProductionPlan.shift, ProductionPlan.priority).all()
 
     # Keep plan.actual_qty aligned with dashboard running-part count
@@ -341,6 +417,11 @@ def get_summary(
     if date_from:  q = q.filter(ProductionPlan.plan_date >= date_from)
     if date_to:    q = q.filter(ProductionPlan.plan_date <= date_to)
 
+    try:
+        _heal_shift_ended_plans(db)
+    except Exception as exc:
+        print(f"[Plans] summary shift-end heal skipped: {exc}")
+
     # Sync running-part counts into plan.actual_qty so tiles match dashboard
     try:
         from .hourly_output import sync_plan_actuals_from_status_logs
@@ -367,7 +448,7 @@ def get_summary(
         "total_actual": total_actual,
         "achievement_pct": round(total_actual / total_planned * 100, 1) if total_planned else 0,
         "by_status": {s: sum(1 for p in plans if p.status == s)
-                      for s in ["pending","running","completed","paused","cancelled"]},
+                      for s in ["pending","running","completed","paused","cancelled","aborted","incomplete"]},
         "by_shift": {sh: {"planned": sum(p.planned_qty for p in plans if p.shift == sh),
                            "actual":  sum(p.actual_qty  for p in plans if p.shift == sh)}
                      for sh in ["A","B"]}
@@ -464,6 +545,29 @@ async def update_status(plan_id: int, data: PlanUpdate, db: Session = Depends(ge
         _validate_may_complete_plan(plan)
     if data.status == "running" and plan.status != "running":
         _validate_may_start_plan(plan)
+    if data.status == "aborted":
+        if plan.status not in ("paused", "running"):
+            raise HTTPException(400, "Only running or paused plans can be aborted")
+        plan.status = "aborted"
+        plan.updated_at = now_ist()
+        machine = db.query(Machine).filter(Machine.id == plan.machine_id).first() if plan.machine_id else None
+        if machine and machine.status == "running":
+            # Only idle if no other plan is still running on this machine
+            other_running = (
+                db.query(ProductionPlan)
+                .filter(
+                    ProductionPlan.machine_id == plan.machine_id,
+                    ProductionPlan.id != plan.id,
+                    ProductionPlan.status == "running",
+                )
+                .first()
+            )
+            if not other_running:
+                machine.status = "idle"
+        sync_work_order_after_plan_change(db, plan.work_order_id)
+        db.commit()
+        await manager.broadcast({"type": "plan_updated", "plan_id": plan_id, "status": "aborted"})
+        return _plan_dict(plan, db)
 
     # ── Interlock: pending → running requires model-change approval ──
     if data.status == "running" and plan.status == "pending":
@@ -631,6 +735,23 @@ async def update_status(plan_id: int, data: PlanUpdate, db: Session = Depends(ge
         db.commit()
         await manager.broadcast({"type": "plan_completed", "plan_id": plan_id,
                                   "machine_id": plan.machine_id, "station_no": plan.station_no})
+    elif data.status == "incomplete":
+        machine = db.query(Machine).filter(Machine.id == plan.machine_id).first()
+        if machine and machine.status == "running":
+            other_running = (
+                db.query(ProductionPlan)
+                .filter(
+                    ProductionPlan.machine_id == plan.machine_id,
+                    ProductionPlan.id != plan.id,
+                    ProductionPlan.status == "running",
+                )
+                .first()
+            )
+            if not other_running:
+                machine.status = "idle"
+        sync_work_order_after_plan_change(db, plan.work_order_id)
+        db.commit()
+        await manager.broadcast({"type": "plan_updated", "plan_id": plan_id, "status": "incomplete"})
     else:
         db.commit()
         await manager.broadcast({"type": "plan_updated", "plan_id": plan_id, "status": data.status})
@@ -685,7 +806,7 @@ async def reschedule_plan(
     plan = db.query(ProductionPlan).filter(ProductionPlan.id == plan_id).first()
     if not plan:
         raise HTTPException(404, "Plan not found")
-    if plan.status in ("completed", "cancelled"):
+    if plan.status in TERMINAL_PLAN_STATUSES:
         raise HTTPException(400, f"Cannot reschedule a {plan.status} plan")
     if plan.status == "running":
         raise HTTPException(400, "Pause the plan before moving it")
@@ -880,7 +1001,7 @@ def _build_excel(plans, work_orders: Optional[dict] = None) -> io.BytesIO:
     total_actual  = sum(p.actual_qty  for p in plans)
     achievement   = round(total_actual / total_planned * 100, 1) if total_planned else 0
     by_status = {s: sum(1 for p in plans if p.status == s)
-                 for s in ["pending", "running", "completed", "paused", "cancelled"]}
+                 for s in ["pending", "running", "completed", "paused", "cancelled", "aborted", "incomplete"]}
     summary_rows = [
         ["PRODUCTION PLANNING REPORT"],
         [""],
@@ -898,6 +1019,8 @@ def _build_excel(plans, work_orders: Optional[dict] = None) -> io.BytesIO:
         ["Running:",   by_status["running"]],
         ["Completed:", by_status["completed"]],
         ["Paused:",    by_status["paused"]],
+        ["Aborted:",   by_status["aborted"]],
+        ["Production Incomplete:", by_status["incomplete"]],
         ["Cancelled:", by_status["cancelled"]],
     ]
     for row in summary_rows:

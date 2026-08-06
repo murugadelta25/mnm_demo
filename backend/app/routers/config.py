@@ -43,6 +43,10 @@ DEFAULT_CONFIG = {
         },
     },
     "checkDataDaysBack": 1,
+    # auto = live PLC/status capture (default); manual = Data Entry form + missing-shift alerts
+    "data_capture": {
+        "mode": "auto",
+    },
     "hourly_output": {
         "running_part_threshold_pct": 30,
         "ld_unld_max_sec": 60,
@@ -119,6 +123,12 @@ def merge_config(stored: dict) -> dict:
     mi = stored.get("mobile_integration") or {}
     default_mi = DEFAULT_CONFIG["mobile_integration"]
     merged["mobile_integration"] = {**default_mi, **mi}
+    dc = stored.get("data_capture") or {}
+    default_dc = DEFAULT_CONFIG["data_capture"]
+    mode = (dc.get("mode") or default_dc["mode"] or "auto").strip().lower()
+    if mode not in ("auto", "manual"):
+        mode = "auto"
+    merged["data_capture"] = {**default_dc, **dc, "mode": mode}
     return merged
 
 

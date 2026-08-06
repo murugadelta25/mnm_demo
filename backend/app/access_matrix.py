@@ -21,6 +21,30 @@ ACCESS_MATRIX_ROWS: list[dict[str, Any]] = [
         "roles": {"superadmin": True, "admin": True, "supervisor": True, "operator": True, "maintenance": True, "quality": False},
     },
     {
+        "id": "overview.factory",
+        "label": "Factory Overview",
+        "registry_id": "overview.factory",
+        "roles": {"superadmin": True, "admin": True, "supervisor": True, "operator": True, "maintenance": True, "quality": False},
+    },
+    {
+        "id": "overview.line",
+        "label": "Line Overview",
+        "registry_id": "overview.line",
+        "roles": {"superadmin": True, "admin": True, "supervisor": True, "operator": True, "maintenance": True, "quality": False},
+    },
+    {
+        "id": "overview.equipment",
+        "label": "Equipment Overview",
+        "registry_id": "overview.equipment",
+        "roles": {"superadmin": True, "admin": True, "supervisor": True, "operator": True, "maintenance": True, "quality": False},
+    },
+    {
+        "id": "overview.monitor",
+        "label": "Monitor Mode",
+        "registry_id": "overview.monitor",
+        "roles": {"superadmin": True, "admin": True, "supervisor": True, "operator": False, "maintenance": True, "quality": False},
+    },
+    {
         "id": "production.planning",
         "label": "Production Planning",
         "registry_id": "production.planning",
@@ -93,6 +117,12 @@ ACCESS_MATRIX_ROWS: list[dict[str, Any]] = [
         "label": "QC Approvals",
         "registry_id": "qc.approvals",
         "roles": {"superadmin": True, "admin": True, "supervisor": True, "operator": False, "maintenance": False, "quality": True},
+    },
+    {
+        "id": "qc.work_instructions",
+        "label": "Work Instructions",
+        "registry_id": "qc.work_instructions",
+        "roles": {"superadmin": True, "admin": True, "supervisor": True, "operator": True, "maintenance": False, "quality": True},
     },
     {
         "id": "operators.my_work_hours",

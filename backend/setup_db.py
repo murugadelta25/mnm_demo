@@ -99,10 +99,11 @@ try:
     print("  Setup complete! Now run START_ALL.bat")
     print("=" * 45)
     print("\nDefault logins:")
-    print("  admin       / admin123  (role: admin)")
-    print("  supervisor1 / sup123    (role: supervisor)")
-    print("  operator1   / op123     (role: operator)")
-    print("  maintenance1/ maint123  (role: maintenance)")
+    print("  SuperAdmin  / Password@123  (role: superadmin)")
+    print("  admin       / admin123      (role: admin)")
+    print("  supervisor1 / sup123        (role: supervisor)")
+    print("  operator1   / op123         (role: operator)")
+    print("  maintenance1/ maint123      (role: maintenance)")
 
 except pymysql.err.OperationalError as e:
     print(f"\n✗ Connection failed: {e}")

@@ -59,6 +59,12 @@ frontend/src/pages/bug_*
 # Bundled nginx binary (use scripts/install-nginx.sh on server)
 deploy/nginx-win/
 
+# Auto-generated TLS material (created by run.sh / run.ps1)
+deploy/ssl/*.crt
+deploy/ssl/*.key
+deploy/ssl/*.pem
+!deploy/ssl/.gitkeep
+
 # Uploaded work-instruction PDFs / images (runtime uploads via parts API)
 backend/static/work-instructions/*
 !backend/static/work-instructions/.gitkeep

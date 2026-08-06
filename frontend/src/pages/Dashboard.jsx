@@ -9,7 +9,7 @@ import { useTheme } from '../context/ThemeContext';
 import { pageClass } from '../themes/tileHelpers';
 import { downloadBlobResponse } from '../utils/downloadBlob';
 import { formatCtSeconds, sumCt } from '../utils/cycleTime';
-import { useConfig, getCurrentShift } from '../context/ConfigContext';
+import { useConfig, getCurrentShift, isManualDataEntryEnabled } from '../context/ConfigContext';
 
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 const AR_COLOR = '#4fc3f7';
@@ -192,8 +192,8 @@ export default function Dashboard() {
       const [e, s, p, m, rt] = await Promise.all([
         api.get('/api/oee/', { params }),
         api.get('/api/oee/summary', { params }),
-        api.get('/api/stations/'),
-        api.get('/api/machines/'),
+        api.get('/api/stations/', { params: { enabled_only: true } }),
+        api.get('/api/machines/', { params: { enabled_only: true } }),
         api.get('/api/oee/realtime', { params: rtParams }).catch(() => ({ data: [] })),
       ]);
       const manualEntries = (Array.isArray(e.data) ? e.data : []);
@@ -216,9 +216,13 @@ export default function Dashboard() {
     }
   }, [buildParams, viewMode, filters.entry_date, filters.date_from, filters.date_to, filters.month, filters.year]);
 
-  // Check missing shifts - warn if previous shift data not found in configured days back
+  // Missing-shift reminder — only when Manual data entry is enabled (auto capture has no form to fill).
   const checkMissingShifts = useCallback(async () => {
     if (!localStorage.getItem('token')) return;
+    if (!isManualDataEntryEnabled(config)) {
+      setMissingShifts([]);
+      return;
+    }
     const missing = [];
     
     const enabledShifts = config.shifts.filter(s => s.enabled);
@@ -267,13 +271,13 @@ export default function Dashboard() {
     }
     
     setMissingShifts(missing);
-  }, [config.shifts, config.checkDataDaysBack, currentShift]);
+  }, [config, currentShift]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
   useEffect(() => { 
     checkMissingShifts(); 
-  }, []);
+  }, [checkMissingShifts]);
 
   useWebSocket(useCallback(msg => {
     if (msg.type === 'oee_updated') fetchData();

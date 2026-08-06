@@ -134,6 +134,7 @@ export function buildNavigation(role, modules, roleAccess) {
   const sections = [];
 
   for (const item of FEATURE_REGISTRY.standalone || []) {
+    if (item.hideFromNav) continue;
     if (item.alwaysEnabled) {
       if (roleAccess?.[item.id] && typeof roleAccess[item.id] === 'object') {
         if (!canRoleAccessFeature(item.id, role, modules, roleAccess)) continue;
@@ -166,6 +167,7 @@ export function buildNavigation(role, modules, roleAccess) {
   for (const group of FEATURE_REGISTRY.groups || []) {
     if (!canSeeGroup(group.roles)) continue;
     const items = (group.items || [])
+      .filter(item => !item.hideFromNav)
       .filter(item => itemVisible(item.id, item.roles))
       .map(item => ({
         path: item.path,

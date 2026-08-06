@@ -32,14 +32,18 @@ It does **not** start or restart services.
 
 ## Safe production update
 
-Run these in order:
+Run these in order (**pull first**, so new migrations are on disk before schema guard runs):
 
 ```bash
 cd /path/to/Groz_eap_pms
+git pull origin main
 ./run.sh preflight
-git pull
 ./run.sh restart
 ```
+
+`./run.sh restart` also re-runs `scripts/setup-database.sh` (backup if DB exists + SQL migrations + `ensure_schema.py`). Existing rows are never truncated or dropped — only missing tables/columns/ENUMs are added.
+
+Keep `deploy.env`, `database/db.config.json`, and `backend/.env` as local files (they are gitignored). Do not overwrite them after pull.
 
 ## Verify the app still points to the correct DB
 

@@ -1,18 +1,25 @@
 /**
  * CPLM AppBar pattern — logo, system name, theme toggle, user (layout.md).
  */
-import { Link } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useBranding } from '../../context/BrandingContext';
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
+import { useFeatureFlags } from '../../context/FeatureFlagsContext';
 import LogoIcon from '../graphics/LogoIcon';
-import { MENU_ICON, renderNavIcon } from '../icons/NavIcon';
+import { MENU_ICON, NAV_ICONS, renderNavIcon } from '../icons/NavIcon';
 import ThemeModeToggler from './ThemeModeToggler';
 
 export default function AppBar({ onMenuClick, isIntegration = false, navVisible = true }) {
   const { user } = useAuth();
   const { theme } = useTheme();
   const { siteTitle } = useBranding();
+  const { canAccess } = useFeatureFlags();
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  const showMonitor = Boolean(user) && canAccess('overview.monitor', user.role);
+  const monitorActive = location.pathname.startsWith('/overview/monitor');
 
   const menuTitle = isIntegration
     ? navVisible
@@ -98,6 +105,38 @@ export default function AppBar({ onMenuClick, isIntegration = false, navVisible 
       </Link>
 
       <div style={{ flex: 1 }} />
+
+      {showMonitor ? (
+        <button
+          type="button"
+          title="Monitor Mode"
+          aria-label="Monitor Mode"
+          aria-pressed={monitorActive}
+          onClick={() => navigate('/overview/monitor')}
+          style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 8,
+            height: 36,
+            padding: '0 12px',
+            borderRadius: 'var(--titan-radius-sm)',
+            border: `1px solid ${monitorActive ? (theme.accent || '#22cae7') : theme.border}`,
+            background: monitorActive
+              ? `${theme.accent || '#22cae7'}22`
+              : (theme.isDark ? 'rgba(255,255,255,0.06)' : 'rgba(0,0,0,0.04)'),
+            color: monitorActive ? (theme.accent || '#22cae7') : theme.text,
+            fontSize: 12,
+            fontWeight: 700,
+            letterSpacing: '0.03em',
+            cursor: 'pointer',
+            whiteSpace: 'nowrap',
+            marginRight: 4,
+          }}
+        >
+          {renderNavIcon(NAV_ICONS.monitor)}
+          Monitor
+        </button>
+      ) : null}
 
       <ThemeModeToggler />
 

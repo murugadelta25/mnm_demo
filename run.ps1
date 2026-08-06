@@ -30,6 +30,66 @@ function Get-PrimaryLanIp {
     return "127.0.0.1"
 }
 
+function Set-DomainHttps {
+    param([bool]$Enabled)
+    $path = Join-Path $ProjectDir "deploy\domain.config.json"
+    $cfg = @{
+        domain          = "din.eappms"
+        lanIp           = ""
+        dnsEnabled      = $true
+        useHttps        = $Enabled
+        autoGenerateSsl = $true
+        sslCert         = "deploy/ssl/din.eappms.crt"
+        sslKey          = "deploy/ssl/din.eappms.key"
+    }
+    if (Test-Path $path) {
+        $raw = Get-Content $path -Raw | ConvertFrom-Json
+        foreach ($name in @("domain", "lanIp", "dnsEnabled", "autoGenerateSsl", "sslCert", "sslKey")) {
+            if ($null -ne $raw.PSObject.Properties[$name]) {
+                $cfg[$name] = $raw.$name
+            }
+        }
+    }
+    $cfg.useHttps = $Enabled
+    if (-not $cfg.sslCert) { $cfg.sslCert = "deploy/ssl/$($cfg.domain).crt" }
+    if (-not $cfg.sslKey) { $cfg.sslKey = "deploy/ssl/$($cfg.domain).key" }
+    $json = $cfg | ConvertTo-Json -Depth 5
+    New-Item -ItemType Directory -Force -Path (Split-Path $path -Parent) | Out-Null
+    [System.IO.File]::WriteAllText($path, $json + "`n", [System.Text.UTF8Encoding]::new($false))
+}
+
+function Prompt-HostMode {
+    # Optional hosting mode: HTTP (default) or HTTPS.
+    # Override without prompt: $env:USE_HTTPS = "true" | "false"
+    $envVal = $env:USE_HTTPS
+    if (-not [string]::IsNullOrWhiteSpace($envVal)) {
+        $enabled = $envVal.Trim() -match '^(1|true|yes|y)$'
+        Set-DomainHttps -Enabled:$enabled
+        $mode = if ($enabled) { "HTTPS" } else { "HTTP" }
+        Write-Host ("  Host mode from USE_HTTPS env: {0}" -f $mode) -ForegroundColor Cyan
+        return $enabled
+    }
+
+    Write-Host ""
+    Write-Host "  Hosting mode (other PCs on the LAN can open the portal either way):" -ForegroundColor Yellow
+    Write-Host "    HTTP  - easy LAN access, no browser certificate warning (recommended for factory)" -ForegroundColor Gray
+    Write-Host "    HTTPS - encrypted portal; self-signed cert may show a browser warning" -ForegroundColor Gray
+    Write-Host "  Mobile PMS operator app keeps using http://<server-ip>:8010 (not affected)." -ForegroundColor DarkGray
+    Write-Host ""
+    $answer = Read-Host "  Enable HTTPS? Type true for HTTPS, or false/Enter for HTTP [false]"
+    $enabled = $false
+    if (-not [string]::IsNullOrWhiteSpace($answer)) {
+        $enabled = $answer.Trim() -match '^(1|true|yes|y)$'
+    }
+    Set-DomainHttps -Enabled:$enabled
+    if ($enabled) {
+        Write-Host "  [OK] HTTPS enabled - standard URL will be https://din.eappms" -ForegroundColor Green
+    } else {
+        Write-Host "  [OK] HTTP mode - standard URL will be http://din.eappms" -ForegroundColor Green
+    }
+    return $enabled
+}
+
 function Get-DomainConfig {
     $path = Join-Path $ProjectDir "deploy\domain.config.json"
     $domain = "din.eappms"
@@ -330,6 +390,13 @@ Write-Host "  EAP PMS - Starting Application" -ForegroundColor Cyan
 Write-BannerLine
 Write-Host ""
 
+# Host mode (HTTP vs HTTPS) - optional; default HTTP (start only)
+if ($Action -ieq "start") {
+    Write-StepHeader 0 "Choosing host mode (HTTP / HTTPS)..."
+    $null = Prompt-HostMode
+    Write-Host ""
+}
+
 # [1/8] Dependencies (always first)
 Write-StepHeader 1 "Checking / installing dependencies..."
 try {
@@ -426,7 +493,7 @@ if ($networkIPs.Count -eq 0) {
     Write-StepOk ("Network configured ({0}, Vite proxy enabled)" -f ($networkIPs -join ', '))
 }
 
-# [5/8] Backend — always use this project's backend\venv
+# [5/8] Backend - always use this project's backend\venv
 Write-StepHeader 5 "Starting backend on port $BackendPort..."
 
 # Free port 8010 from stale uvicorn/--reload orphans (common cause of 502 Bad Gateway)
@@ -510,7 +577,7 @@ if ($frontendOk) {
     exit 1
 }
 
-# [7/8] nginx — standard URL din.eappms
+# [7/8] nginx - standard URL din.eappms
 Write-StepHeader 7 "Configuring standard URL (nginx reverse proxy)..."
 $domainCfg = $null
 try {
@@ -527,7 +594,7 @@ if ($domainCfg -and $domainCfg.HostsRegistered) {
     $hostsReady = $true
 }
 
-# [8/8] LAN DNS — din.eappms for all devices on the network
+# [8/8] LAN DNS - din.eappms for all devices on the network
 Write-StepHeader 8 "Starting LAN DNS (network-wide din.eappms)..."
 $dnsCfg = $null
 $prevEaDns = $ErrorActionPreference
@@ -584,14 +651,19 @@ Write-Host "    - Router DHCP DNS must point to the IPC server IP (use static DH
 Write-Host ""
 Write-Host "  ONE-TIME IT / router setup (enables PC + Android + tablets):" -ForegroundColor Yellow
 Write-Host ("    Set DHCP DNS server to: {0}" -f $primaryIp) -ForegroundColor Yellow
-Write-Host "    Then every device on WiFi/LAN opens http://din.eappms automatically" -ForegroundColor Yellow
+Write-Host ("    Then every device on WiFi/LAN opens {0} automatically" -f $domainCfg.Url) -ForegroundColor Yellow
 Write-Host ""
 Write-Host "  If router cannot be changed, per PC: deploy\Setup-Client-PC.bat (Admin)" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  Default login:  operator1 / op123" -ForegroundColor Yellow
 Write-Host ""
 Write-Host "  Backend and frontend run in separate PowerShell windows." -ForegroundColor DarkGray
-Write-Host "  nginx proxies port 80 (C:\ProgramData\EAP-PMS\nginx-win)." -ForegroundColor DarkGray
+if ($domainCfg.HttpsReady -or ($domainCfg.Scheme -eq "https")) {
+    Write-Host "  nginx proxies HTTPS :443 (+ HTTP :80 redirects to HTTPS)." -ForegroundColor DarkGray
+    Write-Host "  Certs: deploy\ssl\  (self-signed by default; replace with company CA for no browser warning)" -ForegroundColor DarkGray
+} else {
+    Write-Host "  nginx proxies port 80 (C:\ProgramData\EAP-PMS\nginx-win)." -ForegroundColor DarkGray
+}
 Write-Host "  Stop nginx: Stop-Process -Name nginx -Force -ErrorAction SilentlyContinue" -ForegroundColor DarkGray
 Write-Host ""
 
@@ -600,7 +672,8 @@ try {
         Start-Process $domainCfg.Url
     } else {
         $openIp = if ($dnsCfg -and $dnsCfg.LanIp) { $dnsCfg.LanIp } else { Get-PrimaryLanIp -Ips $networkIPs -ProjectDir $ProjectDir }
-        Start-Process "http://$openIp"
+        $openScheme = if ($domainCfg.Scheme) { $domainCfg.Scheme } else { "http" }
+        Start-Process "${openScheme}://$openIp"
     }
 } catch {
     # ignore if browser cannot open

@@ -35,6 +35,10 @@ import WorkInstructionRevision from './pages/WorkInstructionRevision';
 import DatabaseManagement from './pages/DatabaseManagement';
 import OperatorManagement from './pages/OperatorManagement';
 import MyWorkHours from './pages/MyWorkHours';
+import FactoryOverview from './pages/FactoryOverview';
+import LineOverview from './pages/LineOverview';
+import EquipmentOverview from './pages/EquipmentOverview';
+import MonitorMode from './pages/MonitorMode';
 
 /** CPLM Root + Outlet pattern — shell wraps all authenticated routes */
 function AuthenticatedShell() {
@@ -63,6 +67,12 @@ function AppRoutes() {
       <Route path="/autologin" element={<AutoLogin />} />
       <Route element={<AuthenticatedShell />}>
         <Route path="/dashboard" element={<Dashboard />} />
+        <Route path="/overview/factory" element={<FactoryOverview />} />
+        <Route path="/overview/line" element={<LineOverview />} />
+        <Route path="/overview/line/:lineId" element={<LineOverview />} />
+        <Route path="/overview/equipment" element={<EquipmentOverview />} />
+        <Route path="/overview/equipment/:machineId" element={<EquipmentOverview />} />
+        <Route path="/overview/monitor" element={<MonitorMode />} />
         <Route path="/planning" element={<ProductionPlanning />} />
         <Route path="/work-orders" element={<WorkOrderManagement />} />
         <Route path="/entry" element={<DataEntry />} />

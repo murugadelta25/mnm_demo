@@ -103,24 +103,242 @@ detect_server_ip() {
   hostname -I 2>/dev/null | awk '{print $1}'
 }
 
+resolve_ssl_path() {
+  # Absolute paths pass through; relative paths resolve under PROJECT_DIR.
+  local p="$1"
+  if [ -z "$p" ]; then
+    echo ""
+    return
+  fi
+  case "$p" in
+    /*) echo "$p" ;;
+    *) echo "$PROJECT_DIR/$p" ;;
+  esac
+}
+
+ensure_ssl_certificates() {
+  # When useHttps + autoGenerateSsl, create self-signed certs if missing.
+  if [ "$APP_USE_HTTPS" != "yes" ]; then
+    return 0
+  fi
+  if [ -z "$APP_SSL_CERT" ] || [ -z "$APP_SSL_KEY" ]; then
+    APP_SSL_CERT="$(resolve_ssl_path "deploy/ssl/${APP_DOMAIN}.crt")"
+    APP_SSL_KEY="$(resolve_ssl_path "deploy/ssl/${APP_DOMAIN}.key")"
+  fi
+  local lan_ips=()
+  local ip
+  if command -v hostname >/dev/null 2>&1; then
+    for ip in $(hostname -I 2>/dev/null); do
+      case "$ip" in
+        127.*|169.254.*|"") ;;
+        *) lan_ips+=("$ip") ;;
+      esac
+    done
+  fi
+
+  if [ -f "$APP_SSL_CERT" ] && [ -f "$APP_SSL_KEY" ]; then
+    # A self-signed cert must list the current LAN IPs, otherwise https://<ip>
+    # fails name validation after a DHCP address change.
+    local stale="no"
+    if [ "$APP_AUTO_SSL" = "yes" ] && command -v openssl >/dev/null 2>&1; then
+      local san
+      san="$(openssl x509 -in "$APP_SSL_CERT" -noout -text 2>/dev/null || true)"
+      for ip in "${lan_ips[@]}"; do
+        case "$san" in
+          *"IP Address:$ip"*) ;;
+          *) stale="yes" ;;
+        esac
+      done
+    fi
+    if [ "$stale" != "yes" ]; then
+      return 0
+    fi
+    log_step "[ssl] Existing cert does not cover current LAN IP(s) - regenerating..."
+  fi
+  if [ "$APP_AUTO_SSL" != "yes" ]; then
+    log_warn "HTTPS enabled but certs missing and autoGenerateSsl is false"
+    return 1
+  fi
+  log_step "[ssl] Generating self-signed certificate for ${APP_DOMAIN}..."
+  local gen_script="$PROJECT_DIR/scripts/generate_ssl_cert.py"
+  if [ ! -f "$gen_script" ]; then
+    log_fail "SSL generator missing: ${gen_script}"
+    log_info "Restore scripts/generate_ssl_cert.py from the EAP PMS repo, then re-run."
+    return 1
+  fi
+  if [ ! -r "$gen_script" ]; then
+    log_fail "SSL generator is not readable: ${gen_script}"
+    log_info "Fix permissions, e.g.: chmod a+r \"${gen_script}\""
+    return 1
+  fi
+  local py=""
+  if [ -x "$PROJECT_DIR/backend/.venv/bin/python" ]; then
+    py="$PROJECT_DIR/backend/.venv/bin/python"
+  elif [ -x "$PROJECT_DIR/backend/venv/bin/python" ]; then
+    py="$PROJECT_DIR/backend/venv/bin/python"
+  elif command -v python3 >/dev/null 2>&1; then
+    py="$(command -v python3)"
+  elif command -v python >/dev/null 2>&1; then
+    py="$(command -v python)"
+  fi
+  if [ -z "$py" ]; then
+    log_fail "Python not found — cannot generate SSL certificate"
+    log_info "Install python3 (or create backend/.venv), then re-run."
+    return 1
+  fi
+  local san_args=()
+  for ip in "${lan_ips[@]}"; do
+    san_args+=(--san-ip "$ip")
+  done
+  # Reached only when certs are missing or no longer match the LAN IPs,
+  # so --force is required to replace a stale file.
+  # Invoked via the Python interpreter (not as an executable), so the .py
+  # file does not need the +x bit — only read access.
+  local gen_out=""
+  local gen_rc=0
+  gen_out="$("$py" "$gen_script" \
+      --cert "$APP_SSL_CERT" \
+      --key "$APP_SSL_KEY" \
+      --cn "$APP_DOMAIN" \
+      --force \
+      "${san_args[@]}" 2>&1)" || gen_rc=$?
+  if [ "$gen_rc" -ne 0 ]; then
+    log_fail "Could not generate SSL certificate (exit ${gen_rc})"
+    log_info "Python: ${py}"
+    log_info "Script: ${gen_script}"
+    if [ -n "$gen_out" ]; then
+      echo "$gen_out" | while IFS= read -r line || [ -n "$line" ]; do
+        log_info "  $line"
+      done
+    fi
+    return 1
+  fi
+  if [ ! -f "$APP_SSL_CERT" ] || [ ! -f "$APP_SSL_KEY" ]; then
+    log_fail "SSL generator finished but cert/key files were not created"
+    log_info "Expected cert: ${APP_SSL_CERT}"
+    log_info "Expected key:  ${APP_SSL_KEY}"
+    return 1
+  fi
+  log_ok "Self-signed cert ready: ${APP_SSL_CERT}"
+  log_info "Browsers will warn until this cert (or a company CA cert) is trusted"
+  return 0
+}
+
+set_domain_https() {
+  # Update deploy/domain.config.json useHttps flag (preserves other keys).
+  local enabled="$1"
+  python3 - "$DOMAIN_CONFIG" "$enabled" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+enabled = sys.argv[2].lower() in ("1", "true", "yes", "y")
+cfg = {
+    "domain": "din.eappms",
+    "lanIp": "",
+    "dnsEnabled": True,
+    "useHttps": enabled,
+    "autoGenerateSsl": True,
+    "sslCert": "deploy/ssl/din.eappms.crt",
+    "sslKey": "deploy/ssl/din.eappms.key",
+}
+if path.exists():
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            cfg.update(raw)
+    except (json.JSONDecodeError, OSError):
+        pass
+cfg["useHttps"] = enabled
+domain = cfg.get("domain") or "din.eappms"
+cfg.setdefault("sslCert", f"deploy/ssl/{domain}.crt")
+cfg.setdefault("sslKey", f"deploy/ssl/{domain}.key")
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(cfg, indent=2) + "\n", encoding="utf-8")
+print("https" if enabled else "http")
+PY
+}
+
+prompt_host_mode() {
+  # Optional hosting mode. Override: USE_HTTPS=true|false ./run.sh
+  if [ -n "${USE_HTTPS:-}" ]; then
+    case "${USE_HTTPS,,}" in
+      1|true|yes|y)
+        set_domain_https true >/dev/null
+        log_ok "Host mode from USE_HTTPS env: HTTPS"
+        ;;
+      *)
+        set_domain_https false >/dev/null
+        log_ok "Host mode from USE_HTTPS env: HTTP"
+        ;;
+    esac
+    load_domain_config
+    return 0
+  fi
+
+  if [ ! -t 0 ]; then
+    log_info "Non-interactive shell — keeping useHttps from domain.config.json"
+    load_domain_config
+    return 0
+  fi
+
+  echo ""
+  echo -e "  ${YELLOW}Hosting mode (other PCs on the LAN can open the portal either way):${NC}"
+  echo -e "    HTTP  - easy LAN access, no browser certificate warning ${GREEN}(recommended for factory)${NC}"
+  echo -e "    HTTPS - encrypted portal; self-signed cert may show a browser warning"
+  echo -e "  ${YELLOW}Mobile PMS operator app keeps using http://<server-ip>:8010 (not affected).${NC}"
+  echo ""
+  local answer=""
+  read -r -p "  Enable HTTPS? Type true for HTTPS, or false/Enter for HTTP [false]: " answer || true
+  case "${answer,,}" in
+    1|true|yes|y)
+      set_domain_https true >/dev/null
+      log_ok "HTTPS enabled — standard URL will be https://din.eappms"
+      ;;
+    *)
+      set_domain_https false >/dev/null
+      log_ok "HTTP mode — standard URL will be http://din.eappms"
+      ;;
+  esac
+  load_domain_config
+}
+
 load_domain_config() {
   APP_DOMAIN="din.eappms"
   APP_USE_HTTPS="no"
+  APP_AUTO_SSL="yes"
   APP_SCHEME="http"
   APP_SSL_CERT=""
   APP_SSL_KEY=""
 
   if [ -f "$DOMAIN_CONFIG" ]; then
-    eval "$(python3 - "$DOMAIN_CONFIG" <<'PY'
+    eval "$(python3 - "$DOMAIN_CONFIG" "$PROJECT_DIR" <<'PY'
 import json, shlex, sys
+from pathlib import Path
 raw = json.load(open(sys.argv[1], encoding="utf-8"))
+project = Path(sys.argv[2])
 domain = raw.get("domain") or "din.eappms"
 use_https = bool(raw.get("useHttps"))
+# Default autoGenerateSsl to True when HTTPS is on (installer-friendly).
+auto_ssl = raw.get("autoGenerateSsl")
+if auto_ssl is None:
+    auto_ssl = use_https
+else:
+    auto_ssl = bool(auto_ssl)
+cert = str(raw.get("sslCert") or f"deploy/ssl/{domain}.crt")
+key = str(raw.get("sslKey") or f"deploy/ssl/{domain}.key")
+
+def resolve(p: str) -> str:
+    path = Path(p)
+    if path.is_absolute():
+        return str(path)
+    return str((project / path).resolve())
+
 print(f"APP_DOMAIN={shlex.quote(domain)}")
 print(f"APP_USE_HTTPS={'yes' if use_https else 'no'}")
+print(f"APP_AUTO_SSL={'yes' if auto_ssl else 'no'}")
 print(f"APP_SCHEME={'https' if use_https else 'http'}")
-print(f"APP_SSL_CERT={shlex.quote(str(raw.get('sslCert') or ''))}")
-print(f"APP_SSL_KEY={shlex.quote(str(raw.get('sslKey') or ''))}")
+print(f"APP_SSL_CERT={shlex.quote(resolve(cert))}")
+print(f"APP_SSL_KEY={shlex.quote(resolve(key))}")
 PY
 )"
   fi
@@ -149,20 +367,20 @@ print_app_urls() {
   if [ -n "$ALL_IPS" ]; then
     while IFS= read -r ip; do
       [ -z "$ip" ] && continue
-      echo -e "    Network (port 80) : ${GREEN}http://${ip}${NC}"
-      echo -e "    Network (Vite)    : http://${ip}:${FRONTEND_PORT}"
+      echo -e "    Network (nginx) : ${GREEN}${APP_SCHEME}://${ip}${NC}"
+      echo -e "    Network (Vite)  : http://${ip}:${FRONTEND_PORT}"
     done <<< "$ALL_IPS"
   elif [ -n "$SERVER_IP" ]; then
-    echo -e "    Network (port 80) : ${GREEN}http://${SERVER_IP}${NC}"
-    echo -e "    Network (Vite)    : http://${SERVER_IP}:${FRONTEND_PORT}"
+    echo -e "    Network (nginx) : ${GREEN}${APP_SCHEME}://${SERVER_IP}${NC}"
+    echo -e "    Network (Vite)  : http://${SERVER_IP}:${FRONTEND_PORT}"
   fi
   echo ""
   echo -e "  ${YELLOW}Network access (Windows / Ubuntu / Android):${NC}"
   echo -e "    Standard URL : ${GREEN}${APP_URL}${NC}"
-  echo -e "    Primary IP   : ${GREEN}${SERVER_IP:-<this-server-ip>}${NC}  (http://IP works without DNS)"
+  echo -e "    Primary IP   : ${GREEN}${SERVER_IP:-<this-server-ip>}${NC}  (${APP_SCHEME}://IP via nginx)"
   echo ""
   echo -e "  ${YELLOW}If IPC IP changes (DHCP):${NC}"
-  echo -e "    Direct http://<new-ip> still works; LAN DNS auto-refreshes din.eappms every 30s"
+  echo -e "    Direct ${APP_SCHEME}://<new-ip> still works; LAN DNS auto-refreshes din.eappms every 30s"
   echo -e "    Reserve a static DHCP IP for the IPC in production; update router DNS if IP changes"
   echo ""
   echo -e "  ${YELLOW}ONE-TIME router/IT setup (PC + Android + tablets):${NC}"
@@ -304,8 +522,13 @@ EOF
 
 wait_for_url() {
   local url="$1" tries="${2:-20}" label="$3"
+  local curl_opts=(-sf)
+  # Self-signed installer certs need insecure curl for health checks.
+  case "$url" in
+    https://*) curl_opts=(-skf) ;;
+  esac
   for i in $(seq 1 "$tries"); do
-    if curl -sf "$url" >/dev/null 2>&1; then
+    if curl "${curl_opts[@]}" "$url" >/dev/null 2>&1; then
       log_ok "$label HTTP ready ($url)"
       return 0
     fi

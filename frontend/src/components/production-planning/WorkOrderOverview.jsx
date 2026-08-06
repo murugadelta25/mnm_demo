@@ -68,6 +68,8 @@ export default function WorkOrderOverview({ t, onViewTrackRecord, selectedId }) 
           <option value="draft">Draft</option>
           <option value="in_progress">In Progress</option>
           <option value="completed">Completed</option>
+          <option value="closed">Closed (outstanding)</option>
+          <option value="cancelled">Cancelled</option>
         </select>
         <input style={inp} type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
         <span style={{ color: t.textDim }}>~</span>

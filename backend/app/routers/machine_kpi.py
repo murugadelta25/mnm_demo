@@ -34,7 +34,13 @@ def _compute_kpi(
     cfg: dict,
 ) -> dict:
     shifts = [s for s in cfg.get('shifts', []) if s.get('enabled', True)]
-    shift_def = next((s for s in shifts if s['id'] == shift_id), None)
+    # Match by id first; if configs omit id, allow name (same key overview may resolve to).
+    # If both id and name are missing, overview falls back to start time as the key.
+    shift_def = next((s for s in shifts if s.get('id') == shift_id), None)
+    if not shift_def and shift_id:
+        shift_def = next((s for s in shifts if (s.get('name') or '') == shift_id), None)
+    if not shift_def and shift_id:
+        shift_def = next((s for s in shifts if str(s.get('start') or '') == shift_id), None)
     if not shift_def:
         return None
 
@@ -108,6 +114,8 @@ def _compute_kpi(
     actual_production_time_min = running_min
 
     ct = _plan_ct(plans[0]) if plans else 0.0
+    process_time_sec = float(plans[0].process_time or 0) if plans else 0.0
+    loading_unloading_sec = float(plans[0].loading_unloading or 0) if plans else 0.0
     planned_qty = sum(p.planned_qty or 0 for p in plans)
     model_variant = ' · '.join(set(_plan_variant(p) for p in plans if _plan_variant(p))) or None
 
@@ -180,6 +188,10 @@ def _compute_kpi(
         'is_live': is_live,
         'model_variant': model_variant,
         'cycle_time_sec': ct,
+        'process_time_sec': process_time_sec,
+        'loading_unloading_sec': loading_unloading_sec,
+        'machining_time_min': round(running_min, 1),
+        'loading_unloading_time_min': round(ld_unld_min, 1),
         'available_time_min': round(available_time_min, 1),
         'operating_time_min': round(operating_time_min, 1),
         'downtime_min': round(downtime_min, 1),

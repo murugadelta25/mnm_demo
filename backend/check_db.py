@@ -34,6 +34,7 @@ if not users:
     print("\nNo users found - inserting seed users...")
     import bcrypt
     users_data = [
+        ('SuperAdmin',   bcrypt.hashpw(b'Password@123', bcrypt.gensalt()).decode(), 'superadmin'),
         ('admin',        bcrypt.hashpw(b'admin123', bcrypt.gensalt()).decode(), 'admin'),
         ('supervisor1',  bcrypt.hashpw(b'sup123',   bcrypt.gensalt()).decode(), 'supervisor'),
         ('operator1',    bcrypt.hashpw(b'op123',    bcrypt.gensalt()).decode(), 'operator'),

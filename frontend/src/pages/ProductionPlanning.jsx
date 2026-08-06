@@ -53,11 +53,13 @@ function computePlanSlotCount(form, enabledShifts) {
 }
 
 const STATUS_CFG = {
-  pending:   { color: '#64748b', label: 'Pending',   icon: '⏳' },
-  running:   { color: '#0ea5e9', label: 'Running',   icon: '▶️' },
-  completed: { color: '#10b981', label: 'Completed', icon: '✅' },
-  paused:    { color: '#f59e0b', label: 'Paused',    icon: '⏸️' },
-  cancelled: { color: '#ef4444', label: 'Cancelled', icon: '❌' },
+  pending:    { color: '#64748b', label: 'Pending',    icon: '⏳' },
+  running:    { color: '#0ea5e9', label: 'Running',    icon: '▶️' },
+  completed:  { color: '#10b981', label: 'Completed',  icon: '✅' },
+  paused:     { color: '#f59e0b', label: 'Paused',     icon: '⏸️' },
+  aborted:    { color: '#9f1239', label: 'Aborted',    icon: '⏹' },
+  incomplete: { color: '#800020', label: 'Production Incomplete', icon: '⚠' },
+  cancelled:  { color: '#ef4444', label: 'Cancelled',  icon: '❌' },
 };
 
 const TYPE_CFG = {
@@ -497,6 +499,10 @@ export default function ProductionPlanning() {
         setMsg('⏸ Plan paused');
       } else if (status === 'completed') {
         setMsg('✅ Plan completed');
+      } else if (status === 'aborted') {
+        setMsg('⏹ Plan aborted — will not resume');
+      } else if (status === 'incomplete') {
+        setMsg('⚠ Marked production incomplete');
       }
       await fetchAll();
       // Keep feedback visible near actions (not only in create form)
@@ -606,6 +612,8 @@ export default function ProductionPlanning() {
         ['Running:', summary?.by_status?.running || 0],
         ['Completed:', summary?.by_status?.completed || 0],
         ['Paused:', summary?.by_status?.paused || 0],
+        ['Aborted:', summary?.by_status?.aborted || 0],
+        ['Production Incomplete:', summary?.by_status?.incomplete || 0],
         ['Cancelled:', summary?.by_status?.cancelled || 0],
       ];
       const summaryWs = XLSX.utils.aoa_to_sheet(summaryData);
@@ -791,7 +799,7 @@ export default function ProductionPlanning() {
     }
   };
 
-  const canEdit   = user?.role === 'supervisor' || user?.role === 'admin';
+  const canEdit   = ['supervisor', 'admin', 'superadmin'].includes(user?.role);
   const canCreate = user?.role !== 'maintenance';
 
   const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -1557,6 +1565,7 @@ export default function ProductionPlanning() {
               color: summary.achievement_pct >= 90 ? '#10b981' : summary.achievement_pct >= 70 ? '#f59e0b' : '#ef4444' },
             { label: 'Running',   value: summary.by_status?.running   || 0, color: '#0ea5e9' },
             { label: 'Completed', value: summary.by_status?.completed || 0, color: '#10b981' },
+            { label: 'Incomplete', value: summary.by_status?.incomplete || 0, color: '#800020' },
             { label: 'Pending',   value: summary.by_status?.pending   || 0, color: '#64748b' },
           ].map(k => (
             <div key={k.label} style={{ ...s.kpi, borderTop: `3px solid ${k.color}` }}>
@@ -1791,17 +1800,35 @@ export default function ProductionPlanning() {
                           </>
                         )}
                         {p.status === 'paused' && canStart && (
-                          <button style={{ ...s.miniBtn, background: t.accent }} onClick={() => setStatus(p.id, 'running')}>▶</button>
+                          <button style={{ ...s.miniBtn, background: t.accent }} title="Resume"
+                            onClick={() => setStatus(p.id, 'running')}>▶</button>
                         )}
                         {p.status === 'paused' && !canStart && (
                           <span title={`Resume allowed on or after ${p.plan_date}`}
                             style={{ fontSize: 10, color: t.textFaint, alignSelf: 'center' }}>🔒</span>
                         )}
+                        {canEdit && ['paused', 'running'].includes(p.status) && (
+                          <button
+                            style={{ ...s.miniBtn, background: '#800020' }}
+                            title="Abort — permanently stop this plan (will not resume)"
+                            onClick={() => {
+                              if (window.confirm(
+                                `Abort plan #${p.id}?\n\n`
+                                + 'This permanently stops the plan. It will not be resumable.\n'
+                                + `Actual qty kept: ${p.actual_qty || 0} / ${p.planned_qty}`,
+                              )) {
+                                setStatus(p.id, 'aborted');
+                              }
+                            }}
+                          >
+                            ⏹
+                          </button>
+                        )}
                         {canEdit && ['pending', 'paused'].includes(p.status) && (
                           <button style={{ ...s.miniBtn, background: '#6366f1' }} title="Move to next week or custom date"
                             onClick={() => setMovePlan(p)}>↪</button>
                         )}
-                        {canEdit && p.status !== 'completed' && (
+                        {canEdit && !['completed', 'incomplete', 'aborted'].includes(p.status) && (
                           <button style={{ ...s.miniBtn, background: '#ef4444' }} onClick={() => deletePlan(p.id)}>🗑</button>
                         )}
                       </div>

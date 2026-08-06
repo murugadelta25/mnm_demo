@@ -8,14 +8,16 @@ EAP PMS is configured to open at a **fixed standard URL**:
 | Mode | URL |
 |------|-----|
 | HTTP (default) | **http://din.eappms** |
-| HTTPS (optional) | **https://din.eappms** |
+| HTTPS (optional) | **https://din.eappms** — type `true` when `run.ps1` / `run.sh` asks |
 
 Running **`run.ps1`** (Windows) or **`./run.sh`** (Ubuntu) automatically:
 
-1. Starts backend (`8010`) and frontend (`5174`)
-2. Installs/configures **nginx** reverse proxy on port **80** (and **443** when HTTPS certs exist)
-3. Maps the domain on the **server** (`hosts` / `/etc/hosts`)
-4. Prints the standard URL (no IP or `:5174` in the main link)
+1. Asks **HTTP or HTTPS** (`true` = HTTPS, Enter/`false` = HTTP)
+2. Starts backend (`8010`) and frontend (`5174`)
+3. If HTTPS: generates a **self-signed TLS certificate** under `deploy/ssl/` (includes LAN IPs for `https://<ip>` access)
+4. Installs/configures **nginx** reverse proxy (port **80**, and **443** when HTTPS)
+5. Maps the domain on the **server** (`hosts` / `/etc/hosts`)
+6. Prints the standard URL (no `:5174` in the main link)
 
 Configuration file: **`deploy/domain.config.json`**
 
@@ -23,10 +25,27 @@ Configuration file: **`deploy/domain.config.json`**
 {
   "domain": "din.eappms",
   "useHttps": false,
-  "sslCert": "/etc/ssl/certs/din.eappms.crt",
-  "sslKey": "/etc/ssl/private/din.eappms.key"
+  "autoGenerateSsl": true,
+  "sslCert": "deploy/ssl/din.eappms.crt",
+  "sslKey": "deploy/ssl/din.eappms.key"
 }
 ```
+
+### Other PCs on the same network
+
+No special client permission is required beyond being on the same LAN (and firewall ports **80/443** open on the server — the installer adds these).
+
+| Access | Works? |
+|--------|--------|
+| `http://din.eappms` or `https://din.eappms` | Yes, if DNS/hosts/`din.eappms` resolves to the server |
+| `http://<server-ip>` (HTTP mode) | Yes via nginx |
+| `https://<server-ip>` (HTTPS mode) | Yes (cert includes LAN IPs); browser may still warn for self-signed |
+| `http://<server-ip>:5174` | Always works (direct Vite, bypasses nginx TLS) |
+| Mobile app `http://<server-ip>:8010` | Always works — **not affected by web HTTPS** |
+
+### Mobile PMS operator app
+
+HTTPS on the web portal does **not** change the mobile app. The operator app uses **`http://<server-ip>:8010`** (Setup screen). Keep that URL as HTTP unless you intentionally change the mobile build to call HTTPS.
 
 ---
 
@@ -54,7 +73,7 @@ No hosts file or per-PC scripts needed.
 
 | Step | Service | Port |
 |------|---------|------|
-| nginx reverse proxy | `http://din.eappms` | 80 |
+| nginx reverse proxy | `http(s)://din.eappms` | 80 (and 443 if HTTPS) |
 | LAN DNS | `din.eappms` -> IPC IP | 53 |
 | Backend API | proxied via nginx | 8010 |
 | Frontend | proxied via nginx | 5174 |
@@ -184,7 +203,7 @@ http://<ipc-server-ip>
 .\run.ps1
 ```
 
-Open: **http://din.eappms**
+Open: **http://din.eappms** (default). Type `true` at the HTTPS prompt if you want `https://din.eappms`.
 
 ### Ubuntu
 
@@ -193,7 +212,7 @@ chmod +x run.sh scripts/*.sh
 ./run.sh
 ```
 
-Open: **http://din.eappms**
+Open: **http://din.eappms** (default). Type `true` at the HTTPS prompt if you want `https://din.eappms`.
 
 ---
 
@@ -250,29 +269,37 @@ After DNS propagates, every PC on the network opens **http://din.eappms** withou
 
 ---
 
-## HTTPS
+## HTTPS (optional — chosen at run time)
 
-1. Obtain a certificate (company CA or Let's Encrypt).
-2. Edit `deploy/domain.config.json`:
+HTTPS is **optional**. On each `run.ps1` / `run.sh` start you are asked:
 
-```json
-{
-  "domain": "din.eappms",
-  "useHttps": true,
-  "sslCert": "/path/to/fullchain.pem",
-  "sslKey": "/path/to/privkey.pem"
-}
+```text
+Enable HTTPS? Type true for HTTPS, or false/Enter for HTTP [false]:
 ```
 
-3. Re-run:
+- **Enter / `false`** → HTTP (`http://din.eappms`) — best for factory LAN
+- **`true`** → HTTPS (`https://din.eappms`) — self-signed cert auto-created under `deploy/ssl/`
+
+Skip the prompt with an environment variable:
+
+```powershell
+$env:USE_HTTPS = "true"   # or "false"
+.\run.ps1
+```
 
 ```bash
-./run.sh restart
+USE_HTTPS=true ./run.sh    # or false
 ```
 
-or on Windows, re-run `.\run.ps1` (or `scripts\Install-Nginx.ps1`).
+When HTTPS is selected, nginx listens on **443** and redirects **80 → HTTPS**.
 
-**Let's Encrypt (Ubuntu, public DNS):**
+Self-signed certs show a browser warning until trusted. For production, replace files under `deploy/ssl/` (or point `sslCert` / `sslKey` to company CA paths) and re-run.
+
+### Company CA or Let's Encrypt
+
+Point paths in `domain.config.json` to your certs, set `"autoGenerateSsl": false`, choose HTTPS at the prompt (or `USE_HTTPS=true`), then re-run.
+
+**Let's Encrypt (Ubuntu, public DNS only):**
 
 ```bash
 sudo apt install certbot python3-certbot-nginx

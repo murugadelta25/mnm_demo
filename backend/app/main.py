@@ -23,6 +23,7 @@ from .routers import archive as archive_router
 from .routers import mobile as mobile_router
 from .routers import operators as operators_router
 from .routers import tool_groups as tool_groups_router
+from .routers import overview as overview_router
 from .ws_manager import manager
 from sqlalchemy import text, inspect
 from sqlalchemy.orm import Session
@@ -101,6 +102,16 @@ def _ensure_work_instruction_tables():
         _run_migrate("tool_stocks", tool_stocks_migrate)
     except Exception as exc:
         print(f"[WARN] tool_stocks import failed: {exc}")
+    try:
+        from migrate_plan_status_abort_incomplete import main as plan_status_migrate
+        _run_migrate("plan_status_abort_incomplete", plan_status_migrate)
+    except Exception as exc:
+        print(f"[WARN] plan_status_abort_incomplete import failed: {exc}")
+    try:
+        from migrate_entity_enabled import main as entity_enabled_migrate
+        _run_migrate("entity_enabled", entity_enabled_migrate)
+    except Exception as exc:
+        print(f"[WARN] entity_enabled import failed: {exc}")
 
 
 def _ensure_deviation_alert_table():
@@ -150,14 +161,31 @@ def _ensure_superadmin_role():
         return
 
     try:
+        from .auth import hash_password
+
+        # Reserved platform account — do not reuse shop-floor admin credentials.
+        SUPERADMIN_USERNAME = "SuperAdmin"
+        SUPERADMIN_DEFAULT_PASSWORD = "Password@123"
+
         db = SessionLocal()
-        existing = db.query(User).filter(User.role == "superadmin").first()
-        if not existing:
-            first_admin = db.query(User).filter(User.role == "admin").first()
-            if first_admin:
-                first_admin.role = "superadmin"
+        reserved = db.query(User).filter(User.username == SUPERADMIN_USERNAME).first()
+        if reserved:
+            if reserved.role != "superadmin":
+                reserved.role = "superadmin"
                 db.commit()
-                print(f"[OK] Promoted '{first_admin.username}' to superadmin (first-time bootstrap)")
+                print(f"[OK] Ensured '{SUPERADMIN_USERNAME}' role is superadmin")
+        else:
+            db.add(User(
+                username=SUPERADMIN_USERNAME,
+                password_hash=hash_password(SUPERADMIN_DEFAULT_PASSWORD),
+                role="superadmin",
+                password_must_change=0,
+            ))
+            db.commit()
+            print(
+                f"[OK] Created reserved superadmin '{SUPERADMIN_USERNAME}'. "
+                "Use the documented default password from README and change it immediately."
+            )
         db.close()
     except Exception as exc:
         print(f"[WARN] superadmin bootstrap skipped: {exc}")
@@ -223,6 +251,7 @@ app.include_router(archive_router.router)
 app.include_router(mobile_router.router)
 app.include_router(operators_router.router)
 app.include_router(tool_groups_router.router)
+app.include_router(overview_router.router)
 
 # Serve uploaded machine images — pathlib works on both Windows and Linux
 STATIC_DIR = Path(__file__).parent.parent / "static"

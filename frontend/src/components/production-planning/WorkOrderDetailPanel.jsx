@@ -4,6 +4,7 @@ import api from '../../api/client';
 
 export default function WorkOrderDetailPanel({
   t, detail, loading, onClose, upcomingPlans, scheduleOnly, onSaveActual,
+  canManage, onEdit, onDelete, deleting,
 }) {
   const [actualEdit, setActualEdit] = useState({ id: null, qty: '' });
   const [saving, setSaving] = useState(false);
@@ -55,13 +56,44 @@ export default function WorkOrderDetailPanel({
       )}
       {detail && (
         <>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
-            <h4 style={{ color: t.accent, margin: 0, fontSize: 14, fontWeight: 600 }}>
-              {detail.work_order?.work_order_no} — Details
-            </h4>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12, gap: 8 }}>
+            <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+              <h4 style={{ color: t.accent, margin: 0, fontSize: 14, fontWeight: 600 }}>
+                {detail.work_order?.work_order_no} — Details
+              </h4>
+              {canManage && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => onEdit?.(detail.work_order)}
+                    style={{
+                      padding: '5px 12px', fontSize: 12, fontWeight: 600,
+                      background: '#7c3aed', color: '#fff', border: 'none',
+                      borderRadius: 6, cursor: 'pointer',
+                    }}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    disabled={deleting}
+                    onClick={() => onDelete?.(detail.work_order)}
+                    style={{
+                      padding: '5px 12px', fontSize: 12, fontWeight: 600,
+                      background: 'transparent', color: '#ef4444',
+                      border: '1px solid #ef4444', borderRadius: 6,
+                      cursor: deleting ? 'wait' : 'pointer',
+                      opacity: deleting ? 0.6 : 1,
+                    }}
+                  >
+                    {deleting ? 'Deleting…' : 'Delete'}
+                  </button>
+                </>
+              )}
+            </div>
             {onClose && (
               <button type="button" onClick={onClose}
-                style={{ background: 'none', border: 'none', color: t.textDim, cursor: 'pointer' }}>✕</button>
+                style={{ background: 'none', border: 'none', color: t.textDim, cursor: 'pointer', flexShrink: 0 }}>✕</button>
             )}
           </div>
 

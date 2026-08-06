@@ -28,7 +28,72 @@ function newDepartment() {
 }
 
 function newLine() {
-  return { id: uid(), name: '', stationIds: [] };
+  return { id: uid(), name: '', stationIds: [], enabled: true };
+}
+
+/** First *enabled* line that owns each station (disabled lines do not lock stations). */
+function stationOwnersInFactory(factory) {
+  const owners = new Map();
+  for (const dept of factory?.departments || []) {
+    for (const line of dept.lines || []) {
+      if (line.enabled === false) continue;
+      for (const raw of line.stationIds || []) {
+        const id = Number(raw);
+        if (!Number.isFinite(id) || owners.has(id)) continue;
+        owners.set(id, {
+          lineId: line.id,
+          lineName: (line.name || '').trim() || 'unnamed line',
+          deptName: (dept.name || '').trim() || 'unnamed dept',
+        });
+      }
+    }
+  }
+  return owners;
+}
+
+/**
+ * One station → one line. Enabled lines claim first; disabled lines keep only
+ * stations that no enabled line is using (so a disabled line does not block reuse).
+ */
+function uniqueStationIdsAcrossDepartments(departments) {
+  const claimed = new Set();
+
+  const claimForLines = (depts, onlyEnabled) =>
+    (depts || []).map((d) => ({
+      ...d,
+      lines: (d.lines || []).map((l) => {
+        const isDisabled = l.enabled === false;
+        if (onlyEnabled ? isDisabled : !isDisabled) {
+          return { ...l, stationIds: [...(l.stationIds || [])] };
+        }
+        const cleaned = [];
+        for (const raw of l.stationIds || []) {
+          const id = Number(raw);
+          if (!Number.isFinite(id) || claimed.has(id)) continue;
+          claimed.add(id);
+          cleaned.push(id);
+        }
+        return { ...l, stationIds: cleaned };
+      }),
+    }));
+
+  return claimForLines(claimForLines(departments, true), false);
+}
+
+/** Drop station ids from disabled lines when an enabled line takes them. */
+function stripStationsFromDisabledLines(departments, stationIds, exceptLineId) {
+  const take = new Set((stationIds || []).map(Number).filter(Number.isFinite));
+  if (take.size === 0) return departments;
+  return (departments || []).map((d) => ({
+    ...d,
+    lines: (d.lines || []).map((l) => {
+      if (l.id === exceptLineId || l.enabled !== false) return l;
+      const next = (l.stationIds || [])
+        .map(Number)
+        .filter((id) => Number.isFinite(id) && !take.has(id));
+      return { ...l, stationIds: next };
+    }),
+  }));
 }
 
 export default function FactorySetup() {
@@ -118,7 +183,7 @@ export default function FactorySetup() {
     }
   };
 
-  const commitDraftFactory = () => {
+  const commitDraftFactory = async () => {
     if (!draftFactory?.name?.trim()) {
       setErr('Factory name is required');
       return;
@@ -131,49 +196,76 @@ export default function FactorySetup() {
         lat: draftFactory.location?.lat || '',
         lng: draftFactory.location?.lng || '',
       },
-      departments: (draftFactory.departments || []).map(d => ({
-        ...d,
-        name: (d.name || '').trim(),
-        lines: (d.lines || []).map(l => ({
-          ...l,
-          name: (l.name || '').trim(),
-          stationIds: l.stationIds || [],
+      departments: uniqueStationIdsAcrossDepartments(
+        (draftFactory.departments || []).map(d => ({
+          ...d,
+          name: (d.name || '').trim(),
+          // Drop blank nameless lines with no stations so removals stick cleanly
+          lines: (d.lines || [])
+            .filter(l => (l.name || '').trim() || (l.stationIds || []).length)
+            .map(l => ({
+              ...l,
+              name: (l.name || '').trim(),
+              stationIds: l.stationIds || [],
+              enabled: l.enabled !== false,
+            })),
         })),
-      })),
+      ),
     };
-    if (editingFactoryId) {
-      setFactories(prev => prev.map(f => (f.id === editingFactoryId ? next : f)));
-    } else {
-      setFactories(prev => [...prev, next]);
-    }
+    const updatedFactories = editingFactoryId
+      ? factories.map(f => (f.id === editingFactoryId ? next : f))
+      : [...factories, next];
+    setFactories(updatedFactories);
     setShowFactoryForm(false);
     setDraftFactory(null);
     setEditingFactoryId(null);
     setLogoPreview(null);
     setErr('');
+    // Persist immediately so Overview / Line screens drop removed lines without a second Save click
+    await persistFactoryConfig(updatedFactories);
   };
 
-  const removeFactory = (id) => {
+  const removeFactory = async (id) => {
     if (!window.confirm('Remove this factory from configuration?')) return;
-    setFactories(prev => prev.filter(f => f.id !== id));
+    const updated = factories.filter(f => f.id !== id);
+    setFactories(updated);
+    const nextFavicon = faviconFactoryId === id ? null : faviconFactoryId;
     if (faviconFactoryId === id) setFaviconFactoryId(null);
     if (draftFactory?.id === id) {
       setShowFactoryForm(false);
       setDraftFactory(null);
       setEditingFactoryId(null);
     }
-  };
-
-  const save = async () => {
-    if (showFactoryForm && draftFactory) {
-      setErr('Finish or cancel the open factory form before saving configuration');
-      return;
-    }
+    // Persist removal so Overview drops the factory/lines immediately
     setSaving(true);
     try {
-      // Upload any logos still pending as local files (fallback if immediate upload missed)
+      const payload = {
+        ...config,
+        factory: {
+          configured: true,
+          siteTitle: siteTitle.trim() || DEFAULT_APP_NAME,
+          faviconFactoryId: nextFavicon,
+          factories: updated,
+        },
+      };
+      const { data: savedCfg } = await api.put('/api/config/', { config: payload });
+      const savedFactories = savedCfg?.factory?.factories || updated;
+      setFactories(savedFactories);
+      await reload();
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2500);
+    } catch (e) {
+      setErr(e.response?.data?.detail || 'Failed to remove factory');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const persistFactoryConfig = async (factoriesList) => {
+    setSaving(true);
+    try {
       const updatedFactories = [];
-      for (const f of factories) {
+      for (const f of factoriesList) {
         let logoUrl = f.logoUrl || '';
         if (logoFiles[f.id]) {
           const fd = new FormData();
@@ -210,11 +302,21 @@ export default function FactorySetup() {
       setSaved(true);
       setErr('');
       setTimeout(() => setSaved(false), 2500);
+      return true;
     } catch (e) {
       setErr(e.response?.data?.detail || 'Failed to save factory setup');
+      return false;
     } finally {
       setSaving(false);
     }
+  };
+
+  const save = async () => {
+    if (showFactoryForm && draftFactory) {
+      setErr('Finish or cancel the open factory form before saving configuration');
+      return;
+    }
+    await persistFactoryConfig(factories);
   };
 
   const openAddStation = () => {
@@ -253,6 +355,17 @@ export default function FactorySetup() {
     try {
       await api.delete(`/api/stations/${id}`);
       setStationMsg('Station deleted');
+      fetchStations();
+    } catch (err) {
+      setStationMsg(err.response?.data?.detail || err.message);
+    }
+  };
+
+  const toggleStationEnabled = async (st) => {
+    const next = !(st.is_enabled !== false && st.is_enabled !== 0);
+    try {
+      await api.post(`/api/stations/${st.id}/enabled`, { is_enabled: next });
+      setStationMsg(next ? `Station "${st.display_name || st.name}" enabled` : `Station "${st.display_name || st.name}" disabled`);
       fetchStations();
     } catch (err) {
       setStationMsg(err.response?.data?.detail || err.message);
@@ -382,9 +495,14 @@ export default function FactorySetup() {
                   }}>+ Line</button>
               </div>
               {(dept.lines || []).map((line, li) => (
-                <div key={line.id} style={{ marginTop: 10, paddingLeft: 12, borderLeft: `3px solid ${t.accent}` }}>
-                  <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
-                    <div style={{ flex: 1 }}>
+                <div key={line.id} style={{
+                  marginTop: 10,
+                  paddingLeft: 12,
+                  borderLeft: `3px solid ${line.enabled === false ? t.textFaint : t.accent}`,
+                  opacity: line.enabled === false ? 0.72 : 1,
+                }}>
+                  <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+                    <div style={{ flex: 1, minWidth: 160 }}>
                       <label style={s.label}>Line Name</label>
                       <input style={s.inp} value={line.name}
                         onChange={e => {
@@ -395,6 +513,39 @@ export default function FactorySetup() {
                           updateDraft({ departments });
                         }} />
                     </div>
+                    <button
+                      type="button"
+                      style={{
+                        ...s.miniBtn,
+                        marginBottom: 1,
+                        background: line.enabled === false ? '#64748b' : (t.brand || '#10b981'),
+                      }}
+                      onClick={() => {
+                        const departments = [...fi.departments];
+                        const lines = [...dept.lines];
+                        const turningOn = line.enabled === false;
+                        let nextLine = { ...line, enabled: turningOn };
+                        if (turningOn) {
+                          // Stations already on another enabled line stay there; drop them here
+                          const otherOwners = stationOwnersInFactory(fi);
+                          nextLine = {
+                            ...nextLine,
+                            stationIds: (line.stationIds || [])
+                              .map(Number)
+                              .filter((id) => {
+                                const o = otherOwners.get(id);
+                                return !o || o.lineId === line.id;
+                              }),
+                          };
+                        }
+                        lines[li] = nextLine;
+                        departments[di] = { ...dept, lines };
+                        updateDraft({ departments });
+                      }}
+                      title={line.enabled === false ? 'Enable this line in overviews' : 'Disable this line in overviews'}
+                    >
+                      {line.enabled === false ? 'Disabled' : 'Enabled'}
+                    </button>
                     <button type="button" style={{ ...s.miniBtn, background: '#ef4444', marginBottom: 1 }}
                       onClick={() => {
                         const departments = [...fi.departments];
@@ -417,23 +568,161 @@ export default function FactorySetup() {
                       No stations available yet. Add a station from the <strong>Stations</strong> section below, then come back here to assign it to this line.
                     </p>
                   ) : (
-                    <>
-                      <select multiple style={{ ...s.inp, minHeight: 90 }}
-                        value={(line.stationIds || []).map(String)}
-                        onChange={e => {
-                          const selected = Array.from(e.target.selectedOptions).map(o => parseInt(o.value, 10));
-                          const departments = [...fi.departments];
-                          const lines = [...dept.lines];
-                          lines[li] = { ...line, stationIds: selected };
-                          departments[di] = { ...dept, lines };
-                          updateDraft({ departments });
+                    (() => {
+                      const selectedIds = (line.stationIds || []).map(Number);
+                      const selectedSet = new Set(selectedIds);
+                      const owners = stationOwnersInFactory(fi);
+                      const takenByOtherLine = (stationId) => {
+                        const owner = owners.get(Number(stationId));
+                        return owner && owner.lineId !== line.id ? owner : null;
+                      };
+                      const availableStations = stations.filter((st) => !takenByOtherLine(st.id));
+                      const allAvailableSelected = availableStations.length > 0
+                        && availableStations.every((st) => selectedSet.has(Number(st.id)));
+                      const setLineStations = (nextIds) => {
+                        // Never keep ids already owned by another *enabled* line
+                        const cleaned = nextIds
+                          .map(Number)
+                          .filter((id) => Number.isFinite(id) && !takenByOtherLine(id));
+                        let departments = [...fi.departments];
+                        const lines = [...(departments[di].lines || dept.lines)];
+                        lines[li] = { ...line, stationIds: cleaned };
+                        departments[di] = { ...departments[di], lines };
+                        // Enabled line takes the station: free it from disabled lines
+                        if (line.enabled !== false) {
+                          departments = stripStationsFromDisabledLines(
+                            departments,
+                            cleaned,
+                            line.id,
+                          );
+                        }
+                        updateDraft({ departments });
+                      };
+                      const toggleStation = (stationId) => {
+                        const id = Number(stationId);
+                        if (selectedSet.has(id)) {
+                          setLineStations(selectedIds.filter((x) => x !== id));
+                          return;
+                        }
+                        if (takenByOtherLine(id)) return;
+                        setLineStations([...selectedIds, id]);
+                      };
+                      return (
+                        <div style={{
+                          marginTop: 6,
+                          border: `1px solid ${t.border}`,
+                          borderRadius: 8,
+                          background: t.surface2 || t.surface,
+                          overflow: 'hidden',
                         }}>
-                        {stations.map(st => (
-                          <option key={st.id} value={st.id}>{st.display_name || st.name}</option>
-                        ))}
-                      </select>
-                      <p style={{ fontSize: 11, color: t.textFaint }}>Hold Ctrl/Cmd to select multiple stations</p>
-                    </>
+                          <div style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            gap: 8,
+                            flexWrap: 'wrap',
+                            padding: '8px 10px',
+                            borderBottom: `1px solid ${t.border}`,
+                          }}>
+                            <span style={{ fontSize: 12, color: t.textDim || t.textFaint }}>
+                              {selectedIds.length} of {availableStations.length} available selected
+                              {stations.length > availableStations.length
+                                ? ` · ${stations.length - availableStations.length} used on other lines`
+                                : ''}
+                            </span>
+                            <div style={{ display: 'flex', gap: 6 }}>
+                              <button
+                                type="button"
+                                style={{
+                                  ...s.miniBtn,
+                                  background: allAvailableSelected ? (t.surface || t.bg) : (t.accent || '#22cae7'),
+                                  color: allAvailableSelected ? (t.text || '#fff') : '#041018',
+                                  border: `1px solid ${t.border}`,
+                                }}
+                                onClick={() => setLineStations(availableStations.map((st) => Number(st.id)))}
+                                disabled={allAvailableSelected || availableStations.length === 0}
+                              >
+                                Select all
+                              </button>
+                              <button
+                                type="button"
+                                style={{
+                                  ...s.miniBtn,
+                                  background: t.surface || t.bg,
+                                  color: t.text,
+                                  border: `1px solid ${t.border}`,
+                                }}
+                                onClick={() => setLineStations([])}
+                                disabled={selectedIds.length === 0}
+                              >
+                                Clear
+                              </button>
+                            </div>
+                          </div>
+                          <div style={{
+                            maxHeight: 180,
+                            overflowY: 'auto',
+                            padding: '6px 8px',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: 2,
+                          }}>
+                            {stations.map((st) => {
+                              const sid = Number(st.id);
+                              const checked = selectedSet.has(sid);
+                              const other = takenByOtherLine(sid);
+                              // Allow unchecking a duplicate; only block newly assigning a taken station
+                              const locked = Boolean(other) && !checked;
+                              const stEnabled = st.is_enabled !== false && st.is_enabled !== 0;
+                              const label = st.display_name || st.name;
+                              return (
+                                <label
+                                  key={st.id}
+                                  title={
+                                    locked
+                                      ? `Already assigned to ${other.lineName} (${other.deptName}). Uncheck it there first.`
+                                      : (checked && other
+                                        ? `Also listed on ${other.lineName} — uncheck here to resolve the duplicate.`
+                                        : undefined)
+                                  }
+                                  style={{
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: 10,
+                                    padding: '8px 10px',
+                                    borderRadius: 6,
+                                    cursor: locked ? 'not-allowed' : 'pointer',
+                                    background: checked ? `${t.accent || '#22cae7'}22` : 'transparent',
+                                    color: t.text,
+                                    fontSize: 13,
+                                    opacity: locked ? 0.45 : (stEnabled ? 1 : 0.55),
+                                  }}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={checked}
+                                    disabled={locked}
+                                    onChange={() => toggleStation(st.id)}
+                                    style={{
+                                      width: 16,
+                                      height: 16,
+                                      accentColor: t.accent || '#22cae7',
+                                      cursor: locked ? 'not-allowed' : 'pointer',
+                                    }}
+                                  />
+                                  <span>
+                                    {label}
+                                    {!stEnabled ? ' (disabled)' : ''}
+                                    {locked ? ` — on ${other.lineName}` : ''}
+                                    {checked && other ? ` — duplicate of ${other.lineName}` : ''}
+                                  </span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })()
                   )}
                 </div>
               ))}
@@ -442,8 +731,8 @@ export default function FactorySetup() {
         </div>
 
         <div style={{ display: 'flex', gap: 10, marginTop: 16 }}>
-          <button type="button" style={s.btn} onClick={commitDraftFactory}>
-            {editingFactoryId ? 'Update Factory' : 'Add Factory'}
+          <button type="button" style={s.btn} onClick={commitDraftFactory} disabled={saving}>
+            {saving ? 'Saving…' : (editingFactoryId ? 'Update & Save Factory' : 'Add & Save Factory')}
           </button>
           <button type="button" style={s.subBtn} onClick={() => { setShowFactoryForm(false); setDraftFactory(null); }}>Cancel</button>
         </div>
@@ -549,25 +838,43 @@ export default function FactorySetup() {
           <table style={s.table}>
             <thead>
               <tr>
-                {['Name', 'Display Name', 'Machines', 'Actions'].map(h => <th key={h} style={s.th}>{h}</th>)}
+                {['Name', 'Display Name', 'Machines', 'Status', 'Actions'].map(h => <th key={h} style={s.th}>{h}</th>)}
               </tr>
             </thead>
             <tbody>
               {stations.length === 0 ? (
-                <tr><td colSpan={4} style={{ ...s.td, textAlign: 'center', color: t.textFaint }}>No stations yet</td></tr>
-              ) : stations.map(st => (
-                <tr key={st.id}>
+                <tr><td colSpan={5} style={{ ...s.td, textAlign: 'center', color: t.textFaint }}>No stations yet</td></tr>
+              ) : stations.map(st => {
+                const enabled = st.is_enabled !== false && st.is_enabled !== 0;
+                return (
+                <tr key={st.id} style={{ opacity: enabled ? 1 : 0.65 }}>
                   <td style={s.td}>{st.name}</td>
                   <td style={s.td}>{st.display_name}</td>
                   <td style={s.td}>{st.machine_count ?? 0}</td>
                   <td style={s.td}>
+                    <span style={{
+                      fontSize: 12, fontWeight: 700,
+                      color: enabled ? (t.brand || '#10b981') : '#94a3b8',
+                    }}>
+                      {enabled ? 'Enabled' : 'Disabled'}
+                    </span>
+                  </td>
+                  <td style={s.td}>
                     <button type="button" style={{ ...s.miniBtn, background: t.accent, marginRight: 6 }}
                       onClick={() => openEditStation(st)}>Edit</button>
+                    <button type="button" style={{
+                      ...s.miniBtn,
+                      background: enabled ? '#64748b' : (t.brand || '#10b981'),
+                      marginRight: 6,
+                    }}
+                      onClick={() => toggleStationEnabled(st)}>
+                      {enabled ? 'Disable' : 'Enable'}
+                    </button>
                     <button type="button" style={{ ...s.miniBtn, background: '#ef4444' }}
                       onClick={() => deleteStation(st.id)}>Delete</button>
                   </td>
                 </tr>
-              ))}
+              );})}
             </tbody>
           </table>
         </div>

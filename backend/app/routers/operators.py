@@ -9,6 +9,7 @@ import uuid
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ..auth import (
@@ -960,6 +961,7 @@ def get_allocation(
                     live_name = op.name or op.employee_code
                     live_code = op.employee_code
             live = {
+                "session_id": sess.id,
                 "operator_id": sess.operator_id or sess.user_id,
                 "user_id": sess.operator_id or sess.user_id,
                 "username": sess.username,
@@ -967,6 +969,8 @@ def get_allocation(
                 "operator_code": live_code,
                 "started_at": sess.started_at.isoformat() if sess.started_at else None,
                 "shift_id": sess.shift_id,
+                "tab_id": sess.tab_id,
+                "machine_id": sess.machine_id,
             }
         items.append({
             "machine_id": m.id,
@@ -1053,6 +1057,89 @@ def save_allocation(
     return {"ok": True, "saved": saved}
 
 
+class ForceEndSessionBody(BaseModel):
+    """Supervisor/admin release when a tablet is broken or abandoned mid-shift."""
+    session_id: Optional[int] = None
+    operator_id: Optional[int] = None
+    machine_id: Optional[int] = None
+    logout_reason: str = "forced_web"
+
+
+@router.post("/sessions/force-end")
+def force_end_session(
+    data: ForceEndSessionBody,
+    db: Session = Depends(get_db),
+    current=Depends(require_role("admin", "superadmin", "supervisor")),
+):
+    """End active operator session(s) so the employee can sign in on another tablet.
+
+    Use when the original tablet cannot sign out (broken / offline / lost).
+    Also punches out any open attendance row for that operator.
+    """
+    if not data.session_id and not data.operator_id and not data.machine_id:
+        raise HTTPException(400, "Provide session_id, operator_id, or machine_id")
+
+    q = db.query(OperatorSession).filter(OperatorSession.status == "active")
+    if data.session_id:
+        q = q.filter(OperatorSession.id == data.session_id)
+    else:
+        if data.operator_id:
+            q = q.filter(OperatorSession.operator_id == data.operator_id)
+        if data.machine_id:
+            q = q.filter(OperatorSession.machine_id == data.machine_id)
+    rows = q.all()
+    if not rows:
+        raise HTTPException(404, "No active operator session found for the given criteria")
+
+    now = now_ist()
+    reason = (data.logout_reason or "forced_web").strip() or "forced_web"
+    punched = set()
+    ended = []
+    for row in rows:
+        row.status = "ended"
+        row.ended_at = now
+        row.logout_reason = reason
+        oid = row.operator_id or row.user_id
+        if oid and oid not in punched:
+            # Local punch-out (avoid importing mobile router — circular with operators)
+            open_att = (
+                db.query(AttendanceRecord)
+                .filter(
+                    AttendanceRecord.operator_id == oid,
+                    AttendanceRecord.status == "open",
+                )
+                .order_by(AttendanceRecord.time_in.desc())
+                .first()
+            )
+            if open_att:
+                tin = open_att.time_in
+                if tin and getattr(tin, "tzinfo", None) is not None:
+                    tin = tin.replace(tzinfo=None)
+                tout = now
+                if getattr(tout, "tzinfo", None) is not None:
+                    tout = tout.replace(tzinfo=None)
+                open_att.time_out = tout
+                delta = (tout - tin).total_seconds() / 60.0 if tin and tout else 0.0
+                if delta < 0:
+                    delta += 24 * 60
+                open_att.duration_mins = round(max(0.0, delta), 2)
+                open_att.status = "closed"
+            punched.add(oid)
+        ended.append({
+            "session_id": row.id,
+            "operator_id": row.operator_id,
+            "username": row.username,
+            "machine_id": row.machine_id,
+            "tab_id": row.tab_id,
+            "shift_id": row.shift_id,
+            "logout_reason": row.logout_reason,
+            "ended_at": now.isoformat(),
+            "forced_by": current.username,
+        })
+    db.commit()
+    return {"ok": True, "ended": len(ended), "sessions": ended}
+
+
 # ── Tablet: pending assignment + acknowledge ────────────────────
 
 @router.get("/assignment/pending")
@@ -1063,12 +1150,15 @@ def pending_assignment(
     db: Session = Depends(get_db),
 ):
     d = entry_date or now_ist().date()
+    # "active" must be included: once the assigned operator signs in, the row moves
+    # to active and the tablet would otherwise show "no assignment" for the rest of
+    # the shift (including after sign-out).
     q = (
         db.query(MachineAllocation)
         .filter(
             MachineAllocation.machine_id == machine_id,
             MachineAllocation.entry_date == d,
-            MachineAllocation.status.in_(("assigned", "acknowledged")),
+            MachineAllocation.status.in_(("assigned", "acknowledged", "active")),
         )
     )
     if shift_id:
@@ -1412,6 +1502,7 @@ def attendance_report(
         q = q.filter(AttendanceRecord.shift_id == shift_id)
     rows = q.order_by(AttendanceRecord.entry_date.desc(), AttendanceRecord.time_in.desc()).all()
     machines = {m.id: m.name for m in db.query(Machine).all()}
+    ops = {o.id: o for o in db.query(Operator).all()}
 
     alloc_map = {}
     allocs = (
@@ -1433,17 +1524,22 @@ def attendance_report(
         key = (r.entry_date.isoformat(), r.shift_id or "", key_id)
         al = alloc_map.get(key)
         mid = r.machine_id or (al.machine_id if al else None)
+        mins = float(r.duration_mins) if r.duration_mins is not None else None
+        op = ops.get(key_id) if key_id else None
         out.append({
             "date": r.entry_date.isoformat(),
             "operator_id": key_id,
             "user_id": key_id,
             "username": r.username,
+            "operator_code": op.employee_code if op else r.username,
+            "operator_name": (op.name or op.employee_code) if op else r.username,
             "shift_id": r.shift_id,
             "machine_id": mid,
             "machine_name": machines.get(mid) if mid else None,
             "time_in": r.time_in.isoformat() if r.time_in else None,
             "time_out": r.time_out.isoformat() if r.time_out else None,
-            "duration_mins": float(r.duration_mins) if r.duration_mins is not None else None,
+            "duration_mins": mins,
+            "duration_hours": round(mins / 60.0, 2) if mins is not None else None,
             "status": r.status,
             "allocation_status": al.status if al else None,
         })
@@ -1460,6 +1556,7 @@ def machine_run_report(
     from_date: Optional[date] = None,
     to_date: Optional[date] = None,
     machine_id: Optional[int] = None,
+    operator_id: Optional[int] = None,
     db: Session = Depends(get_db),
     _=Depends(require_role("admin", "superadmin", "supervisor")),
 ):
@@ -1467,6 +1564,7 @@ def machine_run_report(
     start = from_date or (today - timedelta(days=6))
     end = to_date or today
     machines = {m.id: m.name for m in db.query(Machine).all()}
+    ops = {o.id: o for o in db.query(Operator).all()}
 
     q = (
         db.query(MachineAllocation)
@@ -1478,6 +1576,11 @@ def machine_run_report(
     )
     if machine_id:
         q = q.filter(MachineAllocation.machine_id == machine_id)
+    if operator_id:
+        q = q.filter(or_(
+            MachineAllocation.operator_id == operator_id,
+            MachineAllocation.user_id == operator_id,
+        ))
     allocs = q.order_by(MachineAllocation.entry_date.desc()).all()
 
     sess_q = db.query(OperatorSession).filter(
@@ -1486,28 +1589,58 @@ def machine_run_report(
     )
     if machine_id:
         sess_q = sess_q.filter(OperatorSession.machine_id == machine_id)
+    if operator_id:
+        sess_q = sess_q.filter(or_(
+            OperatorSession.operator_id == operator_id,
+            OperatorSession.user_id == operator_id,
+        ))
     sessions = sess_q.order_by(OperatorSession.started_at.desc()).all()
 
-    return {
-        "from_date": start.isoformat(),
-        "to_date": end.isoformat(),
-        "allocations": [{
-            **_alloc_dict(a),
-            "machine_name": machines.get(a.machine_id),
-        } for a in allocs],
-        "sessions": [{
+    now = now_ist()
+
+    def _session_duration_mins(s: OperatorSession):
+        started = _as_naive_ist(s.started_at)
+        if not started:
+            return None
+        ended = _as_naive_ist(s.ended_at) if s.ended_at else _as_naive_ist(now)
+        if not ended:
+            return None
+        delta = (ended - started).total_seconds() / 60.0
+        if delta < 0:
+            delta = 0.0
+        return round(delta, 2)
+
+    sess_out = []
+    for s in sessions:
+        oid = s.operator_id or s.user_id
+        op = ops.get(oid) if oid else None
+        mins = _session_duration_mins(s)
+        sess_out.append({
             "id": s.id,
-            "operator_id": s.operator_id or s.user_id,
-            "user_id": s.operator_id or s.user_id,
+            "operator_id": oid,
+            "user_id": oid,
             "username": s.username,
+            "operator_code": op.employee_code if op else s.username,
+            "operator_name": (op.name or op.employee_code) if op else s.username,
             "machine_id": s.machine_id,
             "machine_name": machines.get(s.machine_id),
             "shift_id": s.shift_id,
             "started_at": s.started_at.isoformat() if s.started_at else None,
             "ended_at": s.ended_at.isoformat() if s.ended_at else None,
+            "duration_mins": mins,
+            "duration_hours": round(mins / 60.0, 2) if mins is not None else None,
             "status": s.status,
             "logout_reason": s.logout_reason,
-        } for s in sessions],
+        })
+
+    return {
+        "from_date": start.isoformat(),
+        "to_date": end.isoformat(),
+        "allocations": [{
+            **_alloc_dict(a, db=db),
+            "machine_name": machines.get(a.machine_id),
+        } for a in allocs],
+        "sessions": sess_out,
     }
 
 # ── Operator CRUD by id (keep AFTER static paths like /roster, /allocation, /me/*) ──

@@ -331,21 +331,102 @@ def list_devices(db: Session = Depends(get_db), _=Depends(get_current_user)):
 @router.post("/sessions/start")
 def start_session(data: SessionStart, db: Session = Depends(get_db), user=Depends(get_current_user)):
     op = _resolve_operator(db, user, data.operator_id, data.user_id)
+    # Serialize concurrent starts for the same operator where the database
+    # supports row locks (PostgreSQL/MySQL). Keep the locked instance so the
+    # FOR UPDATE is clearly tied to the rest of this transaction.
+    locked_op = (
+        db.query(Operator)
+        .filter(Operator.id == op.id)
+        .with_for_update()
+        .first()
+    )
+    if not locked_op:
+        raise HTTPException(404, "Operator not found")
+    op = locked_op
     label = data.username or op.employee_code
+    # Lock active session rows with the operator so two tablets cannot both
+    # conclude there is no conflict.
     open_rows = (
         db.query(OperatorSession)
         .filter(
             OperatorSession.operator_id == op.id,
-            OperatorSession.machine_id == data.machine_id,
             OperatorSession.status == "active",
         )
+        .order_by(OperatorSession.started_at.desc())
+        .with_for_update()
         .all()
     )
     now = now_ist()
+    from .operators import _as_naive_ist
+
+    # One operator may be active on only one physical device at a time. A
+    # repeated login on the same tablet replaces its stale session, while a
+    # different tablet receives an actionable conflict instead of appearing
+    # logged in without a valid operator session.
+    stale_rows = []
+    conflicts = []
+    replaceable = []
     for row in open_rows:
-        row.status = "ended"
-        row.ended_at = now
-        row.logout_reason = row.logout_reason or "replaced"
+        # Abandoned sessions must not block a later login forever. Classify
+        # them first; mutate only after classification so a conflict 409 does
+        # not depend on a half-applied continue path.
+        try:
+            age = _as_naive_ist(now) - _as_naive_ist(row.started_at)
+        except Exception:
+            age = timedelta(0)
+        if age > timedelta(hours=16):
+            stale_rows.append(row)
+            continue
+
+        same_tab = bool(data.tab_id and row.tab_id and data.tab_id == row.tab_id)
+        same_mac = bool(
+            data.mac_address
+            and row.mac_address
+            and data.mac_address == row.mac_address
+        )
+        if same_tab or same_mac:
+            replaceable.append(row)
+        else:
+            conflicts.append(row)
+
+    def _end_sessions(rows, reason: str):
+        for row in rows:
+            row.status = "ended"
+            row.ended_at = now
+            row.logout_reason = row.logout_reason or reason
+
+    # Expire abandoned rows intentionally (they would otherwise stay "active"
+    # forever and either block login or leave duplicate actives).
+    _end_sessions(stale_rows, "stale_timeout")
+
+    if conflicts:
+        active = conflicts[0]
+        machine = db.query(Machine).filter(Machine.id == active.machine_id).first()
+        machine_label = getattr(machine, "name", None) or f"Machine {active.machine_id}"
+        started_at = active.started_at.isoformat() if active.started_at else None
+        conflict_detail = {
+            "code": "OPERATOR_ALREADY_ACTIVE",
+            "message": (
+                f"Employee {op.employee_code} is already signed in on "
+                f"{active.tab_id or 'another device'} at {machine_label}. "
+                "Sign out on that device before signing in here."
+            ),
+            "active_session": {
+                "id": active.id,
+                "tab_id": active.tab_id,
+                "machine_id": active.machine_id,
+                "machine_name": machine_label,
+                "shift_id": active.shift_id,
+                "started_at": started_at,
+            },
+        }
+        # Persist stale cleanup even when this login is blocked; otherwise
+        # HTTPException rolls back the ORM dirty state on session close.
+        if stale_rows:
+            db.commit()
+        raise HTTPException(status_code=409, detail=conflict_detail)
+
+    _end_sessions(replaceable, "replaced")
     sess = OperatorSession(
         operator_id=op.id,
         user_id=op.linked_user_id,

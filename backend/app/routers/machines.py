@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from sqlalchemy.orm import Session
 from typing import Optional, List
 from pydantic import BaseModel
@@ -28,10 +28,30 @@ class MachineCreate(BaseModel):
     plc_source: Optional[str] = "manual"
     plc_endpoint: Optional[str] = None
     plc_topic: Optional[str] = None
+    is_enabled: Optional[int] = 1
 
 
-class MachineUpdate(MachineCreate):
-    pass
+class MachineUpdate(BaseModel):
+    name: Optional[str] = None
+    station_id: Optional[int] = None
+    machine_type: Optional[str] = None
+    make: Optional[str] = None
+    model_no: Optional[str] = None
+    tonnage: Optional[str] = None
+    features: Optional[str] = None
+    location: Optional[str] = None
+    plc_source: Optional[str] = None
+    plc_endpoint: Optional[str] = None
+    plc_topic: Optional[str] = None
+    is_enabled: Optional[int] = None
+
+
+class MachineEnabledBody(BaseModel):
+    is_enabled: bool = True
+
+
+def _machine_enabled(m: Machine) -> bool:
+    return int(getattr(m, "is_enabled", 1) or 0) != 0
 
 
 class StatusPush(BaseModel):
@@ -254,7 +274,11 @@ def update_reason(log_id: int, data: ReasonUpdate, db: Session = Depends(get_db)
 
 
 @router.get("/")
-def list_machines(db: Session = Depends(get_db), _=Depends(get_current_user)):
+def list_machines(
+    enabled_only: bool = False,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
     from ..operator_presence import get_live_operator_map, operator_fields_for_machine
 
     try:
@@ -267,6 +291,9 @@ def list_machines(db: Session = Depends(get_db), _=Depends(get_current_user)):
     op_map = get_live_operator_map(db)
     result = []
     for m in machines:
+        enabled = _machine_enabled(m)
+        if enabled_only and not enabled:
+            continue
         try:
             live_status = _compute_status(m, db)
             if m.status != live_status:
@@ -289,6 +316,7 @@ def list_machines(db: Session = Depends(get_db), _=Depends(get_current_user)):
             "location": m.location,
             "image_url": m.image_url,
             "status": live_status,
+            "is_enabled": enabled,
         }
         row.update(operator_fields_for_machine(op_map, m.id))
         result.append(row)
@@ -300,14 +328,27 @@ def list_machines(db: Session = Depends(get_db), _=Depends(get_current_user)):
 
 
 @router.get("/station-numbers")
-def get_station_numbers(db: Session = Depends(get_db), _=Depends(get_current_user)):
-    """Returns all stations available."""
+def get_station_numbers(
+    enabled_only: bool = True,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Returns stations available for operational selectors (enabled by default)."""
     stations = db.query(Station).order_by(Station.id).all()
-    return [{"id": s.id, "name": s.display_name} for s in stations]
+    out = []
+    for s in stations:
+        if enabled_only and int(getattr(s, "is_enabled", 1) or 0) == 0:
+            continue
+        out.append({"id": s.id, "name": s.display_name, "is_enabled": int(getattr(s, "is_enabled", 1) or 0) != 0})
+    return out
 
 
 @router.get("/fleet")
-def get_fleet(db: Session = Depends(get_db), _=Depends(get_current_user)):
+def get_fleet(
+    enabled_only: bool = False,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
     """Returns all machines with live computed status grouped by station."""
     from ..operator_presence import get_live_operator_map, operator_fields_for_machine
 
@@ -315,6 +356,9 @@ def get_fleet(db: Session = Depends(get_db), _=Depends(get_current_user)):
     op_map = get_live_operator_map(db)
     result = []
     for m in machines:
+        enabled = _machine_enabled(m)
+        if enabled_only and not enabled:
+            continue
         live_status = _compute_status(m, db)
         station = db.query(Station).filter(Station.id == m.station_id).first()
         row = {
@@ -326,6 +370,7 @@ def get_fleet(db: Session = Depends(get_db), _=Depends(get_current_user)):
             "image_url": m.image_url, "plc_source": m.plc_source,
             "plc_endpoint": m.plc_endpoint, "plc_topic": m.plc_topic,
             "status": live_status,
+            "is_enabled": enabled,
         }
         row.update(operator_fields_for_machine(op_map, m.id))
         result.append(row)
@@ -339,8 +384,10 @@ async def create_machine(data: MachineCreate, db: Session = Depends(get_db),
     station = db.query(Station).filter(Station.id == data.station_id).first()
     if not station:
         raise HTTPException(404, f"Station with id {data.station_id} not found")
-    
-    m = Machine(**data.dict())
+
+    payload = data.dict()
+    payload["is_enabled"] = 1 if payload.get("is_enabled") is None or int(payload.get("is_enabled") or 0) else 0
+    m = Machine(**payload)
     db.add(m)
     db.commit()
     db.refresh(m)
@@ -355,19 +402,39 @@ async def update_machine(machine_id: int, data: MachineUpdate,
     m = db.query(Machine).filter(Machine.id == machine_id).first()
     if not m:
         raise HTTPException(404, "Machine not found")
-    
-    # If station_id is being changed, validate it exists
-    if "station_id" in data.dict(exclude_unset=True):
-        station = db.query(Station).filter(Station.id == data.station_id).first()
+
+    payload = data.dict(exclude_unset=True)
+    if "station_id" in payload:
+        station = db.query(Station).filter(Station.id == payload["station_id"]).first()
         if not station:
-            raise HTTPException(404, f"Station with id {data.station_id} not found")
-    
-    for k, v in data.dict(exclude_unset=True).items():
+            raise HTTPException(404, f"Station with id {payload['station_id']} not found")
+
+    if "is_enabled" in payload and payload["is_enabled"] is not None:
+        payload["is_enabled"] = 1 if int(payload["is_enabled"]) else 0
+
+    for k, v in payload.items():
         setattr(m, k, v)
     db.commit()
     db.refresh(m)
     await manager.broadcast({"type": "machine_updated", "id": m.id})
     return m
+
+
+@router.post("/{machine_id}/enabled")
+async def set_machine_enabled(
+    machine_id: int,
+    data: MachineEnabledBody,
+    db: Session = Depends(get_db),
+    user=Depends(require_role("admin")),
+):
+    m = db.query(Machine).filter(Machine.id == machine_id).first()
+    if not m:
+        raise HTTPException(404, "Machine not found")
+    m.is_enabled = 1 if data.is_enabled else 0
+    db.commit()
+    db.refresh(m)
+    await manager.broadcast({"type": "machine_updated", "id": m.id, "is_enabled": _machine_enabled(m)})
+    return {"id": m.id, "is_enabled": _machine_enabled(m)}
 
 
 @router.delete("/{machine_id}")

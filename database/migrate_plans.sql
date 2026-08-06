@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS production_plans (
     planned_qty INT NOT NULL,
     actual_qty INT NOT NULL DEFAULT 0,
     priority INT NOT NULL DEFAULT 1,
-    status ENUM('pending','running','completed','paused','cancelled') DEFAULT 'pending',
+    status ENUM('pending','running','completed','paused','cancelled','aborted','incomplete') DEFAULT 'pending',
     plan_type ENUM('scheduled','urgent','trial') DEFAULT 'scheduled',
     notes TEXT,
     created_by INT,

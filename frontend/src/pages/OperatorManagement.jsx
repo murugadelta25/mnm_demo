@@ -983,6 +983,7 @@ function AllocationPanel({ s, t, flash, onOpenDetail }) {
   const [available, setAvailable] = useState([]);
   const [picks, setPicks] = useState({});
   const [saving, setSaving] = useState(false);
+  const [forcingId, setForcingId] = useState(null);
 
   const load = useCallback(async () => {
     try {
@@ -1003,6 +1004,31 @@ function AllocationPanel({ s, t, flash, onOpenDetail }) {
   }, [entryDate, shift]);
 
   useEffect(() => { load(); }, [load]);
+
+  const forceSignOut = async (m) => {
+    const live = m?.live_session;
+    if (!live) return;
+    const who = live.operator_code || live.username || 'operator';
+    const tab = live.tab_id ? ` on ${live.tab_id}` : '';
+    if (!window.confirm(
+      `Force sign out ${who}${tab} from ${m.machine_name}?\n\n`
+      + 'Use this when the tablet is broken/offline and cannot sign out. '
+      + 'The operator can then sign in on another device.',
+    )) return;
+    setForcingId(live.session_id || m.machine_id);
+    try {
+      const body = live.session_id
+        ? { session_id: live.session_id, logout_reason: 'forced_web' }
+        : { operator_id: live.operator_id || live.user_id, machine_id: m.machine_id, logout_reason: 'forced_web' };
+      const r = await api.post('/api/operators/sessions/force-end', body);
+      flash(`Forced sign-out completed (${r.data?.ended || 0} session${r.data?.ended === 1 ? '' : 's'})`);
+      load();
+    } catch (e) {
+      flash(apiErrorMessage(e), false);
+    } finally {
+      setForcingId(null);
+    }
+  };
 
   const save = async () => {
     setSaving(true);
@@ -1041,6 +1067,7 @@ function AllocationPanel({ s, t, flash, onOpenDetail }) {
       </div>
       <p style={{ color: t.textMuted, fontSize: 12 }}>
         Assign Present operators to machines. Tablets show the employee code; the operator acknowledges with PIN (or linked login).
+        If a tablet is broken and cannot sign out, use <strong>Force sign out</strong> on the live session so the operator can log in on another device.
       </p>
       <div style={{ marginBottom: 12, color: t.textDim, fontSize: 12, display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center' }}>
         <span>Available (Present):</span>
@@ -1093,15 +1120,37 @@ function AllocationPanel({ s, t, flash, onOpenDetail }) {
                 </div>
               )}
               {m.live_session && (
-                <div style={{ marginTop: 6, fontSize: 11, color: '#10b981' }}>
-                  Live:{' '}
-                  <OperatorIdLink
-                    id={m.live_session.operator_id || m.live_session.user_id}
-                    label={m.live_session.username}
-                    t={t}
-                    onOpenDetail={onOpenDetail}
-                  />
-                  {' '}(running now)
+                <div style={{ marginTop: 8, fontSize: 11, color: '#10b981' }}>
+                  <div>
+                    Live:{' '}
+                    <OperatorIdLink
+                      id={m.live_session.operator_id || m.live_session.user_id}
+                      label={m.live_session.operator_code || m.live_session.username}
+                      t={t}
+                      onOpenDetail={onOpenDetail}
+                    />
+                    {' '}(running now)
+                    {m.live_session.tab_id ? ` · ${m.live_session.tab_id}` : ''}
+                    {m.live_session.started_at ? ` · since ${String(m.live_session.started_at).replace('T', ' ').slice(0, 16)}` : ''}
+                  </div>
+                  <button
+                    type="button"
+                    style={{
+                      ...s.outlineBtn,
+                      marginTop: 8,
+                      padding: '6px 10px',
+                      fontSize: 11,
+                      borderColor: '#ef4444',
+                      color: '#ef4444',
+                    }}
+                    disabled={forcingId === (m.live_session.session_id || m.machine_id)}
+                    onClick={() => forceSignOut(m)}
+                    title="Release this login so the operator can sign in on another tablet"
+                  >
+                    {forcingId === (m.live_session.session_id || m.machine_id)
+                      ? 'Signing out…'
+                      : 'Force sign out'}
+                  </button>
                 </div>
               )}
             </div>
@@ -1112,6 +1161,20 @@ function AllocationPanel({ s, t, flash, onOpenDetail }) {
   );
 }
 
+function fmtHours(minsOrHours, { fromMins = true } = {}) {
+  if (minsOrHours == null || minsOrHours === '') return '—';
+  const hours = fromMins ? Number(minsOrHours) / 60 : Number(minsOrHours);
+  if (Number.isNaN(hours)) return '—';
+  return hours.toFixed(2);
+}
+
+function fmtOperatorCell(row) {
+  const code = row.operator_code || row.username || '—';
+  const name = row.operator_name;
+  if (name && name !== code) return `${code} — ${name}`;
+  return code;
+}
+
 function ReportsPanel({ s, t, flash }) {
   const [fromDate, setFromDate] = useState(() => {
     const d = new Date(); d.setDate(d.getDate() - 6); return d.toISOString().slice(0, 10);
@@ -1120,24 +1183,135 @@ function ReportsPanel({ s, t, flash }) {
   const [mode, setMode] = useState('attendance');
   const [rows, setRows] = useState([]);
   const [run, setRun] = useState(null);
+  const [machines, setMachines] = useState([]);
+  const [operators, setOperators] = useState([]);
+  const [filterMachineId, setFilterMachineId] = useState('');
+  const [filterOperatorId, setFilterOperatorId] = useState('');
+  const [sessOpFilter, setSessOpFilter] = useState('');
+  const [sessMachineFilter, setSessMachineFilter] = useState('');
+  const [downloading, setDownloading] = useState(false);
+
+  useEffect(() => {
+    Promise.all([
+      api.get('/api/machines/'),
+      api.get('/api/operators/', { params: { active_only: false, include_temporary: true, limit: 1000 } }),
+    ]).then(([mRes, oRes]) => {
+      setMachines(mRes.data || []);
+      setOperators(oRes.data?.operators || []);
+    }).catch(() => {});
+  }, []);
 
   const load = useCallback(async () => {
     try {
       if (mode === 'attendance') {
-        const r = await api.get('/api/operators/reports/attendance', { params: { from_date: fromDate, to_date: toDate } });
+        const r = await api.get('/api/operators/reports/attendance', {
+          params: { from_date: fromDate, to_date: toDate },
+        });
         setRows(r.data.rows || []);
         setRun(null);
       } else {
-        const r = await api.get('/api/operators/reports/machine-run', { params: { from_date: fromDate, to_date: toDate } });
+        const params = { from_date: fromDate, to_date: toDate };
+        if (filterMachineId) params.machine_id = Number(filterMachineId);
+        if (filterOperatorId) params.operator_id = Number(filterOperatorId);
+        const r = await api.get('/api/operators/reports/machine-run', { params });
         setRun(r.data);
         setRows([]);
+        setSessOpFilter('');
+        setSessMachineFilter('');
       }
     } catch (e) {
       flash(apiErrorMessage(e), false);
     }
-  }, [fromDate, toDate, mode]);
+  }, [fromDate, toDate, mode, filterMachineId, filterOperatorId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { load(); }, [load]);
+
+  const filteredSessions = (run?.sessions || []).filter((sess) => {
+    if (sessOpFilter) {
+      const oid = String(sess.operator_id || sess.user_id || '');
+      const code = String(sess.operator_code || sess.username || '').toLowerCase();
+      const name = String(sess.operator_name || '').toLowerCase();
+      const q = sessOpFilter.toLowerCase();
+      if (oid !== sessOpFilter && !code.includes(q) && !name.includes(q)) return false;
+    }
+    if (sessMachineFilter) {
+      const mid = String(sess.machine_id || '');
+      const mname = String(sess.machine_name || '').toLowerCase();
+      const q = sessMachineFilter.toLowerCase();
+      if (mid !== sessMachineFilter && !mname.includes(q)) return false;
+    }
+    return true;
+  });
+
+  const downloadExcel = async () => {
+    setDownloading(true);
+    try {
+      const XLSX = await import('xlsx');
+      const wb = XLSX.utils.book_new();
+      const rangeLabel = `${fromDate}_to_${toDate}`;
+
+      if (mode === 'attendance') {
+        const sheetRows = rows.map((r) => ({
+          Date: r.date,
+          Operator: r.operator_code || r.username || '',
+          'Operator Name': r.operator_name || '',
+          Shift: r.shift_id || '',
+          Machine: r.machine_name || '',
+          In: r.time_in ? new Date(r.time_in).toLocaleString() : '',
+          Out: r.time_out ? new Date(r.time_out).toLocaleString() : '',
+          Hours: r.duration_hours != null
+            ? r.duration_hours
+            : (r.duration_mins != null ? Number((r.duration_mins / 60).toFixed(2)) : ''),
+          Status: r.status || '',
+          Allocation: r.allocation_status || '',
+        }));
+        const ws = XLSX.utils.json_to_sheet(sheetRows.length ? sheetRows : [{ Date: 'No rows' }]);
+        XLSX.utils.book_append_sheet(wb, ws, 'Attendance');
+        XLSX.writeFile(wb, `attendance_report_${rangeLabel}.xlsx`);
+      } else {
+        const allocRows = (run?.allocations || []).map((a) => ({
+          Date: a.entry_date,
+          Shift: a.shift_id || '',
+          Machine: a.machine_name || a.machine_id || '',
+          Operator: a.operator_code || a.username || '',
+          'Operator Name': a.operator_name || '',
+          Status: a.status || '',
+          Source: a.source || '',
+          Ack: a.acknowledged_via || '',
+        }));
+        const sessRows = filteredSessions.map((sess) => ({
+          Operator: sess.operator_code || sess.username || '',
+          'Operator Name': sess.operator_name || '',
+          Machine: sess.machine_name || sess.machine_id || '',
+          Shift: sess.shift_id || '',
+          Started: sess.started_at ? new Date(sess.started_at).toLocaleString() : '',
+          Ended: sess.ended_at ? new Date(sess.ended_at).toLocaleString() : '',
+          Hours: sess.duration_hours != null
+            ? sess.duration_hours
+            : (sess.duration_mins != null ? Number((sess.duration_mins / 60).toFixed(2)) : ''),
+          Status: sess.status || '',
+        }));
+        XLSX.utils.book_append_sheet(
+          wb,
+          XLSX.utils.json_to_sheet(allocRows.length ? allocRows : [{ Date: 'No rows' }]),
+          'Allocations',
+        );
+        XLSX.utils.book_append_sheet(
+          wb,
+          XLSX.utils.json_to_sheet(sessRows.length ? sessRows : [{ Operator: 'No rows' }]),
+          'Sessions',
+        );
+        XLSX.writeFile(wb, `machine_runner_logs_${rangeLabel}.xlsx`);
+      }
+      flash('Excel report downloaded');
+    } catch (e) {
+      flash(e?.message || 'Excel download failed', false);
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const filterSelectStyle = { ...s.inp, minWidth: 160 };
 
   return (
     <div style={s.card}>
@@ -1154,10 +1328,51 @@ function ReportsPanel({ s, t, flash }) {
           <div style={s.label}>Report</div>
           <select style={s.inp} value={mode} onChange={(e) => setMode(e.target.value)}>
             <option value="attendance">Attendance</option>
-            <option value="machine">Who ran machine</option>
+            <option value="machine">Machine Runner Logs</option>
           </select>
         </div>
+        {mode === 'machine' && (
+          <>
+            <div>
+              <div style={s.label}>Machine</div>
+              <select
+                style={filterSelectStyle}
+                value={filterMachineId}
+                onChange={(e) => setFilterMachineId(e.target.value)}
+              >
+                <option value="">All machines</option>
+                {machines.map((m) => (
+                  <option key={m.id} value={m.id}>{m.name || `Machine ${m.id}`}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <div style={s.label}>Operator</div>
+              <select
+                style={filterSelectStyle}
+                value={filterOperatorId}
+                onChange={(e) => setFilterOperatorId(e.target.value)}
+              >
+                <option value="">All operators</option>
+                {operators.map((op) => (
+                  <option key={op.id || op.operator_id} value={op.id || op.operator_id}>
+                    {opLabel(op)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </>
+        )}
         <button type="button" style={s.outlineBtn} onClick={load}>Refresh</button>
+        <button
+          type="button"
+          style={s.submitBtn}
+          onClick={downloadExcel}
+          disabled={downloading || (mode === 'attendance' ? rows.length === 0 : !run)}
+          title="Download the current report as Excel"
+        >
+          {downloading ? 'Downloading…' : '⬇ Download Excel'}
+        </button>
       </div>
 
       {mode === 'attendance' && (
@@ -1165,7 +1380,7 @@ function ReportsPanel({ s, t, flash }) {
           <table style={s.table}>
             <thead>
               <tr>
-                {['Date', 'Operator', 'Shift', 'Machine', 'In', 'Out', 'Mins', 'Status', 'Allocation'].map((h) => (
+                {['Date', 'Operator', 'Shift', 'Machine', 'In', 'Out', 'Hours', 'Status', 'Allocation'].map((h) => (
                   <th key={h} style={s.th}>{h}</th>
                 ))}
               </tr>
@@ -1174,12 +1389,16 @@ function ReportsPanel({ s, t, flash }) {
               {rows.map((r, i) => (
                 <tr key={i}>
                   <td style={s.td}>{r.date}</td>
-                  <td style={s.td}>{r.username}</td>
+                  <td style={s.td}>{fmtOperatorCell(r)}</td>
                   <td style={s.td}>{r.shift_id || '—'}</td>
                   <td style={s.td}>{r.machine_name || '—'}</td>
                   <td style={s.td}>{fmtTime(r.time_in)}</td>
                   <td style={s.td}>{fmtTime(r.time_out)}</td>
-                  <td style={s.td}>{r.duration_mins ?? '—'}</td>
+                  <td style={s.td}>
+                    {r.duration_hours != null
+                      ? Number(r.duration_hours).toFixed(2)
+                      : fmtHours(r.duration_mins)}
+                  </td>
                   <td style={s.td}>{r.status}</td>
                   <td style={s.td}>{r.allocation_status || '—'}</td>
                 </tr>
@@ -1194,7 +1413,13 @@ function ReportsPanel({ s, t, flash }) {
 
       {mode === 'machine' && run && (
         <>
-          <h4 style={s.cardTitle}>Allocations</h4>
+          <h4 style={s.cardTitle}>Machine Runner Logs</h4>
+          <p style={{ color: t.textMuted, fontSize: 12, marginTop: -8, marginBottom: 12 }}>
+            Showing allocations for {fromDate} → {toDate}
+            {filterMachineId ? ` · machine filter applied` : ' · all machines'}
+            {filterOperatorId ? ` · operator filter applied` : ' · all operators'}.
+            Change filters above and click Refresh to reload.
+          </p>
           <div style={{ overflowX: 'auto', marginBottom: 20 }}>
             <table style={s.table}>
               <thead>
@@ -1210,36 +1435,78 @@ function ReportsPanel({ s, t, flash }) {
                     <td style={s.td}>{a.entry_date}</td>
                     <td style={s.td}>{a.shift_id}</td>
                     <td style={s.td}>{a.machine_name || a.machine_id}</td>
-                    <td style={s.td}>{a.username}</td>
+                    <td style={s.td}>{fmtOperatorCell(a)}</td>
                     <td style={{ ...s.td, color: statusColor(a.status, t), fontWeight: 600 }}>{a.status}</td>
                     <td style={s.td}>{a.source}</td>
                     <td style={s.td}>{a.acknowledged_via || '—'}</td>
                   </tr>
                 ))}
+                {(run.allocations || []).length === 0 && (
+                  <tr>
+                    <td colSpan={7} style={{ ...s.td, textAlign: 'center', color: t.textFaint }}>
+                      No allocation rows for this selection
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
+
           <h4 style={s.cardTitle}>Live / history sessions</h4>
           <div style={{ overflowX: 'auto' }}>
             <table style={s.table}>
               <thead>
                 <tr>
-                  {['Operator', 'Machine', 'Shift', 'Started', 'Ended', 'Status'].map((h) => (
-                    <th key={h} style={s.th}>{h}</th>
-                  ))}
+                  <th style={s.th}>
+                    <div>Operator</div>
+                    <input
+                      type="text"
+                      placeholder="Filter operator…"
+                      value={sessOpFilter}
+                      onChange={(e) => setSessOpFilter(e.target.value)}
+                      style={{ ...s.inp, minWidth: 120, marginTop: 6, padding: '4px 8px', fontSize: 12, width: '100%' }}
+                    />
+                  </th>
+                  <th style={s.th}>
+                    <div>Machine</div>
+                    <input
+                      type="text"
+                      placeholder="Filter machine…"
+                      value={sessMachineFilter}
+                      onChange={(e) => setSessMachineFilter(e.target.value)}
+                      style={{ ...s.inp, minWidth: 120, marginTop: 6, padding: '4px 8px', fontSize: 12, width: '100%' }}
+                    />
+                  </th>
+                  <th style={s.th}>Shift</th>
+                  <th style={s.th}>Started</th>
+                  <th style={s.th}>Ended</th>
+                  <th style={s.th}>Duration (hrs)</th>
+                  <th style={s.th}>Status</th>
                 </tr>
               </thead>
               <tbody>
-                {(run.sessions || []).map((sess) => (
+                {filteredSessions.map((sess) => (
                   <tr key={sess.id}>
-                    <td style={s.td}>{sess.username}</td>
+                    <td style={s.td}>{fmtOperatorCell(sess)}</td>
                     <td style={s.td}>{sess.machine_name || sess.machine_id}</td>
                     <td style={s.td}>{sess.shift_id || '—'}</td>
                     <td style={s.td}>{fmtTime(sess.started_at)}</td>
                     <td style={s.td}>{fmtTime(sess.ended_at)}</td>
+                    <td style={s.td}>
+                      {sess.duration_hours != null
+                        ? Number(sess.duration_hours).toFixed(2)
+                        : fmtHours(sess.duration_mins)}
+                    </td>
                     <td style={s.td}>{sess.status}</td>
                   </tr>
                 ))}
+                {filteredSessions.length === 0 && (
+                  <tr>
+                    <td colSpan={7} style={{ ...s.td, textAlign: 'center', color: t.textFaint }}>
+                      No sessions for this selection
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>

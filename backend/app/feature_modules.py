@@ -30,6 +30,12 @@ __all__ = [
     "feature_modules_payload",
 ]
 
+# Feature ids that once shipped without a `roles` list in feature-registry.json.
+# default_feature_role_access() then produced an all-false map that hid the menu
+# item and blocked its route for every role. Any stored all-false entry for these
+# ids is that artifact, so defaults are re-applied instead (one-time self-heal).
+_ROLE_ACCESS_REPAIR_IDS = frozenset({"qc.work_instructions"})
+
 
 def default_feature_modules() -> dict[str, bool]:
     return {item_id: True for item_id in all_feature_item_ids()}
@@ -94,6 +100,13 @@ def _normalize_role_access(stored: dict[str, Any] | None) -> dict[str, dict[str,
         return out
     for feature_id, roles_map in stored.items():
         if feature_id not in out or not isinstance(roles_map, dict):
+            continue
+        if feature_id in _ROLE_ACCESS_REPAIR_IDS and not any(
+            bool(v) for v in roles_map.values()
+        ):
+            # Never a real admin choice: the item had no User Management row, so
+            # the all-false map came from the missing registry `roles` list and
+            # was persisted wholesale by set_feature_role_access().
             continue
         merged = dict(out[feature_id])
         for role, enabled in roles_map.items():

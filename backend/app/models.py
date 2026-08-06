@@ -125,6 +125,8 @@ class Station(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(100), unique=True, nullable=False)
     display_name = Column(String(100), nullable=False)
+    # Soft-disable: 1 = active in overviews / selectors, 0 = hidden operationally
+    is_enabled = Column(Integer, default=1, nullable=False)
     created_at = Column(TIMESTAMP, server_default="CURRENT_TIMESTAMP")
 
 # Backward import alias during transition
@@ -146,6 +148,8 @@ class Machine(Base):
     plc_source = Column(Enum("manual", "mqtt", "modbus", "opcua"), default="manual")
     plc_endpoint = Column(String(255))
     plc_topic = Column(String(255))
+    # Soft-disable: 1 = active in overviews / selectors, 0 = hidden operationally
+    is_enabled = Column(Integer, default=1, nullable=False)
 
 class OEEEntry(Base):
     __tablename__ = "oee_entries"
@@ -228,8 +232,16 @@ class WorkOrder(Base):
     target_qty = Column(Integer, nullable=False)
     start_date = Column(Date)
     end_date = Column(Date)
-    status = Column(Enum("draft", "in_progress", "completed", "cancelled"), default="draft")
+    # closed = schedule ended with leftover qty (outstanding); not the same as completed
+    status = Column(
+        Enum("draft", "in_progress", "completed", "cancelled", "closed"),
+        default="draft",
+    )
     spares_tools_json = Column(Text)
+    outstanding_qty = Column(Integer, default=0)
+    # none | available | consumed | discarded
+    outstanding_status = Column(String(20), default="none")
+    consumed_by_wo_id = Column(Integer, ForeignKey("work_orders.id"), nullable=True)
     created_by = Column(Integer, ForeignKey("users.id"))
     created_at = Column(TIMESTAMP)
     updated_at = Column(TIMESTAMP)
@@ -251,7 +263,7 @@ class ProductionPlan(Base):
     planned_qty = Column(Integer, nullable=False)
     actual_qty = Column(Integer, default=0)
     priority = Column(Integer, default=1)
-    status = Column(Enum("pending","running","completed","paused","cancelled"), default="pending")
+    status = Column(Enum("pending","running","completed","paused","cancelled","aborted","incomplete"), default="pending")
     plan_type = Column(Enum("scheduled","urgent","trial"), default="scheduled")
     notes = Column(Text)
     created_by = Column(Integer, ForeignKey("users.id"))

@@ -106,6 +106,8 @@ cmd_preflight() {
 cmd_restart() {
   ensure_deploy_config
   print_banner
+  log_step "[config] Host mode (HTTP / HTTPS)..."
+  prompt_host_mode
   bash "$SCRIPTS_DIR/install-deps.sh"
   ensure_backend_env
   configure_frontend_env
@@ -128,6 +130,9 @@ print_urls() {
 cmd_start() {
   print_banner
   ensure_deploy_config
+
+  log_step "[config] Host mode (HTTP / HTTPS)..."
+  prompt_host_mode
 
   bash "$SCRIPTS_DIR/install-deps.sh"
   ensure_backend_env

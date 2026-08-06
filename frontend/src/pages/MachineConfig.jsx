@@ -5,7 +5,7 @@ import { useTheme } from '../context/ThemeContext';
 import { pageClass } from '../themes/tileHelpers';
 import { useConfig } from '../context/ConfigContext';
 import { useAuth } from '../context/AuthContext';
-import { getFactoryLines } from '../utils/factoryHelpers';
+import { getLineForStation } from '../utils/factoryHelpers';
 import PageHeader from '../components/PageHeader';
 
 const MACHINE_TYPES = ['CNC', 'VMC', 'Lathe', 'Grinding', 'Drilling', 'Milling', 'Inspection', 'Other'];
@@ -22,7 +22,6 @@ export default function MachineConfig() {
   const { config } = useConfig();
   const { user } = useAuth();
   const canEdit = ['admin', 'superadmin'].includes(user?.role);
-  const factoryLines = useMemo(() => getFactoryLines(config), [config]);
   const [stations, setStations] = useState([]);
   const [machines, setMachines] = useState([]);
   const [msg, setMsg] = useState('');
@@ -36,6 +35,20 @@ export default function MachineConfig() {
   const [imageFile, setImageFile] = useState(null);
   const [imagePreview, setImagePreview] = useState(null);
   const fileRef = useRef();
+
+  const mappedLine = useMemo(
+    () => getLineForStation(config, machineForm.station_id),
+    [config, machineForm.station_id],
+  );
+
+  const applyStation = (stationId) => {
+    const line = getLineForStation(config, stationId);
+    setMachineForm((p) => ({
+      ...p,
+      station_id: stationId,
+      location: line?.label || '',
+    }));
+  };
 
   const fetchStations = useCallback(async () => {
     try {
@@ -73,10 +86,13 @@ export default function MachineConfig() {
   };
 
   const openEditMachine = (m) => {
+    const line = getLineForStation(config, m.station_id);
     setMachineForm({
       name: m.name, station_id: m.station_id, machine_type: m.machine_type || 'CNC',
       make: m.make || '', model_no: m.model_no || '', tonnage: m.tonnage || '',
-      features: m.features || '', location: m.location || ''
+      features: m.features || '',
+      // Prefer live Factory Setup mapping; keep stored value only if station is unmapped
+      location: line?.label || m.location || '',
     });
     setEditMachineId(m.id);
     setImagePreview(m.image_url ? assetUrl(m.image_url) : null);
@@ -131,6 +147,17 @@ export default function MachineConfig() {
     try {
       await api.delete(`/api/machines/${id}`);
       setMsg('✅ Machine deleted');
+      fetchMachines();
+    } catch (err) {
+      setMsg('❌ ' + (err.response?.data?.detail || err.message));
+    }
+  };
+
+  const toggleMachineEnabled = async (m) => {
+    const next = !(m.is_enabled !== false && m.is_enabled !== 0);
+    try {
+      await api.post(`/api/machines/${m.id}/enabled`, { is_enabled: next });
+      setMsg(next ? `✅ "${m.name}" enabled` : `✅ "${m.name}" disabled (hidden from overviews)`);
       fetchMachines();
     } catch (err) {
       setMsg('❌ ' + (err.response?.data?.detail || err.message));
@@ -196,9 +223,16 @@ export default function MachineConfig() {
                   </CF>
                   <CF label="Station *" t={t}>
                     <select style={s.inp} value={machineForm.station_id} required
-                      onChange={e => setMachineForm(p => ({ ...p, station_id: e.target.value }))}>
+                      onChange={e => applyStation(e.target.value)}>
                       <option value="">Select a station</option>
-                      {stations.map(s => <option key={s.id} value={s.id}>{s.display_name}</option>)}
+                      {stations.map(st => {
+                        const en = st.is_enabled !== false && st.is_enabled !== 0;
+                        return (
+                          <option key={st.id} value={st.id}>
+                            {st.display_name}{en ? '' : ' (disabled)'}
+                          </option>
+                        );
+                      })}
                     </select>
                   </CF>
                   <CF label="Machine Type *" t={t}>
@@ -220,18 +254,31 @@ export default function MachineConfig() {
                       onChange={e => setMachineForm(p => ({ ...p, tonnage: e.target.value }))} />
                   </CF>
                   <CF label="Location / Line" t={t}>
-                    {factoryLines.length > 0 ? (
-                      <select style={s.inp} value={machineForm.location}
-                        onChange={e => setMachineForm(p => ({ ...p, location: e.target.value }))}>
-                        <option value="">Select line from Factory Setup</option>
-                        {factoryLines.map(line => (
-                          <option key={line.id} value={line.label}>{line.label}</option>
-                        ))}
-                      </select>
-                    ) : (
-                      <input style={s.inp} value={machineForm.location}
-                        placeholder="Configure lines in Factory Setup first"
-                        onChange={e => setMachineForm(p => ({ ...p, location: e.target.value }))} />
+                    <input
+                      style={{
+                        ...s.inp,
+                        background: t.surface2 || t.inp,
+                        color: machineForm.location ? t.text : (t.textFaint || t.textMuted),
+                        cursor: 'default',
+                      }}
+                      value={machineForm.location}
+                      placeholder={
+                        machineForm.station_id
+                          ? 'Not mapped — assign this station to a line in Factory Setup'
+                          : 'Select a station first'
+                      }
+                      readOnly
+                      title="Set automatically from Factory Setup (station → line)"
+                    />
+                    {machineForm.station_id && !machineForm.location && (
+                      <div style={{ fontSize: 11, color: '#f59e0b', marginTop: 4 }}>
+                        This station is not assigned to a line in Factory Setup.
+                      </div>
+                    )}
+                    {mappedLine && mappedLine.enabled === false && machineForm.location && (
+                      <div style={{ fontSize: 11, color: '#f59e0b', marginTop: 4 }}>
+                        Mapped line is disabled in Factory Setup.
+                      </div>
                     )}
                   </CF>
                   <CF label="Features" t={t} wide>
@@ -293,20 +340,21 @@ export default function MachineConfig() {
               <table style={s.table}>
                 <thead>
                   <tr>
-                    {['ID','Image','Machine','Station','Type','Make / Model','Tonnage','Location','Status','Actions'].map(h =>
+                    {['ID','Image','Machine','Station','Type','Make / Model','Tonnage','Location','Status','Active','Actions'].map(h =>
                       <th key={h} style={s.th}>{h}</th>)}
                   </tr>
                 </thead>
                 <tbody>
                   {machines.length === 0 && (
-                    <tr><td colSpan={10} style={{ ...s.td, textAlign: 'center', color: t.textFaint, padding: 32 }}>
+                    <tr><td colSpan={11} style={{ ...s.td, textAlign: 'center', color: t.textFaint, padding: 32 }}>
                       No machines configured yet. Click "+ Add Machine" to start.
                     </td></tr>
                   )}
                   {machines.map(m => {
                     const sc = STATUS_CFG[m.status] || STATUS_CFG.idle;
+                    const enabled = m.is_enabled !== false && m.is_enabled !== 0;
                     return (
-                      <tr key={m.id}>
+                      <tr key={m.id} style={{ opacity: enabled ? 1 : 0.6 }}>
                         <td style={s.td}>
                           <span
                             title="Use this Machine ID on the operator tablet"
@@ -355,9 +403,24 @@ export default function MachineConfig() {
                           </span>
                         </td>
                         <td style={s.td}>
+                          <span style={{
+                            padding: '3px 10px', borderRadius: 10, fontSize: 12, fontWeight: 700,
+                            background: enabled ? '#10b98122' : '#64748b22',
+                            color: enabled ? '#10b981' : '#94a3b8',
+                          }}>
+                            {enabled ? 'Enabled' : 'Disabled'}
+                          </span>
+                        </td>
+                        <td style={s.td}>
                           {canEdit ? (
-                            <div style={{ display: 'flex', gap: 6 }}>
+                            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                               <button style={{ ...s.miniBtn, background: t.accent }} onClick={() => openEditMachine(m)}>✏ Edit</button>
+                              <button
+                                style={{ ...s.miniBtn, background: enabled ? '#64748b' : '#10b981' }}
+                                onClick={() => toggleMachineEnabled(m)}
+                              >
+                                {enabled ? 'Disable' : 'Enable'}
+                              </button>
                               <button style={{ ...s.miniBtn, background: '#ef4444' }} onClick={() => deleteMachine(m.id)}>🗑</button>
                             </div>
                           ) : (
