@@ -506,9 +506,9 @@ export default function Dashboard() {
       {mergedSummary && (
         <div style={s.kpiRow}>
           {[
-            { label: 'Availability (AR)', value: `${Math.round(safeNum(mergedSummary.avg_ar))}%`, color: '#0ea5e9' },
-            { label: 'Performance (PR)', value: `${Math.round(safeNum(mergedSummary.avg_pr))}%`, color: '#8b5cf6' },
-            { label: 'Quality (QR)', value: `${Math.round(safeNum(mergedSummary.avg_qr))}%`, color: '#10b981' },
+            { label: 'Availability (AR)', value: `${Math.round(Math.min(100, safeNum(mergedSummary.avg_ar)))}%`, color: '#0ea5e9' },
+            { label: 'Performance (PR)', value: `${Math.round(Math.min(100, safeNum(mergedSummary.avg_pr)))}%`, color: '#8b5cf6' },
+            { label: 'Quality (QR)', value: `${Math.round(Math.min(100, safeNum(mergedSummary.avg_qr)))}%`, color: '#10b981' },
             { label: 'OEE', value: `${Math.round(safeNum(mergedSummary.avg_oee))}%`,
               color: safeNum(mergedSummary.avg_oee) >= 85 ? '#10b981' : safeNum(mergedSummary.avg_oee) >= 65 ? '#f59e0b' : '#ef4444' },
             { label: 'Total Produced', value: mergedSummary.total_actual ?? 0, color: '#64748b' },
@@ -547,7 +547,7 @@ export default function Dashboard() {
                   { key: 'avg_qr',  label: 'QR',  color: QR_COLOR },
                   { key: 'avg_oee', label: 'OEE', color: safeNum(mergedSummary.avg_oee) >= 85 ? '#10b981' : safeNum(mergedSummary.avg_oee) >= 65 ? '#f59e0b' : '#ef4444' },
                 ].map(({ key, label, color }) => {
-                  const val = safeNum(mergedSummary[key]);
+                  const val = Math.min(100, safeNum(mergedSummary[key]));
                   return (
                     <div key={label} style={s.donutWrap}>
                       <Donut3D key={`${label}-${val}`} value={val} color={color} trackColor={t.surface2} />
@@ -807,8 +807,8 @@ export default function Dashboard() {
                   {/* OEE Gauge */}
                   <div style={{ padding: '16px 24px', textAlign: 'center', borderBottom: `1px solid ${t.border}` }}>
                     <div style={{ fontSize: 12, color: t.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginBottom: 4 }}>Overall Equipment Effectiveness</div>
-                    <div style={{ fontSize: 48, fontWeight: 800, color: k.oee >= 85 ? '#10b981' : k.oee >= 60 ? '#f59e0b' : '#ef4444' }}>
-                      {Math.round(k.oee)}%
+                    <div style={{ fontSize: 48, fontWeight: 800, color: Math.min(100, k.oee) >= 85 ? '#10b981' : Math.min(100, k.oee) >= 60 ? '#f59e0b' : '#ef4444' }}>
+                      {Math.round(Math.min(100, k.oee))}%
                     </div>
                     <div style={{ fontSize: 11, color: t.textMuted }}>AR × PR × QR</div>
                   </div>
@@ -825,7 +825,7 @@ export default function Dashboard() {
                     ].map(({ label, value, color, icon }) => (
                       <div key={label} style={{ background: t.surface, padding: '14px 16px', textAlign: 'center' }}>
                         <div style={{ fontSize: 20, marginBottom: 2 }}>{icon}</div>
-                        <div style={{ fontSize: 24, fontWeight: 700, color }}>{Math.round(value)}%</div>
+                        <div style={{ fontSize: 24, fontWeight: 700, color }}>{Math.round(Math.min(100, value))}%</div>
                         <div style={{ fontSize: 11, color: t.textMuted, marginTop: 2 }}>{label}</div>
                       </div>
                     ))}

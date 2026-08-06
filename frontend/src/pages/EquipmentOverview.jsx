@@ -416,7 +416,7 @@ export default function EquipmentOverview() {
                       <div key={item.label} style={s.kpiCell}>
                         <div style={{ fontSize: 16 }}>{item.icon}</div>
                         <div style={{ fontSize: 20, fontWeight: 800, color: item.color }}>
-                          {Math.round(Number(item.value) || 0)}%
+                          {Math.round(Math.min(100, Number(item.value) || 0))}%
                         </div>
                         <div style={{ fontSize: 10, color: t.textDim }}>{item.label}</div>
                       </div>
