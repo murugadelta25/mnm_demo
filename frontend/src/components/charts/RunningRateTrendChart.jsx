@@ -4,7 +4,7 @@ import {
 } from 'recharts';
 import { useMemo } from 'react';
 
-export default function RunningRateTrendChart({ data, theme, onLineClick }) {
+export default function RunningRateTrendChart({ data, theme, onLineClick, height = 240 }) {
   const isDark = theme?.isDark !== false && theme?.id !== 'light';
   const textColor = theme?.text || (isDark ? '#e2e8f0' : '#1e293b');
   const dimColor = theme?.textDim || (isDark ? '#94a3b8' : '#64748b');
@@ -54,7 +54,7 @@ export default function RunningRateTrendChart({ data, theme, onLineClick }) {
   };
 
   return (
-    <ResponsiveContainer width="100%" height="100%">
+    <ResponsiveContainer width="100%" height={height} minWidth={0}>
       <LineChart data={chartData} margin={{ top: 8, right: 24, bottom: 4, left: 0 }}>
         <CartesianGrid strokeDasharray="3 4" stroke={gridColor} strokeOpacity={0.7} />
         <XAxis
