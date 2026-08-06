@@ -855,8 +855,8 @@ def equipment_overview(db: Session = Depends(get_db), _=Depends(get_current_user
     cfg = _load_kpi_config(db)
     now = now_ist()
     today = now.date()
-    # Resolve current enabled shift once for fleet OEE
-    shift_id = _resolve_active_shift_id(cfg, now)
+    # Fallback shift when a machine has no plan
+    active_shift_id = _resolve_active_shift_id(cfg, now)
 
     orm_by_id = {
         m.id: m
@@ -890,14 +890,16 @@ def equipment_overview(db: Session = Depends(get_db), _=Depends(get_current_user
         row["line_id"] = lid
         row["line_name"] = line["name"] if line else None
         row["factory_name"] = line["factory_name"] if line else ""
-        # Live OEE for current shift (best-effort; omit on failure)
+        # Use the machine's best plan shift; fall back to active shift
+        plan = (m.get("plan") or {})
+        shift_id = (plan.get("shift") or "").strip() or active_shift_id
         oee_val = None
         orm = orm_by_id.get(m["id"])
         if orm and shift_id:
             try:
                 kpi = _compute_kpi(db, orm, today, shift_id, cfg)
                 if kpi is not None:
-                    oee_val = round(float(kpi.get("oee") or 0))
+                    oee_val = round(float((kpi.get("kpi") or {}).get("oee") or 0))
             except Exception:
                 oee_val = None
         row["oee"] = oee_val
