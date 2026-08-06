@@ -21,6 +21,21 @@ function fmtSec(sec) {
   return `${m}m ${s}s`;
 }
 
+// Renders a value as two stacked lines: "355s" on top, "5m 55s" below
+function CtValue({ sec, color, fontSize = 15 }) {
+  const n = Math.max(0, Number(sec) || 0);
+  const secs = `${n.toFixed(n % 1 ? 1 : 0)}s`;
+  const m = Math.floor(n / 60);
+  const s = Math.round(n % 60);
+  const mins = m > 0 ? `${m}m ${s}s` : null;
+  return (
+    <div style={{ lineHeight: 1.25 }}>
+      <div style={{ fontWeight: 800, color, fontSize }}>{secs}</div>
+      {mins && <div style={{ fontWeight: 600, color, fontSize: fontSize - 2, opacity: 0.75 }}>{mins}</div>}
+    </div>
+  );
+}
+
 function pctColor(v) {
   const n = Number(v) || 0;
   if (n >= 85) return '#10b981';
@@ -298,21 +313,15 @@ export default function EquipmentOverview() {
                       <div style={s.ctTriple}>
                         <div>
                           <div style={s.dlLabel}>Machining / Op time</div>
-                          <div style={{ fontWeight: 700, color: '#34d399' }}>
-                            {setMach > 0 ? `${setMach}s` : '—'}
-                          </div>
+                          {setMach > 0 ? <CtValue sec={setMach} color="#34d399" /> : <span style={{ color: t.textDim }}>—</span>}
                         </div>
                         <div>
                           <div style={s.dlLabel}>Loading &amp; Unloading</div>
-                          <div style={{ fontWeight: 700, color: '#fbbf24' }}>
-                            {setLoad > 0 ? `${setLoad}s` : '—'}
-                          </div>
+                          {setLoad > 0 ? <CtValue sec={setLoad} color="#fbbf24" /> : <span style={{ color: t.textDim }}>—</span>}
                         </div>
                         <div style={s.ctCorner}>
-                          <div style={s.dlLabel}>CT in S</div>
-                          <div style={s.ctWhite}>
-                            {setCt > 0 ? `${setCt.toFixed(setCt % 1 ? 1 : 0)}s` : '—'}
-                          </div>
+                          <div style={s.dlLabel}>CT</div>
+                          {setCt > 0 ? <CtValue sec={setCt} color={isDark ? '#ffffff' : '#0f172a'} fontSize={16} /> : <span style={{ color: t.textDim }}>—</span>}
                         </div>
                       </div>
                     </div>
@@ -322,23 +331,14 @@ export default function EquipmentOverview() {
                       <div style={s.ctTriple}>
                         <div>
                           <div style={s.dlLabel}>Machining (live)</div>
-                          <div style={{ fontWeight: 800, color: '#34d399', fontSize: 16 }}>
-                            {fmtSec(liveMach)}
-                          </div>
+                          <CtValue sec={liveMach} color="#34d399" fontSize={15} />
                           <div style={{ fontSize: 11, color: t.textDim, marginTop: 2 }}>
                             Shift total: {shiftMachMin} min
                           </div>
                         </div>
                         <div>
                           <div style={s.dlLabel}>Loading / Unloading (live)</div>
-                          <div style={{
-                            fontWeight: 800,
-                            color: idleBeyondLu ? t.textDim : '#fbbf24',
-                            fontSize: 16,
-                          }}
-                          >
-                            {fmtSec(liveLoad)}
-                          </div>
+                          <CtValue sec={liveLoad} color={idleBeyondLu ? t.textDim : '#fbbf24'} fontSize={15} />
                           <div style={{ fontSize: 11, color: t.textDim, marginTop: 2 }}>
                             {idleBeyondLu
                               ? `Idle beyond L&U threshold (${fmtSec(live.ld_unld_threshold_sec || setLoad)})`
@@ -346,8 +346,8 @@ export default function EquipmentOverview() {
                           </div>
                         </div>
                         <div style={s.ctCorner}>
-                          <div style={s.dlLabel}>CT in S</div>
-                          <div style={s.ctWhite}>{fmtSec(liveCycle)}</div>
+                          <div style={s.dlLabel}>CT</div>
+                          <CtValue sec={liveCycle} color={isDark ? '#ffffff' : '#0f172a'} fontSize={16} />
                         </div>
                       </div>
                     </div>
@@ -357,21 +357,15 @@ export default function EquipmentOverview() {
                       <div style={s.ctTriple}>
                         <div>
                           <div style={s.dlLabel}>Avg machining</div>
-                          <div style={{ fontWeight: 800, color: '#34d399', fontSize: 15 }}>
-                            {avgMach > 0 ? fmtSec(avgMach) : '—'}
-                          </div>
+                          {avgMach > 0 ? <CtValue sec={avgMach} color="#34d399" fontSize={15} /> : <span style={{ color: t.textDim }}>—</span>}
                         </div>
                         <div>
                           <div style={s.dlLabel}>Avg loading / unloading</div>
-                          <div style={{ fontWeight: 800, color: '#fbbf24', fontSize: 15 }}>
-                            {avgLoad > 0 ? fmtSec(avgLoad) : '—'}
-                          </div>
+                          {avgLoad > 0 ? <CtValue sec={avgLoad} color="#fbbf24" fontSize={15} /> : <span style={{ color: t.textDim }}>—</span>}
                         </div>
                         <div style={s.ctCorner}>
-                          <div style={s.dlLabel}>CT in S</div>
-                          <div style={s.ctWhite}>
-                            {avgCycle > 0 ? fmtSec(avgCycle) : '—'}
-                          </div>
+                          <div style={s.dlLabel}>CT</div>
+                          {avgCycle > 0 ? <CtValue sec={avgCycle} color={isDark ? '#ffffff' : '#0f172a'} fontSize={16} /> : <span style={{ color: t.textDim }}>—</span>}
                         </div>
                       </div>
                     </div>
