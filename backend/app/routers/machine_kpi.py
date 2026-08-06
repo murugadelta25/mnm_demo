@@ -58,7 +58,7 @@ def _compute_kpi(
         ProductionPlan.machine_id == machine.id,
         ProductionPlan.plan_date == entry_date,
         ProductionPlan.shift == shift_id,
-        ProductionPlan.status.in_(['running', 'completed', 'paused', 'pending']),
+        ProductionPlan.status.in_(['running', 'completed', 'paused', 'pending', 'incomplete', 'aborted']),
     ).all()
 
     oee_entries = db.query(OEEEntry).filter(
@@ -138,6 +138,22 @@ def _compute_kpi(
     expected_qty = int(available_time_min * 60 / ct) if ct > 0 else 0
     theoretical_qty = int(shift_total_min * 60 / ct) if ct > 0 else 0
 
+    # MTTR / MTBF from breakdown/alarm segments
+    _FAILURE_STATES = {'breakdown', 'alarm'}
+    failure_sec = 0.0
+    failure_events = 0
+    prev_state = None
+    for seg in segments:
+        st = seg.get('state') or 'idle'
+        sec = float(seg.get('seconds') or 0)
+        if st in _FAILURE_STATES:
+            failure_sec += sec
+            if prev_state not in _FAILURE_STATES:
+                failure_events += 1
+        prev_state = st
+    mttr_min = round((failure_sec / 60.0) / failure_events, 1) if failure_events else None
+    mtbf_min = round(running_min / failure_events, 1) if failure_events else None
+
     # --- KPI Calculations ---
     # AR = Operating Time / Available Time × 100
     ar = min(round(operating_time_min / available_time_min * 100, 2), 100.0) if available_time_min > 0 else 0.0
@@ -192,9 +208,12 @@ def _compute_kpi(
         'loading_unloading_sec': loading_unloading_sec,
         'machining_time_min': round(running_min, 1),
         'loading_unloading_time_min': round(ld_unld_min, 1),
+        'uptime_min': round(running_min, 1),
         'available_time_min': round(available_time_min, 1),
         'operating_time_min': round(operating_time_min, 1),
         'downtime_min': round(downtime_min, 1),
+        'mttr_min': mttr_min,
+        'mtbf_min': mtbf_min,
         'actual_production_time_min': round(actual_production_time_min, 1),
         'planned_qty': planned_qty,
         'actual_qty': actual_qty,

@@ -417,26 +417,66 @@ def _status_counts(items: list[dict]) -> dict[str, Any]:
     return counts
 
 
-def _today_plans_by_machine(db: Session) -> dict[int, dict]:
-    today = now_ist().date()
+def _today_plans_by_machine(db: Session, cfg: Optional[dict] = None) -> dict[int, dict]:
+    """Return today's best plan per machine with real-time actual_qty from status log segments."""
+    if cfg is None:
+        from .config import _load_config as _lc
+        cfg = _lc(db)
+    now = now_ist()
+    shift_id = _resolve_active_shift_id(cfg, now)
+    sh_def, sh_start, eff_end, _ = _current_shift_window(cfg)
+    threshold_ratio = float((cfg.get("hourly_output") or {}).get("running_part_threshold_pct", 30)) / 100.0
+    ld_unld_max = int((cfg.get("hourly_output") or {}).get("ld_unld_max_sec", 60))
+    micro_gap = int((cfg.get("hourly_output") or {}).get("micro_gap_sec", 15))
+
+    today = now.date()
     plans = (
         db.query(ProductionPlan)
         .filter(
             ProductionPlan.plan_date == today,
-            ProductionPlan.status.in_(("running", "paused", "pending")),
+            ProductionPlan.status.in_(("running", "paused", "pending", "completed", "incomplete", "aborted")),
         )
         .order_by(ProductionPlan.priority, ProductionPlan.id)
         .all()
     )
-    out: dict[int, dict] = {}
+    # Priority: running > paused > completed > incomplete > aborted > pending
+    # Prefer current-shift plans; within same shift prefer by status rank
+    _STATUS_RANK = {"running": 0, "paused": 1, "completed": 2, "incomplete": 3, "aborted": 4, "pending": 5}
+    best: dict[int, Any] = {}
     for p in plans:
-        if not p.machine_id or p.machine_id in out:
+        if not p.machine_id:
             continue
-        out[p.machine_id] = {
+        cur = best.get(p.machine_id)
+        if cur is None:
+            best[p.machine_id] = p
+        elif p.shift == shift_id and cur.shift != shift_id:
+            best[p.machine_id] = p
+        elif p.shift != shift_id and cur.shift == shift_id:
+            pass
+        elif _STATUS_RANK.get(p.status, 9) < _STATUS_RANK.get(cur.status, 9):
+            best[p.machine_id] = p
+        elif _STATUS_RANK.get(p.status, 9) == _STATUS_RANK.get(cur.status, 9) and p.id > cur.id:
+            best[p.machine_id] = p
+
+    out: dict[int, dict] = {}
+    for machine_id, p in best.items():
+        rt_actual = p.actual_qty or 0
+        # For active shift plans, compute real-time count from status segments
+        if sh_def and p.shift == shift_id and p.status in ("running", "paused", "incomplete"):
+            try:
+                from .hourly_output import _build_status_segments, _countable_running_segments
+                ct = float(p.process_time or 0) + float(p.loading_unloading or 0)
+                segs = _build_status_segments(db, machine_id, sh_start, eff_end, None, ld_unld_max, micro_gap)
+                running_segs = [s for s in segs if s.get("state") == "running" and not s.get("prior")]
+                rt_count = _countable_running_segments(running_segs, ct, threshold_ratio) if ct > 0 else len(running_segs)
+                rt_actual = max(rt_actual, rt_count)
+            except Exception:
+                pass
+        out[machine_id] = {
             "id": p.id,
             "model_variant": p.model_variant,
             "planned_qty": p.planned_qty,
-            "actual_qty": p.actual_qty or 0,
+            "actual_qty": rt_actual,
             "status": p.status,
             "shift": p.shift,
             "work_order_id": p.work_order_id,
@@ -487,7 +527,7 @@ def _overview_payload(db: Session) -> dict:
         if int(getattr(m, "is_enabled", 1) or 0) != 0
         and (m.station_id in enabled_station_ids or m.station_id is None)
     ]
-    plan_map = _today_plans_by_machine(db)
+    plan_map = _today_plans_by_machine(db, cfg)
     items = [_machine_payload(m, db, stations, plan_map) for m in machines]
     machine_by_id = {m.id: m for m in machines}
     counts = _status_counts(items)

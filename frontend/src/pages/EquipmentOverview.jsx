@@ -433,8 +433,11 @@ export default function EquipmentOverview() {
                     <tbody>
                       {[
                         ['Available Time', `${kpiPanel.available_time_min ?? 0} min`],
+                        ['Uptime (Running)', `${kpiPanel.uptime_min ?? kpiPanel.machining_time_min ?? 0} min`],
                         ['Operating Time', `${kpiPanel.operating_time_min ?? 0} min`],
                         ['Downtime', `${kpiPanel.downtime_min ?? 0} min`],
+                        ['MTTR', kpiPanel.mttr_min != null ? `${kpiPanel.mttr_min} min` : '—'],
+                        ['MTBF', kpiPanel.mtbf_min != null ? `${kpiPanel.mtbf_min} min` : '—'],
                         ['Actual Production Time', `${kpiPanel.actual_production_time_min ?? 0} min`],
                         ['Planned Qty', kpiPanel.planned_qty ?? plan.planned_qty ?? 0],
                         ['Expected Qty', kpiPanel.expected_qty ?? 0],
