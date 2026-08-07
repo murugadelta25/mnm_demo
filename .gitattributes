@@ -1,0 +1,3 @@
+# Keep shell scripts LF so Ubuntu chmod/run works after Windows edits
+*.sh text eol=lf
+scripts/**/*.sh text eol=lf

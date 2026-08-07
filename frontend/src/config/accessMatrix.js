@@ -44,6 +44,12 @@ export const ACCESS_MATRIX = [
     roles: { superadmin: true, admin: true, supervisor: true, operator: false, maintenance: true, quality: false },
   },
   {
+    id: 'production.work_orders',
+    feature: 'Work Orders',
+    registryId: 'production.work_orders',
+    roles: { superadmin: true, admin: true, supervisor: true, operator: true, maintenance: false, quality: false },
+  },
+  {
     id: 'production.planning',
     feature: 'Production Planning',
     registryId: 'production.planning',

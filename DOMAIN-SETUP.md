@@ -8,7 +8,7 @@ EAP PMS is configured to open at a **fixed standard URL**:
 | Mode | URL |
 |------|-----|
 | HTTP (default) | **http://din.eappms** |
-| HTTPS (optional) | **https://din.eappms** — type `true` when `run.ps1` / `run.sh` asks |
+| HTTPS (optional) | **https://din.eappms** — type `t` / `true` when `run.ps1` / `run.sh` asks |
 
 Running **`run.ps1`** (Windows) or **`./run.sh`** (Ubuntu) automatically:
 
@@ -203,7 +203,7 @@ http://<ipc-server-ip>
 .\run.ps1
 ```
 
-Open: **http://din.eappms** (default). Type `true` at the HTTPS prompt if you want `https://din.eappms`.
+Open: **http://din.eappms** (default). Type `t` / `true` at the HTTPS prompt if you want `https://din.eappms`.
 
 ### Ubuntu
 
@@ -212,7 +212,7 @@ chmod +x run.sh scripts/*.sh
 ./run.sh
 ```
 
-Open: **http://din.eappms** (default). Type `true` at the HTTPS prompt if you want `https://din.eappms`.
+Open: **http://din.eappms** (default). Type `t` / `true` at the HTTPS prompt if you want `https://din.eappms`.
 
 ---
 
@@ -274,21 +274,21 @@ After DNS propagates, every PC on the network opens **http://din.eappms** withou
 HTTPS is **optional**. On each `run.ps1` / `run.sh` start you are asked:
 
 ```text
-Enable HTTPS? Type true for HTTPS, or false/Enter for HTTP [false]:
+Enable HTTPS? Type t/true for HTTPS, or f/false/Enter for HTTP [f]:
 ```
 
-- **Enter / `false`** → HTTP (`http://din.eappms`) — best for factory LAN
-- **`true`** → HTTPS (`https://din.eappms`) — self-signed cert auto-created under `deploy/ssl/`
+- **Enter / `f` / `false`** → HTTP (`http://din.eappms`) — best for factory LAN
+- **`t` / `true`** → HTTPS (`https://din.eappms`) — self-signed cert auto-created under `deploy/ssl/`
 
 Skip the prompt with an environment variable:
 
 ```powershell
-$env:USE_HTTPS = "true"   # or "false"
+$env:USE_HTTPS = "t"   # or "f" / "true" / "false"
 .\run.ps1
 ```
 
 ```bash
-USE_HTTPS=true ./run.sh    # or false
+USE_HTTPS=t ./run.sh    # or f / true / false
 ```
 
 When HTTPS is selected, nginx listens on **443** and redirects **80 → HTTPS**.

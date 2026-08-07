@@ -227,7 +227,8 @@ export default function FactoryOverview() {
       <FreeformTileBoard
         tiles={tiles}
         theme={t}
-        fillHeight
+        fillHeight={false}
+        minBoardHeight={480}
         resetRef={resetTilesRef}
       />
 
@@ -305,16 +306,16 @@ export default function FactoryOverview() {
 function styles(t) {
   const isLight = t.id === 'light';
   return {
+    // Document flow (like Planning) so .titan-page-outlet shows a right scrollbar
+    // when content is taller than the viewport.
     page: {
-      position: 'absolute',
-      inset: 0,
-      padding: '8px 12px 10px',
+      padding: '8px 12px 16px',
       boxSizing: 'border-box',
       display: 'flex',
       flexDirection: 'column',
       gap: 8,
-      overflow: 'hidden',
-      minHeight: 0,
+      minHeight: 'calc(100vh - 52px)',
+      color: t.text,
     },
     headerSlot: {
       flexShrink: 0,
@@ -350,8 +351,6 @@ function styles(t) {
     },
     linesCard: {
       padding: '8px 12px 10px',
-      maxHeight: '22%',
-      overflow: 'auto',
     },
     sectionHead: {
       display: 'flex',

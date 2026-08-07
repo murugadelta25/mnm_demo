@@ -60,10 +60,10 @@ function Set-DomainHttps {
 
 function Prompt-HostMode {
     # Optional hosting mode: HTTP (default) or HTTPS.
-    # Override without prompt: $env:USE_HTTPS = "true" | "false"
+    # Override without prompt: $env:USE_HTTPS = "true"|"t"|"false"|"f"
     $envVal = $env:USE_HTTPS
     if (-not [string]::IsNullOrWhiteSpace($envVal)) {
-        $enabled = $envVal.Trim() -match '^(1|true|yes|y)$'
+        $enabled = $envVal.Trim() -match '^(1|true|yes|y|t)$'
         Set-DomainHttps -Enabled:$enabled
         $mode = if ($enabled) { "HTTPS" } else { "HTTP" }
         Write-Host ("  Host mode from USE_HTTPS env: {0}" -f $mode) -ForegroundColor Cyan
@@ -76,10 +76,10 @@ function Prompt-HostMode {
     Write-Host "    HTTPS - encrypted portal; self-signed cert may show a browser warning" -ForegroundColor Gray
     Write-Host "  Mobile PMS operator app keeps using http://<server-ip>:8010 (not affected)." -ForegroundColor DarkGray
     Write-Host ""
-    $answer = Read-Host "  Enable HTTPS? Type true for HTTPS, or false/Enter for HTTP [false]"
+    $answer = Read-Host "  Enable HTTPS? Type t/true for HTTPS, or f/false/Enter for HTTP [f]"
     $enabled = $false
     if (-not [string]::IsNullOrWhiteSpace($answer)) {
-        $enabled = $answer.Trim() -match '^(1|true|yes|y)$'
+        $enabled = $answer.Trim() -match '^(1|true|yes|y|t)$'
     }
     Set-DomainHttps -Enabled:$enabled
     if ($enabled) {

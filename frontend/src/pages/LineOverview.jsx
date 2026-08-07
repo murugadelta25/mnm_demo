@@ -279,14 +279,14 @@ export default function LineOverview() {
 
 function styles(t, isDark) {
   return {
+    // Grow with content so the app shell right scrollbar can reach stations/machines.
     page: {
       padding: 16,
-      overflow: 'auto',
-      height: '100%',
       boxSizing: 'border-box',
       display: 'flex',
       flexDirection: 'column',
-      minHeight: 0,
+      minHeight: 'calc(100vh - 52px)',
+      color: t.text,
     },
     alert: {
       background: '#fef2f2',
@@ -333,11 +333,9 @@ function styles(t, isDark) {
         ? '0 0 0 1px rgba(56,189,248,0.08)'
         : '0 2px 10px rgba(15,23,42,0.08)',
       marginTop: 14,
-      flex: 1,
-      minHeight: 0,
+      flex: '0 0 auto',
       display: 'flex',
       flexDirection: 'column',
-      overflow: 'hidden',
       boxSizing: 'border-box',
     },
     cardTitle: {
@@ -400,10 +398,7 @@ function styles(t, isDark) {
       gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
       gap: 12,
       padding: '0 14px 16px',
-      flex: 1,
-      minHeight: 0,
-      overflowY: 'auto',
-      overflowX: 'hidden',
+      flex: '0 0 auto',
       alignContent: 'start',
       boxSizing: 'border-box',
     },

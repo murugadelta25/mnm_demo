@@ -231,7 +231,7 @@ set_domain_https() {
 import json, sys
 from pathlib import Path
 path = Path(sys.argv[1])
-enabled = sys.argv[2].lower() in ("1", "true", "yes", "y")
+enabled = sys.argv[2].lower() in ("1", "true", "yes", "y", "t")
 cfg = {
     "domain": "din.eappms",
     "lanIp": "",
@@ -259,10 +259,10 @@ PY
 }
 
 prompt_host_mode() {
-  # Optional hosting mode. Override: USE_HTTPS=true|false ./run.sh
+  # Optional hosting mode. Override: USE_HTTPS=true|t|false|f ./run.sh
   if [ -n "${USE_HTTPS:-}" ]; then
     case "${USE_HTTPS,,}" in
-      1|true|yes|y)
+      1|true|yes|y|t)
         set_domain_https true >/dev/null
         log_ok "Host mode from USE_HTTPS env: HTTPS"
         ;;
@@ -288,9 +288,9 @@ prompt_host_mode() {
   echo -e "  ${YELLOW}Mobile PMS operator app keeps using http://<server-ip>:8010 (not affected).${NC}"
   echo ""
   local answer=""
-  read -r -p "  Enable HTTPS? Type true for HTTPS, or false/Enter for HTTP [false]: " answer || true
+  read -r -p "  Enable HTTPS? Type t/true for HTTPS, or f/false/Enter for HTTP [f]: " answer || true
   case "${answer,,}" in
-    1|true|yes|y)
+    1|true|yes|y|t)
       set_domain_https true >/dev/null
       log_ok "HTTPS enabled — standard URL will be https://din.eappms"
       ;;

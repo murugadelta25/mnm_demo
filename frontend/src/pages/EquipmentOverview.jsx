@@ -557,7 +557,15 @@ export default function EquipmentOverview() {
             </section>
           </div>
 
-          <section className={surfaceClass(t)} style={{ ...s.card, marginTop: 14, flex: 1, minHeight: 280 }}>
+          <section
+            className={surfaceClass(t)}
+            style={{
+              ...s.card,
+              marginTop: 14,
+              flex: '0 0 auto',
+              minHeight: 280,
+            }}
+          >
             <h3 style={s.cardTitle}>
               Equipment ({filtered.length}
               {statusFilter !== 'all' ? ` · ${STATUS_ROWS.find(([k]) => k === statusFilter)?.[1] || statusFilter}` : ''})
@@ -785,15 +793,15 @@ function EquipmentHourlyTable({ slots = [], states = {}, shiftTotals = {}, theme
 
 function styles(t, isDark) {
   return {
+    // Document flow like Planning — right scrollbar via .titan-page-outlet.
     page: {
       padding: 12,
-      overflow: 'auto',
-      height: '100%',
       boxSizing: 'border-box',
       display: 'flex',
       flexDirection: 'column',
-      minHeight: 0,
+      minHeight: 'calc(100vh - 52px)',
       gap: 0,
+      color: t.text,
     },
     alert: {
       background: '#fef2f2',
@@ -807,22 +815,18 @@ function styles(t, isDark) {
       display: 'flex',
       flexDirection: 'column',
       gap: 10,
-      flex: 1,
-      minHeight: 0,
-      overflow: 'auto',
+      flex: '0 0 auto',
     },
     detailTop: {
       display: 'grid',
       gridTemplateColumns: 'repeat(3, minmax(0, 1fr))',
       gap: 10,
       alignItems: 'stretch',
-      flex: '1 1 auto',
+      flex: '0 0 auto',
       minHeight: 320,
     },
     hourlyCard: {
       flex: '0 0 auto',
-      maxHeight: '42vh',
-      overflow: 'hidden',
     },
     kpiRow: {
       display: 'grid',

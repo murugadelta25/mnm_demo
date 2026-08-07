@@ -45,6 +45,12 @@ ACCESS_MATRIX_ROWS: list[dict[str, Any]] = [
         "roles": {"superadmin": True, "admin": True, "supervisor": True, "operator": False, "maintenance": True, "quality": False},
     },
     {
+        "id": "production.work_orders",
+        "label": "Work Orders",
+        "registry_id": "production.work_orders",
+        "roles": {"superadmin": True, "admin": True, "supervisor": True, "operator": True, "maintenance": False, "quality": False},
+    },
+    {
         "id": "production.planning",
         "label": "Production Planning",
         "registry_id": "production.planning",
