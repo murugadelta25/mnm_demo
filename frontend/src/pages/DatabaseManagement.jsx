@@ -1,8 +1,9 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useTheme } from '../context/ThemeContext';
 import { pageClass } from '../themes/tileHelpers';
 import PageHeader from '../components/PageHeader';
 import api from '../api/client';
+import { formatMaxMb, MAX_BACKUP_BYTES, validateBackupFile } from '../utils/uploadLimits';
 
 export default function DatabaseManagement() {
   const { theme: t } = useTheme();
@@ -52,6 +53,8 @@ export default function DatabaseManagement() {
   const [confirmRestore, setConfirmRestore] = useState(null);
   const [infoModal, setInfoModal] = useState(null); // 'about' | 'setup' | null
   const [showAboutBackups, setShowAboutBackups] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const backupFileRef = useRef(null);
 
   const flash = (text, isErr = false) => {
     if (isErr) { setErr(text); setMsg(''); }
@@ -100,8 +103,9 @@ export default function DatabaseManagement() {
   const triggerBackup = async () => {
     setLoading(true);
     try {
-      const res = await api.post('/api/archive/backup');
-      flash(`Backup created: ${res.data.filename} (${res.data.size_display})`);
+      const res = await api.post('/api/archive/backup', null, { timeout: 600000 });
+      const metaName = res.data.meta_filename || `${res.data.filename}.meta.json`;
+      flash(`Backup created: ${res.data.filename} + ${metaName} (${res.data.size_display})`);
       fetchBackups();
     } catch (e) {
       flash(e.response?.data?.detail || 'Backup failed', true);
@@ -206,7 +210,7 @@ export default function DatabaseManagement() {
     setConfirmRestore(null);
     setRestoring(filename);
     try {
-      await api.post(`/api/archive/restore/${filename}`);
+      await api.post(`/api/archive/restore/${encodeURIComponent(filename)}`, null, { timeout: 600000 });
       flash(`Database restored from: ${filename}`);
     } catch (e) {
       flash(e.response?.data?.detail || 'Restore failed', true);
@@ -215,20 +219,57 @@ export default function DatabaseManagement() {
     }
   };
 
-  const downloadBackup = (filename) => {
+  const uploadBackup = async (fileList) => {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    for (const file of files) {
+      const sizeErr = validateBackupFile(file);
+      if (sizeErr) {
+        flash(sizeErr, true);
+        return;
+      }
+    }
+    setUploading(true);
+    try {
+      const fd = new FormData();
+      files.forEach((file) => fd.append('files', file));
+      const res = await api.post('/api/archive/upload', fd, { timeout: 600000 });
+      const metaName = res.data.meta_filename || `${res.data.filename}.meta.json`;
+      flash(`Uploaded: ${res.data.filename} + ${metaName} (${res.data.size_display})`);
+      fetchBackups();
+    } catch (e) {
+      flash(e.response?.data?.detail || 'Upload failed', true);
+    } finally {
+      setUploading(false);
+      if (backupFileRef.current) backupFileRef.current.value = '';
+    }
+  };
+
+  const downloadBackup = async (filename) => {
     const token = localStorage.getItem('token');
     const base = api.defaults.baseURL || '';
-    const url = `${base}/api/archive/download/${filename}`;
-    fetch(url, { headers: { Authorization: `Bearer ${token}` } })
-      .then(r => r.blob())
-      .then(blob => {
-        const u = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = u;
-        a.download = filename;
-        a.click();
-        URL.revokeObjectURL(u);
-      });
+    const url = `${base}/api/archive/download/${encodeURIComponent(filename)}`;
+    try {
+      const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+      if (!response.ok) {
+        flash('Download failed', true);
+        return;
+      }
+      const blob = await response.blob();
+      const cd = response.headers.get('content-disposition') || '';
+      const match = cd.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+      const downloadName = decodeURIComponent((match?.[1] || '').replace(/"/g, ''))
+        || filename.replace(/\.(sql|json)\.gz$/i, '.zip');
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = objectUrl;
+      link.download = downloadName;
+      link.click();
+      URL.revokeObjectURL(objectUrl);
+      flash(`Downloaded: ${downloadName} (dump + .meta.json)`);
+    } catch {
+      flash('Download failed', true);
+    }
   };
 
   const totalSize = backups.reduce((sum, b) => sum + (b.size_bytes || 0), 0);
@@ -292,13 +333,34 @@ export default function DatabaseManagement() {
 
             <p style={{ color: t.textFaint, fontSize: 11, margin: '0 0 12px' }}>
               When enabled, the system creates a compressed database backup every N days and auto-deletes
-              the oldest backups beyond the maximum count.
+              the oldest backups beyond the maximum count. Each backup stores both the dump
+              (<code>.sql.gz</code> / <code>.json.gz</code>) and its sidecar <code>.meta.json</code>.
+              IPC-to-IPC: on IPC A click Download (zip contains both files) or FTP those two files,
+              then on IPC B click Upload Backup (zip, dump, and/or <code>.meta.json</code>) and Restore.
+              Max upload {formatMaxMb(MAX_BACKUP_BYTES)}.
             </p>
 
             <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
               <button style={s.btn} onClick={saveConfig}>Save Schedule</button>
-              <button style={{ ...s.btn, background: '#16a34a' }} onClick={triggerBackup} disabled={loading}>
+              <button style={{ ...s.btn, background: '#16a34a' }} onClick={triggerBackup} disabled={loading || uploading}>
                 {loading ? 'Creating Backup...' : 'Create Backup Now'}
+              </button>
+              <input
+                ref={backupFileRef}
+                type="file"
+                multiple
+                accept=".gz,.sql.gz,.json.gz,.zip,.json,application/gzip,application/zip"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  if (e.target.files?.length) uploadBackup(e.target.files);
+                }}
+              />
+              <button
+                style={{ ...s.btn, background: '#0ea5e9' }}
+                onClick={() => backupFileRef.current?.click()}
+                disabled={loading || uploading}
+              >
+                {uploading ? 'Uploading...' : 'Upload Backup'}
               </button>
               {msg && <span style={{ color: '#16a34a', fontSize: 12, fontWeight: 500 }}>✓ {msg}</span>}
               {err && <span style={{ color: '#ef4444', fontSize: 12, fontWeight: 500 }}>✗ {err}</span>}
@@ -311,7 +373,7 @@ export default function DatabaseManagement() {
       <Section title="Backup History" t={t}>
         {backups.length === 0 ? (
           <div style={{ color: t.textFaint, fontSize: 13, textAlign: 'center', padding: '30px 0' }}>
-            No backups yet. Click "Create Backup Now" to create your first backup.
+            No backups yet. Click "Create Backup Now", or "Upload Backup" to import a dump / .meta.json / zip from another IPC.
           </div>
         ) : (
           <div style={{ overflowX: 'auto' }}>
@@ -338,13 +400,15 @@ export default function DatabaseManagement() {
                     <td style={s.td}>{new Date(b.created_at).toLocaleString()}</td>
                     <td style={s.td}>{b.size_display}</td>
                     <td style={s.td}>
-                      <Badge bg={b.triggered_by === 'scheduled' ? '#16a34a' : '#ea580c'}
-                        label={b.triggered_by} />
+                      <Badge
+                        bg={b.triggered_by === 'scheduled' ? '#16a34a' : b.triggered_by === 'uploaded' ? '#0ea5e9' : '#ea580c'}
+                        label={b.triggered_by}
+                      />
                     </td>
                     <td style={s.td}>
                       <div style={{ display: 'flex', gap: 4 }}>
                         <ActionBtn color="#2563eb" onClick={() => downloadBackup(b.filename)}>
-                          ⬇ Download
+                          ⬇ Download zip
                         </ActionBtn>
                         <ActionBtn color="#16a34a"
                           onClick={() => setConfirmRestore(b.filename)}

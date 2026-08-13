@@ -7,6 +7,8 @@ from fastapi import HTTPException, UploadFile
 
 MAX_PDF_BYTES = 5 * 1024 * 1024
 MAX_IMAGE_BYTES = 2 * 1024 * 1024
+# Database Management IPC-to-IPC dump upload (gzipped SQL/JSON)
+MAX_BACKUP_BYTES = 512 * 1024 * 1024
 
 # Work-instruction document uploads (Part Master / revision history)
 WI_DOC_EXTENSIONS = frozenset({".pdf", ".jpg", ".jpeg", ".png", ".svg"})

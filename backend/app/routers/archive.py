@@ -3,22 +3,30 @@ API endpoints for database backup & archive management.
 All endpoints require admin role.
 """
 import json
-from fastapi import APIRouter, Depends, HTTPException
+import uuid
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
+from starlette.background import BackgroundTask
 from typing import Optional
 
 from ..models import SiteConfig, get_db
-from ..auth import require_role, require_superadmin
+from ..auth import require_superadmin
 from ..archive_service import (
-    create_backup,
-    list_backups,
-    get_backup_path,
-    delete_backup,
-    restore_backup,
     BACKUP_DIR,
+    build_backup_bundle,
+    classify_backup_upload_name,
+    create_backup,
+    delete_backup,
+    import_uploaded_backup_files,
+    list_backups,
+    restore_backup,
+    unlink_quietly,
 )
+from ..upload_limits import MAX_BACKUP_BYTES, save_upload_limited
 
 router = APIRouter(prefix="/api/archive", tags=["archive"])
 
@@ -90,6 +98,52 @@ def trigger_backup(_=Depends(require_superadmin())):
         raise HTTPException(status_code=500, detail=str(exc))
 
 
+@router.post("/upload")
+async def upload_backup(
+    files: list[UploadFile] = File(...),
+    _=Depends(require_superadmin()),
+):
+    """Import a dump, optional .meta.json sidecar, and/or zip bundle from another IPC."""
+    uploads = [item for item in files if item is not None]
+    if not uploads:
+        raise HTTPException(
+            status_code=400,
+            detail="Choose a .sql.gz / .json.gz dump, its .meta.json file, or a zip of both",
+        )
+    saved: list[tuple[str, Path]] = []
+    try:
+        for upload in uploads:
+            original = (upload.filename or "").strip()
+            if not original:
+                raise HTTPException(status_code=400, detail="Uploaded file is missing a name")
+            kind = classify_backup_upload_name(original)
+            if not kind:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Upload a .sql.gz / .json.gz dump, its .meta.json file, or a zip of both",
+                )
+            token = uuid.uuid4().hex[:12]
+            tmp = BACKUP_DIR / f".upload_{token}_{Path(original).name.lower()}"
+            limit = 64 * 1024 if kind == "meta" else MAX_BACKUP_BYTES
+            size = await save_upload_limited(upload, tmp, limit)
+            if size == 0:
+                raise HTTPException(status_code=400, detail="Uploaded file is empty")
+            saved.append((original, tmp))
+        return import_uploaded_backup_files(saved)
+    except HTTPException:
+        for _, path in saved:
+            path.unlink(missing_ok=True)
+        raise
+    except ValueError as exc:
+        for _, path in saved:
+            path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception:
+        for _, path in saved:
+            path.unlink(missing_ok=True)
+        raise
+
+
 @router.get("/list")
 def list_all_backups(_=Depends(require_superadmin())):
     return list_backups()
@@ -97,13 +151,18 @@ def list_all_backups(_=Depends(require_superadmin())):
 
 @router.get("/download/{filename}")
 def download_backup(filename: str, _=Depends(require_superadmin())):
-    fp = get_backup_path(filename)
-    if not fp:
+    """Download dump + .meta.json as a zip for FTP / IPC-to-IPC transfer."""
+    try:
+        bundle_path, bundle_name = build_backup_bundle(filename)
+    except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Backup not found")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     return FileResponse(
-        path=str(fp),
-        filename=filename,
-        media_type="application/gzip",
+        path=str(bundle_path),
+        filename=bundle_name,
+        media_type="application/zip",
+        background=BackgroundTask(unlink_quietly, bundle_path),
     )
 
 

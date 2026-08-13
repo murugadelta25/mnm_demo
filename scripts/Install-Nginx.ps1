@@ -240,6 +240,19 @@ function Get-ProxyLocations {
     return @"
     client_max_body_size 25M;
 
+    location /api/archive/ {
+        client_max_body_size 512M;
+        proxy_pass http://127.0.0.1:$BackendPort;
+        proxy_http_version 1.1;
+        proxy_set_header Host `$host;
+        proxy_set_header X-Real-IP `$remote_addr;
+        proxy_set_header X-Forwarded-For `$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto `$scheme;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+        proxy_request_buffering off;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:$FrontendPort;
         proxy_http_version 1.1;

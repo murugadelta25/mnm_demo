@@ -11,8 +11,11 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import re
 import shutil
 import subprocess
+import uuid
+import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -22,10 +25,16 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from .models import SessionLocal, engine
+from .upload_limits import MAX_BACKUP_BYTES
 
 BACKUP_DIR = Path(__file__).resolve().parent.parent / "backups"
 BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 _DB_CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "database" / "db.config.json"
+_BACKUP_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.(sql|json)\.gz$")
+_ZIP_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.zip$")
+_GZIP_MAGIC = b"\x1f\x8b"
+_MAX_META_BYTES = 64 * 1024
+_MAX_ZIP_MEMBERS = 8
 
 TABLES_TO_BACKUP = [
     "stations", "machines", "users", "site_config",
@@ -217,6 +226,7 @@ def _build_meta(filename: str, filepath: Path, method: str, triggered_by: str) -
     size_bytes = filepath.stat().st_size
     return {
         "filename": filename,
+        "meta_filename": f"{filename}.meta.json",
         "method": method,
         "triggered_by": triggered_by,
         "created_at": datetime.now().isoformat(),
@@ -256,9 +266,307 @@ def list_backups() -> list[dict]:
     return backups
 
 
+def safe_backup_filename(filename: str) -> Optional[str]:
+    """Return a basename that is a PMS dump, or None if unsafe/invalid."""
+    name = Path(str(filename or "")).name.lower()
+    if not _BACKUP_NAME_RE.fullmatch(name):
+        return None
+    try:
+        (BACKUP_DIR / name).resolve().relative_to(BACKUP_DIR.resolve())
+    except ValueError:
+        return None
+    return name
+
+
+def unique_backup_name(filename: str) -> str:
+    """Keep the original dump name when free; otherwise append _imported_<ts>."""
+    name = safe_backup_filename(filename)
+    if not name:
+        raise ValueError("Upload a PMS backup file ending in .sql.gz or .json.gz")
+    dest = BACKUP_DIR / name
+    meta = BACKUP_DIR / f"{name}.meta.json"
+    if not dest.exists() and not meta.exists():
+        return name
+    if name.endswith(".sql.gz"):
+        stem, suffix = name[:-7], ".sql.gz"
+    else:
+        stem, suffix = name[:-8], ".json.gz"
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    candidate = f"{stem}_imported_{ts}{suffix}"
+    n = 1
+    while (BACKUP_DIR / candidate).exists() or (BACKUP_DIR / f"{candidate}.meta.json").exists():
+        candidate = f"{stem}_imported_{ts}_{n}{suffix}"
+        n += 1
+    return candidate
+
+
+def validate_backup_payload(filepath: Path, method: str) -> None:
+    """Reject non-gzip or non-dump uploads before they appear in Backup History."""
+    with filepath.open("rb") as fh:
+        magic = fh.read(2)
+    if magic != _GZIP_MAGIC:
+        raise ValueError("File is not a gzip-compressed PMS backup")
+    try:
+        with gzip.open(filepath, "rb") as gz:
+            sample = gz.read(4096)
+    except Exception as exc:
+        raise ValueError("File is not a valid gzip-compressed PMS backup") from exc
+    if not sample:
+        raise ValueError("Backup file is empty")
+    text = sample.decode("utf-8", errors="replace").lstrip()
+    if method == "json":
+        if not text.startswith("{"):
+            raise ValueError("JSON backup must start with '{'")
+        return
+    upper = text.upper()
+    if not any(tok in upper for tok in ("CREATE TABLE", "INSERT INTO", "DROP TABLE", "MYSQLDUMP", "--")):
+        raise ValueError("SQL backup content is not a valid dump")
+
+
+def register_backup_file(filename: str, method: str, triggered_by: str) -> dict:
+    """Write sidecar metadata so an on-disk dump appears in Backup History."""
+    name = safe_backup_filename(filename)
+    if not name:
+        raise ValueError("Invalid backup filename")
+    filepath = BACKUP_DIR / name
+    if not filepath.exists():
+        raise FileNotFoundError(f"Backup file not found: {name}")
+    meta = _build_meta(name, filepath, method, triggered_by)
+    _write_meta(name, meta)
+    return meta
+
+
+def safe_meta_filename(filename: str) -> Optional[str]:
+    """Return basename for a dump sidecar, or None if unsafe/invalid."""
+    name = Path(str(filename or "")).name.lower()
+    if not name.endswith(".meta.json"):
+        return None
+    dump = safe_backup_filename(name[:-10])
+    if not dump:
+        return None
+    return f"{dump}.meta.json"
+
+
+def classify_backup_upload_name(filename: str) -> Optional[str]:
+    """Classify an upload as dump, meta, or zip."""
+    name = Path(str(filename or "")).name.lower()
+    if safe_meta_filename(name):
+        return "meta"
+    if safe_backup_filename(name):
+        return "dump"
+    if _ZIP_NAME_RE.fullmatch(name):
+        return "zip"
+    return None
+
+
+def _dump_method(name: str) -> str:
+    return "sql" if name.endswith(".sql.gz") else "json"
+
+
+def _bundle_zip_name(dump_name: str) -> str:
+    if dump_name.endswith(".sql.gz"):
+        return f"{dump_name[:-7]}.zip"
+    if dump_name.endswith(".json.gz"):
+        return f"{dump_name[:-8]}.zip"
+    return f"{dump_name}.zip"
+
+
+def _parse_uploaded_meta(raw: bytes, dump_name: str, method: str) -> dict:
+    if len(raw) > _MAX_META_BYTES:
+        raise ValueError("Metadata file is too large")
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except Exception as exc:
+        raise ValueError("Metadata file is not valid JSON") from exc
+    if not isinstance(data, dict):
+        raise ValueError("Metadata file must be a JSON object")
+    created_at = data.get("created_at")
+    if not isinstance(created_at, str) or not created_at.strip():
+        created_at = datetime.now().isoformat()
+    src_method = str(data.get("method") or method).lower()
+    if src_method not in ("sql", "json"):
+        src_method = method
+    if src_method != method:
+        raise ValueError(
+            f"Metadata method '{src_method}' does not match dump type '{method}'"
+        )
+    filepath = BACKUP_DIR / dump_name
+    size_bytes = filepath.stat().st_size if filepath.exists() else 0
+    return {
+        "filename": dump_name,
+        "meta_filename": f"{dump_name}.meta.json",
+        "method": method,
+        "triggered_by": "uploaded",
+        "created_at": created_at.strip(),
+        "size_bytes": size_bytes,
+        "size_display": _human_size(size_bytes),
+    }
+
+
+def _zip_member_basename(info: zipfile.ZipInfo) -> str:
+    raw = (info.filename or "").replace("\\", "/")
+    parts = [p for p in raw.split("/") if p and p != "."]
+    if not parts or ".." in parts:
+        raise ValueError("Zip contains an unsafe path")
+    return parts[-1].lower()
+
+
+def _extract_backup_zip(zip_path: Path) -> list[tuple[str, Path]]:
+    extracted: list[tuple[str, Path]] = []
+    try:
+        with zipfile.ZipFile(zip_path) as zf:
+            infos = [item for item in zf.infolist() if not item.is_dir()]
+            if not infos:
+                raise ValueError("Zip is empty")
+            if len(infos) > _MAX_ZIP_MEMBERS:
+                raise ValueError("Zip has too many files")
+            for info in infos:
+                name = _zip_member_basename(info)
+                kind = classify_backup_upload_name(name)
+                if kind not in ("dump", "meta"):
+                    continue
+                limit = _MAX_META_BYTES if kind == "meta" else MAX_BACKUP_BYTES
+                if info.file_size > limit:
+                    raise ValueError(f"Zip member {name} is too large")
+                target = BACKUP_DIR / f".extract_{uuid.uuid4().hex}_{name}"
+                copied = 0
+                with zf.open(info, "r") as src, target.open("wb") as dest:
+                    while True:
+                        chunk = src.read(64 * 1024)
+                        if not chunk:
+                            break
+                        copied += len(chunk)
+                        if copied > limit:
+                            raise ValueError(f"Zip member {name} is too large")
+                        dest.write(chunk)
+                extracted.append((name, target))
+    except zipfile.BadZipFile as exc:
+        for _, path in extracted:
+            path.unlink(missing_ok=True)
+        raise ValueError("File is not a valid zip backup bundle") from exc
+    except Exception:
+        for _, path in extracted:
+            path.unlink(missing_ok=True)
+        raise
+    if not any(classify_backup_upload_name(name) == "dump" for name, _ in extracted):
+        for _, path in extracted:
+            path.unlink(missing_ok=True)
+        raise ValueError("Zip must contain a .sql.gz or .json.gz dump")
+    return extracted
+
+
+def _attach_uploaded_meta(meta_name: str, meta_path: Path) -> dict:
+    meta_basename = Path(meta_name).name.lower()
+    dump_name = (
+        safe_backup_filename(meta_basename[:-10])
+        if meta_basename.endswith(".meta.json")
+        else None
+    )
+    if not dump_name:
+        raise ValueError("Metadata file name must match a .sql.gz or .json.gz dump")
+    fp = get_backup_path(dump_name)
+    if not fp:
+        raise ValueError(
+            f"Dump '{dump_name}' is not in Backup History. "
+            "Upload the .sql.gz / .json.gz first, or select both files together."
+        )
+    method = _dump_method(fp.name)
+    meta = _parse_uploaded_meta(meta_path.read_bytes(), fp.name, method)
+    _write_meta(fp.name, meta)
+    return meta
+
+
+def import_uploaded_backup_files(items: list[tuple[str, Path]]) -> dict:
+    """Import dump, optional sidecar meta, and/or a zip bundle into Backup History."""
+    leftovers: set[Path] = {path for _, path in items}
+    extracted_paths: list[Path] = []
+    dumps: list[tuple[str, Path]] = []
+    metas: list[tuple[str, Path]] = []
+    try:
+        for original, path in items:
+            kind = classify_backup_upload_name(original)
+            if kind == "zip":
+                for inner_name, inner_path in _extract_backup_zip(path):
+                    extracted_paths.append(inner_path)
+                    leftovers.add(inner_path)
+                    inner_kind = classify_backup_upload_name(inner_name)
+                    if inner_kind == "dump":
+                        dumps.append((inner_name, inner_path))
+                    elif inner_kind == "meta":
+                        metas.append((inner_name, inner_path))
+            elif kind == "dump":
+                dumps.append((original, path))
+            elif kind == "meta":
+                metas.append((original, path))
+            else:
+                raise ValueError(
+                    "Upload a .sql.gz / .json.gz dump, its .meta.json sidecar, "
+                    "or a zip containing both"
+                )
+
+        if len(dumps) > 1:
+            raise ValueError("Upload one dump (or one zip) at a time")
+        if len(metas) > 1:
+            raise ValueError("Upload at most one .meta.json with the dump")
+        if not dumps:
+            if not metas:
+                raise ValueError(
+                    "Upload a PMS backup ending in .sql.gz, .json.gz, or .zip"
+                )
+            return _attach_uploaded_meta(metas[0][0], metas[0][1])
+
+        original_name, dump_path = dumps[0]
+        stored_name = unique_backup_name(original_name)
+        method = _dump_method(stored_name)
+        validate_backup_payload(dump_path, method)
+        dest = BACKUP_DIR / stored_name
+        shutil.move(str(dump_path), str(dest))
+        leftovers.discard(dump_path)
+        if metas:
+            meta = _parse_uploaded_meta(metas[0][1].read_bytes(), stored_name, method)
+            _write_meta(stored_name, meta)
+            return meta
+        return register_backup_file(stored_name, method, "uploaded")
+    finally:
+        for path in leftovers | set(extracted_paths):
+            if path.exists() and path.name.startswith("."):
+                path.unlink(missing_ok=True)
+
+
+def unlink_quietly(path: Path) -> None:
+    """Best-effort delete; Windows may still have the download handle open."""
+    try:
+        Path(path).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def build_backup_bundle(filename: str) -> tuple[Path, str]:
+    """Zip dump + .meta.json for IPC-to-IPC transfer."""
+    fp = get_backup_path(filename)
+    if not fp:
+        raise FileNotFoundError(f"Backup file not found: {filename}")
+    meta_fp = BACKUP_DIR / f"{fp.name}.meta.json"
+    if not meta_fp.exists():
+        register_backup_file(fp.name, _dump_method(fp.name), "manual")
+    bundle_name = _bundle_zip_name(fp.name)
+    tmp = BACKUP_DIR / f".bundle_{uuid.uuid4().hex}_{bundle_name}"
+    try:
+        with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_STORED) as zf:
+            zf.write(fp, arcname=fp.name)
+            zf.write(meta_fp, arcname=meta_fp.name)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+    return tmp, bundle_name
+
+
 def get_backup_path(filename: str) -> Optional[Path]:
     """Return full path if backup file exists."""
-    fp = BACKUP_DIR / filename
+    name = safe_backup_filename(filename)
+    if not name:
+        return None
+    fp = BACKUP_DIR / name
     if fp.exists() and fp.is_file():
         return fp
     return None
@@ -266,8 +574,11 @@ def get_backup_path(filename: str) -> Optional[Path]:
 
 def delete_backup(filename: str) -> bool:
     """Delete a backup and its metadata."""
-    fp = BACKUP_DIR / filename
-    meta_fp = BACKUP_DIR / f"{filename}.meta.json"
+    name = safe_backup_filename(filename)
+    if not name:
+        return False
+    fp = BACKUP_DIR / name
+    meta_fp = BACKUP_DIR / f"{name}.meta.json"
     deleted = False
     if fp.exists():
         fp.unlink()
@@ -283,16 +594,16 @@ def restore_backup(filename: str) -> dict:
     Restore the database from a backup file.
     Returns status dict.
     """
-    fp = BACKUP_DIR / filename
-    if not fp.exists():
+    fp = get_backup_path(filename)
+    if not fp:
         raise FileNotFoundError(f"Backup file not found: {filename}")
 
-    if filename.endswith(".sql.gz"):
+    if fp.name.endswith(".sql.gz"):
         return _restore_sql(fp)
-    elif filename.endswith(".json.gz"):
+    elif fp.name.endswith(".json.gz"):
         return _restore_json(fp)
     else:
-        raise ValueError(f"Unknown backup format: {filename}")
+        raise ValueError(f"Unknown backup format: {fp.name}")
 
 
 def _restore_sql(filepath: Path) -> dict:

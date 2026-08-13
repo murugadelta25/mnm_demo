@@ -1,11 +1,13 @@
 export const MAX_PDF_BYTES = 5 * 1024 * 1024;
 export const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
+export const MAX_BACKUP_BYTES = 512 * 1024 * 1024;
 
 export const WI_DOC_ACCEPT = '.pdf,application/pdf,.jpg,.jpeg,.png,.svg,image/jpeg,image/png,image/svg+xml';
 export const WI_DOC_EXTENSIONS = ['.pdf', '.jpg', '.jpeg', '.png', '.svg'];
 
 export function formatMaxMb(bytes) {
-  return `${bytes / (1024 * 1024)} MB`;
+  const mb = bytes / (1024 * 1024);
+  return `${Number.isInteger(mb) ? mb : mb.toFixed(1)} MB`;
 }
 
 export function getWiDocMaxBytes(filename = '') {
@@ -34,4 +36,19 @@ export function validateWiDocFile(file) {
   }
   const label = ext === '.pdf' ? 'PDF' : 'Image';
   return validateFileSize(file, getWiDocMaxBytes(file.name), label);
+}
+
+export function validateBackupFile(file) {
+  if (!file) return null;
+  const name = (file.name || '').toLowerCase();
+  if (name.endsWith('.sql.gz.meta.json') || name.endsWith('.json.gz.meta.json')) {
+    return validateFileSize(file, MAX_BACKUP_BYTES, 'Metadata');
+  }
+  if (name.endsWith('.zip')) {
+    return validateFileSize(file, MAX_BACKUP_BYTES, 'Backup zip');
+  }
+  if (name.endsWith('.sql.gz') || name.endsWith('.json.gz')) {
+    return validateFileSize(file, MAX_BACKUP_BYTES, 'Backup');
+  }
+  return 'Upload a .sql.gz / .json.gz dump, its .meta.json sidecar, or a zip of both';
 }
