@@ -54,12 +54,14 @@ export default function DatabaseManagement() {
   const [infoModal, setInfoModal] = useState(null); // 'about' | 'setup' | null
   const [showAboutBackups, setShowAboutBackups] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [uploadPct, setUploadPct] = useState(null);
+  const [uploadPhase, setUploadPhase] = useState('idle'); // idle | transfer | processing
   const backupFileRef = useRef(null);
 
-  const flash = (text, isErr = false) => {
+  const flash = (text, isErr = false, holdMs = 4000) => {
     if (isErr) { setErr(text); setMsg(''); }
     else { setMsg(text); setErr(''); }
-    setTimeout(() => { setMsg(''); setErr(''); }, 4000);
+    setTimeout(() => { setMsg(''); setErr(''); }, holdMs);
   };
 
   const fetchConfig = useCallback(async () => {
@@ -230,17 +232,31 @@ export default function DatabaseManagement() {
       }
     }
     setUploading(true);
+    setUploadPct(0);
+    setUploadPhase('transfer');
     try {
       const fd = new FormData();
       files.forEach((file) => fd.append('files', file));
-      const res = await api.post('/api/archive/upload', fd, { timeout: 600000 });
+      const res = await api.post('/api/archive/upload', fd, {
+        timeout: 600000,
+        onUploadProgress: (evt) => {
+          if (!evt.total) return;
+          const pct = Math.min(100, Math.round((evt.loaded / evt.total) * 100));
+          setUploadPct(pct);
+          if (pct >= 100) setUploadPhase('processing');
+        },
+      });
+      setUploadPct(100);
+      setUploadPhase('processing');
       const metaName = res.data.meta_filename || `${res.data.filename}.meta.json`;
-      flash(`Uploaded: ${res.data.filename} + ${metaName} (${res.data.size_display})`);
+      flash(`Backup upload complete: ${res.data.filename} + ${metaName} (${res.data.size_display})`, false, 8000);
       fetchBackups();
     } catch (e) {
-      flash(e.response?.data?.detail || 'Upload failed', true);
+      flash(e.response?.data?.detail || 'Upload failed', true, 8000);
     } finally {
       setUploading(false);
+      setUploadPct(null);
+      setUploadPhase('idle');
       if (backupFileRef.current) backupFileRef.current.value = '';
     }
   };
@@ -360,8 +376,29 @@ export default function DatabaseManagement() {
                 onClick={() => backupFileRef.current?.click()}
                 disabled={loading || uploading}
               >
-                {uploading ? 'Uploading...' : 'Upload Backup'}
+                {uploading
+                  ? (uploadPhase === 'processing'
+                    ? 'Processing...'
+                    : `Uploading ${uploadPct ?? 0}%`)
+                  : 'Upload Backup'}
               </button>
+              {uploading && (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 220 }}>
+                  <span style={{
+                    flex: 1, height: 8, borderRadius: 99, background: t.surface2 || '#e2e8f0',
+                    overflow: 'hidden', minWidth: 140,
+                  }}>
+                    <span style={{
+                      display: 'block', height: '100%', borderRadius: 99, background: '#0ea5e9',
+                      width: `${uploadPhase === 'processing' ? 100 : (uploadPct ?? 0)}%`,
+                      transition: 'width 0.2s ease',
+                    }} />
+                  </span>
+                  <span style={{ color: t.textDim, fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap' }}>
+                    {uploadPhase === 'processing' ? 'Saving on server…' : `${uploadPct ?? 0}%`}
+                  </span>
+                </span>
+              )}
               {msg && <span style={{ color: '#16a34a', fontSize: 12, fontWeight: 500 }}>✓ {msg}</span>}
               {err && <span style={{ color: '#ef4444', fontSize: 12, fontWeight: 500 }}>✗ {err}</span>}
             </div>
