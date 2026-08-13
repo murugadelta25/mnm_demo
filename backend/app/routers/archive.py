@@ -7,14 +7,14 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 from typing import Optional
 
 from ..models import SiteConfig, get_db
-from ..auth import require_superadmin
+from ..auth import require_superadmin, require_superadmin_jwt
 from ..archive_service import (
     BACKUP_DIR,
     RestoreNeedsConfirmation,
@@ -185,7 +185,8 @@ def restore_preview(filename: str, _=Depends(require_superadmin())):
 
 
 @router.get("/restore-progress")
-def restore_progress(_=Depends(require_superadmin())):
+def restore_progress(_=Depends(require_superadmin_jwt)):
+    """In-memory restore percent. JWT-only so polling works while tables are locked."""
     return get_restore_progress()
 
 
@@ -195,11 +196,11 @@ def restore_from_backup(
     payload: Optional[RestorePayload] = Body(default=None),
     _=Depends(require_superadmin()),
 ):
-    """Restore database from a backup file. WARNING: overwrites current live data only."""
+    """Start database restore. Poll GET /restore-progress until done. Overwrites live data only."""
     try:
         confirm = bool(payload and payload.confirm_config_diff)
         result = restore_backup(filename, confirm_config_diff=confirm)
-        return result
+        return JSONResponse(status_code=202, content=result)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Backup not found")
     except RestoreNeedsConfirmation as exc:

@@ -243,21 +243,33 @@ export default function DatabaseManagement() {
     setRestoring(filename);
     setRestorePct(1);
     setRestorePhase('Starting restore…');
-    const poll = setInterval(async () => {
-      try {
-        const res = await api.get('/api/archive/restore-progress');
-        if (res.data?.filename === filename || res.data?.active) {
-          setRestorePct(res.data.pct ?? 0);
-          setRestorePhase(res.data.phase || 'Restoring…');
-        }
-      } catch { /* ignore poll errors */ }
-    }, 400);
     try {
       await api.post(
         `/api/archive/restore/${encodeURIComponent(filename)}`,
         { confirm_config_diff: !!confirmConfigDiff },
-        { timeout: 600000 },
+        { timeout: 120000 },
       );
+      const deadline = Date.now() + 600000;
+      let last = {};
+      while (Date.now() < deadline) {
+        try {
+          const res = await api.get('/api/archive/restore-progress', { timeout: 15000 });
+          last = res.data || {};
+          if (last.filename === filename || last.active || last.done) {
+            if (typeof last.pct === 'number') setRestorePct(last.pct);
+            if (last.phase) setRestorePhase(last.phase);
+          }
+          if (last.done && last.filename === filename) break;
+        } catch { /* keep polling through brief proxy blips */ }
+        if (last.done && last.filename === filename) break;
+        await new Promise((r) => setTimeout(r, 400));
+      }
+      if (last.error && last.filename === filename) {
+        throw new Error(last.error);
+      }
+      if (!(last.done && last.filename === filename)) {
+        throw new Error('Restore timed out');
+      }
       setRestorePct(100);
       setRestorePhase('Restore complete');
       try {
@@ -271,10 +283,9 @@ export default function DatabaseManagement() {
         setConfirmRestore({ filename, preview: detail });
         flash('Live configuration differs from the backup. Confirm to continue.', true, 8000);
       } else {
-        flash((typeof detail === 'string' ? detail : null) || 'Restore failed', true, 8000);
+        flash((typeof detail === 'string' ? detail : null) || e.message || 'Restore failed', true, 8000);
       }
     } finally {
-      clearInterval(poll);
       setRestoring(null);
       setRestorePct(null);
       setRestorePhase('');

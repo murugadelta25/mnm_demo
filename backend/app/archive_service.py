@@ -48,6 +48,7 @@ _restore_state = {
     "pct": 0,
     "phase": "",
     "error": None,
+    "result": None,
 }
 
 
@@ -780,7 +781,7 @@ def preview_restore(filename: str) -> dict:
 
 
 def restore_backup(filename: str, *, confirm_config_diff: bool = False) -> dict:
-    """Restore the database from a backup file. Overwrites live data only."""
+    """Start restore in a background thread so progress polling is not blocked."""
     fp = get_backup_path(filename)
     if not fp:
         raise FileNotFoundError(f"Backup file not found: {filename}")
@@ -799,13 +800,74 @@ def restore_backup(filename: str, *, confirm_config_diff: bool = False) -> dict:
             "pct": 1,
             "phase": "Starting restore…",
             "error": None,
+            "result": None,
         })
 
+    threading.Thread(
+        target=_execute_restore,
+        args=(fp, preview),
+        name="pms-restore",
+        daemon=True,
+    ).start()
+    return {"status": "started", "filename": fp.name}
+
+
+def _kill_other_db_sessions() -> None:
+    """Drop other MySQL sessions on this database so DROP TABLE is not blocked."""
+    try:
+        import pymysql
+    except Exception:
+        return
+    info = _parse_db_url()
+    host = info["host"]
+    if host in ("localhost", "::1"):
+        host = "127.0.0.1"
+    conn = pymysql.connect(
+        host=host,
+        port=int(info["port"] or 3306),
+        user=info["user"],
+        password=info["password"],
+        database=info["database"],
+        connect_timeout=5,
+        autocommit=True,
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT CONNECTION_ID()")
+            me = cur.fetchone()[0]
+            cur.execute(
+                "SELECT ID FROM information_schema.PROCESSLIST WHERE ID <> %s AND `DB` = %s",
+                (me, info["database"]),
+            )
+            pids = [int(row[0]) for row in cur.fetchall() if row and row[0] != me]
+            for pid in pids:
+                try:
+                    cur.execute(f"KILL {pid}")
+                except Exception:
+                    pass
+    finally:
+        conn.close()
+
+
+def _prepare_db_for_restore() -> None:
+    try:
+        engine.dispose()
+    except Exception:
+        pass
+    try:
+        _kill_other_db_sessions()
+    except Exception:
+        pass
+
+
+def _execute_restore(fp: Path, preview: dict) -> None:
     def progress(pct: int, phase: str) -> None:
         _set_restore_progress(pct=max(0, min(100, int(pct))), phase=phase)
 
     try:
         progress(5, "Preparing restore…")
+        _prepare_db_for_restore()
+        progress(8, "Restoring database…")
         if fp.name.endswith(".sql.gz"):
             result = _restore_sql(fp, progress)
         elif fp.name.endswith(".json.gz"):
@@ -818,13 +880,14 @@ def restore_backup(filename: str, *, confirm_config_diff: bool = False) -> dict:
             pass
         progress(100, "Restore complete")
         result["config_replaced"] = bool(preview.get("config_differs"))
-        _set_restore_progress(active=False, done=True, pct=100, phase="Restore complete", error=None)
-        return result
+        _set_restore_progress(
+            active=False, done=True, pct=100, phase="Restore complete",
+            error=None, result=result,
+        )
     except Exception as exc:
         _set_restore_progress(
             active=False, done=True, error=str(exc), phase="Restore failed",
         )
-        raise
 
 
 def _gzip_uncompressed_size(filepath: Path) -> int:
@@ -880,6 +943,7 @@ def _restore_sql(filepath: Path, progress: Optional[Callable[[int, str], None]] 
                     if proc.poll() is not None:
                         break
                     proc.stdin.write(chunk)
+                    proc.stdin.flush()
                     sent += len(chunk)
                     pct = 10 + int(80 * min(sent, total) / total)
                     report(min(90, pct), "Restoring database…")

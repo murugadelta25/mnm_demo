@@ -96,3 +96,17 @@ def require_superadmin():
             raise HTTPException(status_code=403, detail="Superadmin access required")
         return current_user
     return checker
+
+
+def require_superadmin_jwt(token: str = Depends(oauth2_scheme)):
+    """Superadmin check from JWT only — does not query the database.
+
+    Used by restore-progress so polling still works while MySQL tables are locked.
+    """
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    if payload.get("role") != "superadmin":
+        raise HTTPException(status_code=403, detail="Superadmin access required")
+    return payload
