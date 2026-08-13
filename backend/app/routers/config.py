@@ -89,43 +89,62 @@ class ConfigPayload(BaseModel):
     config: dict
 
 
+def parse_stored_config(raw) -> dict:
+    """Parse site_config.config_json; never raise on corrupt restore/import data."""
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def merge_config(stored: dict) -> dict:
     """Merge stored site config with defaults (timed breaks required for hourly output)."""
-    if not stored:
+    if not stored or not isinstance(stored, dict):
         return dict(DEFAULT_CONFIG)
     merged = {**DEFAULT_CONFIG, **stored}
     merged["shifts"] = stored.get("shifts") or DEFAULT_CONFIG["shifts"]
+    if not isinstance(merged["shifts"], list):
+        merged["shifts"] = DEFAULT_CONFIG["shifts"]
     breaks_out = {}
+    stored_breaks = stored.get("breaks") if isinstance(stored.get("breaks"), dict) else {}
     for sh in merged["shifts"]:
+        if not isinstance(sh, dict):
+            continue
         sid = sh.get("id")
         if not sid:
             continue
         base = DEFAULT_CONFIG["breaks"].get(sid, DEFAULT_CONFIG["breaks"]["A"])
-        breaks_out[sid] = {**base, **(stored.get("breaks") or {}).get(sid, {})}
+        extra = stored_breaks.get(sid, {}) if isinstance(stored_breaks.get(sid), dict) else {}
+        breaks_out[sid] = {**base, **extra}
     merged["breaks"] = breaks_out
-    factory = stored.get("factory") or {}
+    factory = stored.get("factory") if isinstance(stored.get("factory"), dict) else {}
     merged["factory"] = {**DEFAULT_CONFIG["factory"], **factory}
-    esc = stored.get("deviation_escalation") or {}
+    esc = stored.get("deviation_escalation") if isinstance(stored.get("deviation_escalation"), dict) else {}
     default_esc = DEFAULT_CONFIG["deviation_escalation"]
     merged["deviation_escalation"] = {
         "enabled": esc.get("enabled", default_esc["enabled"]),
         "levels": esc.get("levels") or default_esc["levels"],
     }
-    lt = stored.get("loss_tracker_limits") or {}
+    lt = stored.get("loss_tracker_limits") if isinstance(stored.get("loss_tracker_limits"), dict) else {}
     default_lt = DEFAULT_CONFIG["loss_tracker_limits"]
     merged["loss_tracker_limits"] = {**default_lt, **lt}
-    hourly = stored.get("hourly_output") or {}
+    hourly = stored.get("hourly_output") if isinstance(stored.get("hourly_output"), dict) else {}
     default_hourly = DEFAULT_CONFIG["hourly_output"]
     merged["hourly_output"] = {**default_hourly, **hourly}
-    backup = stored.get("backup") or {}
+    backup = stored.get("backup") if isinstance(stored.get("backup"), dict) else {}
     default_backup = DEFAULT_CONFIG["backup"]
     merged["backup"] = {**default_backup, **backup}
-    mi = stored.get("mobile_integration") or {}
+    mi = stored.get("mobile_integration") if isinstance(stored.get("mobile_integration"), dict) else {}
     default_mi = DEFAULT_CONFIG["mobile_integration"]
     merged["mobile_integration"] = {**default_mi, **mi}
-    dc = stored.get("data_capture") or {}
+    dc = stored.get("data_capture") if isinstance(stored.get("data_capture"), dict) else {}
     default_dc = DEFAULT_CONFIG["data_capture"]
-    mode = (dc.get("mode") or default_dc["mode"] or "auto").strip().lower()
+    mode = str(dc.get("mode") or default_dc["mode"] or "auto").strip().lower()
     if mode not in ("auto", "manual"):
         mode = "auto"
     merged["data_capture"] = {**default_dc, **dc, "mode": mode}
@@ -133,11 +152,16 @@ def merge_config(stored: dict) -> dict:
 
 
 def _load_config(db: Session) -> dict:
-    row = db.query(SiteConfig).first()
+    try:
+        row = db.query(SiteConfig).first()
+    except Exception:
+        return dict(DEFAULT_CONFIG)
     if not row:
         return dict(DEFAULT_CONFIG)
-    cfg = merge_config(json.loads(row.config_json))
+    cfg = merge_config(parse_stored_config(row.config_json))
     factory = cfg.get("factory") or {}
+    if not isinstance(factory, dict):
+        factory = dict(DEFAULT_CONFIG["factory"])
     if "siteTitle" not in factory:
         factory["siteTitle"] = DEFAULT_CONFIG["factory"]["siteTitle"]
     if "faviconFactoryId" not in factory:
@@ -149,21 +173,27 @@ def _load_config(db: Session) -> dict:
 @router.get("/branding")
 def get_branding(db: Session = Depends(get_db)):
     """Public site title + favicon for browser tab (no auth required)."""
-    cfg = _load_config(db)
-    factory_cfg = cfg.get("factory") or {}
-    site_title = factory_cfg.get("siteTitle") or DEFAULT_SITE_TITLE
-    favicon_url = None
-    favicon_id = factory_cfg.get("faviconFactoryId")
-    for f in factory_cfg.get("factories") or []:
-        if favicon_id and f.get("id") == favicon_id and f.get("logoUrl"):
-            favicon_url = f["logoUrl"]
-            break
-    if not favicon_url:
-        for f in factory_cfg.get("factories") or []:
-            if f.get("logoUrl"):
+    try:
+        cfg = _load_config(db)
+        factory_cfg = cfg.get("factory") or {}
+        site_title = factory_cfg.get("siteTitle") or DEFAULT_SITE_TITLE
+        favicon_url = None
+        favicon_id = factory_cfg.get("faviconFactoryId")
+        factories = factory_cfg.get("factories") if isinstance(factory_cfg.get("factories"), list) else []
+        for f in factories:
+            if not isinstance(f, dict):
+                continue
+            if favicon_id and f.get("id") == favicon_id and f.get("logoUrl"):
                 favicon_url = f["logoUrl"]
                 break
-    return {"siteTitle": site_title, "faviconUrl": favicon_url}
+        if not favicon_url:
+            for f in factories:
+                if isinstance(f, dict) and f.get("logoUrl"):
+                    favicon_url = f["logoUrl"]
+                    break
+        return {"siteTitle": site_title, "faviconUrl": favicon_url}
+    except Exception:
+        return {"siteTitle": DEFAULT_SITE_TITLE, "faviconUrl": None}
 
 
 @router.get("/network")

@@ -264,7 +264,12 @@ def get_archive_engine(cfg: Optional[dict] = None, *, force_refresh: bool = Fals
                 _archive_engine.dispose()
             except Exception:
                 pass
-        _archive_engine = create_engine(url, pool_pre_ping=True, pool_recycle=3600)
+        _archive_engine = create_engine(
+            url,
+            pool_pre_ping=True,
+            pool_recycle=3600,
+            connect_args={"connect_timeout": 5},
+        )
         _ArchiveSession = sessionmaker(autocommit=False, autoflush=False, bind=_archive_engine)
         _archive_engine_url = url
     return _archive_engine
@@ -961,9 +966,10 @@ def query_oee_entries_federated(
         meta["sources"].append("live")
 
     if need_arch:
-        arch_db = get_archive_session(cfg)
-        if arch_db is not None:
-            try:
+        arch_db = None
+        try:
+            arch_db = get_archive_session(cfg)
+            if arch_db is not None:
                 if entry_date is not None:
                     arch_entries = _fetch(
                         arch_db,
@@ -984,8 +990,14 @@ def query_oee_entries_federated(
                     )
                 rows.extend(_entries_to_dicts(arch_db, arch_entries, "archive"))
                 meta["sources"].append("archive")
-            finally:
-                arch_db.close()
+        except Exception as exc:
+            print(f"[Archive] OEE federation skipped (unreachable archive DB): {exc}")
+        finally:
+            if arch_db is not None:
+                try:
+                    arch_db.close()
+                except Exception:
+                    pass
 
     by_id: dict[Any, dict] = {}
     for r in rows:

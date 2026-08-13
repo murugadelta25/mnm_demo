@@ -438,11 +438,11 @@ def realtime_oee(
     Returns entries compatible with the manual OEE data but flagged as
     ``source: 'realtime'`` so the Dashboard can display both sources.
     """
-    from .config import DEFAULT_CONFIG, merge_config
+    from .config import DEFAULT_CONFIG, merge_config, parse_stored_config
 
     row = db.query(SiteConfig).first()
     if row:
-        cfg = merge_config(json.loads(row.config_json))
+        cfg = merge_config(parse_stored_config(row.config_json))
     else:
         cfg = dict(DEFAULT_CONFIG)
 
@@ -488,11 +488,14 @@ class DefectUpdateByMachine(BaseModel):
 
 
 def _load_site_config(db: Session) -> dict:
-    from .config import DEFAULT_CONFIG, merge_config
+    from .config import DEFAULT_CONFIG, merge_config, parse_stored_config
 
-    row = db.query(SiteConfig).first()
-    if row:
-        return merge_config(json.loads(row.config_json))
+    try:
+        row = db.query(SiteConfig).first()
+        if row:
+            return merge_config(parse_stored_config(row.config_json))
+    except Exception:
+        pass
     return dict(DEFAULT_CONFIG)
 
 

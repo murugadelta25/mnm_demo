@@ -81,14 +81,16 @@ def _as_naive_ist(dt: Optional[datetime]) -> Optional[datetime]:
 
 
 def _load_operator_site_config(db: Session) -> dict:
-    from .config import DEFAULT_CONFIG, merge_config
-    import json
+    from .config import DEFAULT_CONFIG, merge_config, parse_stored_config
 
     from ..models import SiteConfig
 
-    row = db.query(SiteConfig).first()
-    if row and row.config_json:
-        return merge_config(json.loads(row.config_json))
+    try:
+        row = db.query(SiteConfig).first()
+        if row and row.config_json:
+            return merge_config(parse_stored_config(row.config_json))
+    except Exception:
+        pass
     return dict(DEFAULT_CONFIG)
 
 

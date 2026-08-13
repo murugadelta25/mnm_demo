@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, Fragment, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import api from '../api/client';
 import { useWebSocket } from '../api/useWebSocket';
 import PageHeader from '../components/PageHeader';
@@ -123,7 +123,10 @@ export default function Dashboard() {
   const [defectSaving, setDefectSaving] = useState(false);
   const [defectLog, setDefectLog] = useState({ id: null, records: [] });
   const [kpiDialog, setKpiDialog] = useState({ open: false, loading: false, data: null });
+  const [fetchError, setFetchError] = useState('');
+  const [restoreNotice, setRestoreNotice] = useState('');
   const navigate = useNavigate();
+  const location = useLocation();
 
   // After site config loads, default to today + current shift + all stations/machines.
   // Avoid applying DEFAULT_CONFIG (wrong shift windows) before API config arrives.
@@ -188,13 +191,15 @@ export default function Dashboard() {
       const params = buildParams();
       const rtParams = buildRealtimeParams(viewMode, params, filters);
       const searchTerm = params.search || '';
+      const timeout = 120000;
+      setFetchError('');
 
       const [e, s, p, m, rt] = await Promise.all([
-        api.get('/api/oee/', { params }),
-        api.get('/api/oee/summary', { params }),
-        api.get('/api/stations/', { params: { enabled_only: true } }),
-        api.get('/api/machines/', { params: { enabled_only: true } }),
-        api.get('/api/oee/realtime', { params: rtParams }).catch(() => ({ data: [] })),
+        api.get('/api/oee/', { params, timeout }),
+        api.get('/api/oee/summary', { params, timeout }),
+        api.get('/api/stations/', { params: { enabled_only: true }, timeout }),
+        api.get('/api/machines/', { params: { enabled_only: true }, timeout }),
+        api.get('/api/oee/realtime', { params: rtParams, timeout }).catch(() => ({ data: [] })),
       ]);
       const manualEntries = (Array.isArray(e.data) ? e.data : []);
       const realtimeEntries = (Array.isArray(rt.data) ? rt.data : [])
@@ -213,8 +218,27 @@ export default function Dashboard() {
       setMachines(Array.isArray(m.data) ? m.data : []);
     } catch (err) {
       console.error('Dashboard fetch error:', err);
+      const timedOut = err.code === 'ECONNABORTED' || /timeout/i.test(err.message || '');
+      setFetchError(
+        timedOut
+          ? 'Dashboard timed out. After a restore, History Archive may still point at the other IPC. Refresh, or turn off History Archive on this PC.'
+          : (err.response?.data?.detail || err.message || 'Dashboard failed to load'),
+      );
     }
   }, [buildParams, viewMode, filters.entry_date, filters.date_from, filters.date_to, filters.month, filters.year]);
+
+  useEffect(() => {
+    const onRestored = () => { fetchData(); };
+    window.addEventListener('pms-db-restored', onRestored);
+    return () => window.removeEventListener('pms-db-restored', onRestored);
+  }, [fetchData]);
+
+  useEffect(() => {
+    const filename = location.state?.restoreSuccess;
+    if (!filename) return;
+    setRestoreNotice(`Restore complete. Dashboard now shows data from ${filename}`);
+    navigate('/dashboard', { replace: true, state: {} });
+  }, [location.state, navigate]);
 
   // Missing-shift reminder — only when Manual data entry is enabled (auto capture has no form to fill).
   const checkMissingShifts = useCallback(async () => {
@@ -392,6 +416,22 @@ export default function Dashboard() {
     <div className={pageClass(t)} style={s.page}>
       <style>{PULSE_CSS}</style>
       <PageHeader title="PRODUCTION DASHBOARD" onRefresh={fetchData} />
+      {restoreNotice && (
+        <div style={{
+          margin: '0 0 12px', padding: '10px 14px', borderRadius: 8,
+          background: '#ecfdf5', color: '#047857', fontSize: 13, fontWeight: 600,
+        }}>
+          {restoreNotice}
+        </div>
+      )}
+      {fetchError && (
+        <div style={{
+          margin: '0 0 12px', padding: '10px 14px', borderRadius: 8,
+          background: '#fef2f2', color: '#b91c1c', fontSize: 13, fontWeight: 600,
+        }}>
+          {fetchError}
+        </div>
+      )}
 
       {/* Missing shift alerts */}
       {missingShifts.map(sh => (

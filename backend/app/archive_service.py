@@ -14,17 +14,18 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import uuid
 import zipfile
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import unquote, urlparse
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from .models import SessionLocal, engine
+from .models import SessionLocal, SiteConfig, engine
 from .upload_limits import MAX_BACKUP_BYTES
 
 BACKUP_DIR = Path(__file__).resolve().parent.parent / "backups"
@@ -35,6 +36,27 @@ _ZIP_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.zip$")
 _GZIP_MAGIC = b"\x1f\x8b"
 _MAX_META_BYTES = 64 * 1024
 _MAX_ZIP_MEMBERS = 8
+_SITE_INSERT_RE = re.compile(
+    r"INSERT INTO `site_config`[^;]*?VALUES\s*\(\s*\d+\s*,\s*'((?:\\.|[^'\\])*)'",
+    re.IGNORECASE | re.DOTALL,
+)
+_restore_lock = threading.Lock()
+_restore_state = {
+    "active": False,
+    "done": False,
+    "filename": None,
+    "pct": 0,
+    "phase": "",
+    "error": None,
+}
+
+
+class RestoreNeedsConfirmation(Exception):
+    """Live site config differs from backup; caller must confirm before restore."""
+
+    def __init__(self, preview: dict):
+        self.preview = preview
+        super().__init__("CONFIG_DIFFERS")
 
 TABLES_TO_BACKUP = [
     "stations", "machines", "users", "site_config",
@@ -589,52 +611,299 @@ def delete_backup(filename: str) -> bool:
     return deleted
 
 
-def restore_backup(filename: str) -> dict:
-    """
-    Restore the database from a backup file.
-    Returns status dict.
-    """
+def get_restore_progress() -> dict:
+    with _restore_lock:
+        return dict(_restore_state)
+
+
+def _set_restore_progress(**kwargs) -> None:
+    with _restore_lock:
+        _restore_state.update(kwargs)
+
+
+def _parse_cfg(raw) -> dict:
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _config_fingerprint(cfg: dict) -> dict:
+    factory = cfg.get("factory") if isinstance(cfg.get("factory"), dict) else {}
+    factories = factory.get("factories") if isinstance(factory.get("factories"), list) else []
+    shifts = cfg.get("shifts") if isinstance(cfg.get("shifts"), list) else []
+    hist = cfg.get("history_archive") if isinstance(cfg.get("history_archive"), dict) else {}
+    dc = cfg.get("data_capture") if isinstance(cfg.get("data_capture"), dict) else {}
+    return {
+        "siteTitle": str(factory.get("siteTitle") or ""),
+        "factories": [
+            str(f.get("name") or f.get("id") or "")
+            for f in factories if isinstance(f, dict)
+        ],
+        "shifts": [
+            {
+                "id": s.get("id"),
+                "name": s.get("name"),
+                "start": s.get("start"),
+                "end": s.get("end"),
+                "enabled": bool(s.get("enabled", True)),
+            }
+            for s in shifts if isinstance(s, dict)
+        ],
+        "dataCaptureMode": str(dc.get("mode") or "auto"),
+        "historyArchiveEnabled": bool(hist.get("enabled")),
+        "historyArchiveHost": str(hist.get("host") or ""),
+    }
+
+
+def _sql_unescape(value: str) -> str:
+    return (
+        value.replace("\\\\", "\\")
+        .replace("\\'", "'")
+        .replace('\\"', '"')
+        .replace("\\n", "\n")
+        .replace("\\r", "\r")
+        .replace("\\t", "\t")
+        .replace("''", "'")
+    )
+
+
+def _extract_site_config_from_sql_gz(filepath: Path) -> Optional[dict]:
+    buf = ""
+    with gzip.open(filepath, "rt", encoding="utf-8", errors="replace") as fh:
+        while True:
+            chunk = fh.read(256 * 1024)
+            if not chunk:
+                break
+            buf += chunk
+            match = _SITE_INSERT_RE.search(buf)
+            if match:
+                try:
+                    return _parse_cfg(_sql_unescape(match.group(1)))
+                except Exception:
+                    return None
+            if len(buf) > 2 * 1024 * 1024:
+                buf = buf[-512 * 1024:]
+    return None
+
+
+def _extract_site_config_from_json_gz(filepath: Path) -> Optional[dict]:
+    with gzip.open(filepath, "rt", encoding="utf-8") as fh:
+        data = json.load(fh)
+    rows = data.get("site_config") if isinstance(data, dict) else None
+    if not rows:
+        return None
+    raw = rows[0].get("config_json") if isinstance(rows[0], dict) else None
+    return _parse_cfg(raw)
+
+
+def _live_config_fingerprint() -> dict:
+    db = SessionLocal()
+    try:
+        row = db.query(SiteConfig).first()
+        return _config_fingerprint(_parse_cfg(row.config_json if row else None))
+    except Exception:
+        return _config_fingerprint({})
+    finally:
+        db.close()
+
+
+def _diff_config_messages(live: dict, backup: dict) -> list[str]:
+    changes = []
+    if (live.get("siteTitle") or "") != (backup.get("siteTitle") or ""):
+        changes.append(
+            f"Site title: '{live.get('siteTitle') or '—'}' → '{backup.get('siteTitle') or '—'}'"
+        )
+    if live.get("factories") != backup.get("factories"):
+        changes.append(
+            f"Factories: {', '.join(live.get('factories') or []) or '—'} → "
+            f"{', '.join(backup.get('factories') or []) or '—'}"
+        )
+    if live.get("shifts") != backup.get("shifts"):
+        live_shifts = ", ".join(
+            f"{s.get('id')} {s.get('start')}-{s.get('end')}"
+            for s in (live.get("shifts") or [])
+        ) or "—"
+        bak_shifts = ", ".join(
+            f"{s.get('id')} {s.get('start')}-{s.get('end')}"
+            for s in (backup.get("shifts") or [])
+        ) or "—"
+        changes.append(f"Shifts: {live_shifts} → {bak_shifts}")
+    if (live.get("dataCaptureMode") or "auto") != (backup.get("dataCaptureMode") or "auto"):
+        changes.append(
+            f"Data capture: {live.get('dataCaptureMode')} → {backup.get('dataCaptureMode')}"
+        )
+    if live.get("historyArchiveEnabled") != backup.get("historyArchiveEnabled") or (
+        live.get("historyArchiveHost") != backup.get("historyArchiveHost")
+    ):
+        changes.append(
+            "History archive host/settings differ (live archive config will be replaced)"
+        )
+    return changes
+
+
+def preview_restore(filename: str) -> dict:
+    """Compare live site config with the backup without changing the database."""
+    fp = get_backup_path(filename)
+    if not fp:
+        raise FileNotFoundError(f"Backup file not found: {filename}")
+    method = "sql" if fp.name.endswith(".sql.gz") else "json"
+    live_fp = _live_config_fingerprint()
+    backup_cfg = None
+    warning = None
+    try:
+        if method == "sql":
+            backup_cfg = _extract_site_config_from_sql_gz(fp)
+        else:
+            backup_cfg = _extract_site_config_from_json_gz(fp)
+    except Exception as exc:
+        warning = f"Could not read backup configuration: {exc}"
+    backup_fp = _config_fingerprint(backup_cfg or {})
+    changes = _diff_config_messages(live_fp, backup_fp) if backup_cfg is not None else []
+    if backup_cfg is None:
+        warning = warning or "Could not read site configuration from this backup"
+        changes = ["Backup configuration could not be compared with live settings"]
+    return {
+        "filename": fp.name,
+        "method": method,
+        "config_differs": bool(changes),
+        "live": live_fp,
+        "backup": backup_fp if backup_cfg is not None else None,
+        "changes": changes,
+        "warning": warning,
+    }
+
+
+def restore_backup(filename: str, *, confirm_config_diff: bool = False) -> dict:
+    """Restore the database from a backup file. Overwrites live data only."""
     fp = get_backup_path(filename)
     if not fp:
         raise FileNotFoundError(f"Backup file not found: {filename}")
 
-    if fp.name.endswith(".sql.gz"):
-        return _restore_sql(fp)
-    elif fp.name.endswith(".json.gz"):
-        return _restore_json(fp)
-    else:
-        raise ValueError(f"Unknown backup format: {fp.name}")
+    preview = preview_restore(filename)
+    if preview.get("config_differs") and not confirm_config_diff:
+        raise RestoreNeedsConfirmation(preview)
+
+    with _restore_lock:
+        if _restore_state.get("active"):
+            raise RuntimeError("A restore is already running")
+        _restore_state.update({
+            "active": True,
+            "done": False,
+            "filename": fp.name,
+            "pct": 1,
+            "phase": "Starting restore…",
+            "error": None,
+        })
+
+    def progress(pct: int, phase: str) -> None:
+        _set_restore_progress(pct=max(0, min(100, int(pct))), phase=phase)
+
+    try:
+        progress(5, "Preparing restore…")
+        if fp.name.endswith(".sql.gz"):
+            result = _restore_sql(fp, progress)
+        elif fp.name.endswith(".json.gz"):
+            result = _restore_json(fp, progress)
+        else:
+            raise ValueError(f"Unknown backup format: {fp.name}")
+        try:
+            engine.dispose()
+        except Exception:
+            pass
+        progress(100, "Restore complete")
+        result["config_replaced"] = bool(preview.get("config_differs"))
+        _set_restore_progress(active=False, done=True, pct=100, phase="Restore complete", error=None)
+        return result
+    except Exception as exc:
+        _set_restore_progress(
+            active=False, done=True, error=str(exc), phase="Restore failed",
+        )
+        raise
 
 
-def _restore_sql(filepath: Path) -> dict:
+def _gzip_uncompressed_size(filepath: Path) -> int:
+    try:
+        with filepath.open("rb") as fh:
+            fh.seek(-4, 2)
+            return int.from_bytes(fh.read(4), "little") or filepath.stat().st_size
+    except Exception:
+        return max(filepath.stat().st_size, 1)
+
+
+def _restore_sql(filepath: Path, progress: Optional[Callable[[int, str], None]] = None) -> dict:
     """Restore from a mysqldump .sql.gz file."""
     if not _mysql_available():
         raise RuntimeError("mysql CLI not found — cannot restore SQL backup")
 
     db_info = _parse_db_url()
     defaults_file = _write_mysql_defaults(db_info)
+    report = progress or (lambda _pct, _phase: None)
+    report(8, "Reading backup…")
+    total = max(_gzip_uncompressed_size(filepath), 1)
 
     try:
-        with gzip.open(filepath, "rb") as f:
-            sql_data = f.read()
-
         cmd = [
             "mysql",
             f"--defaults-extra-file={defaults_file}",
             db_info["database"],
         ]
-
-        proc = subprocess.run(
-            cmd, input=sql_data, capture_output=True, timeout=600,
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
         )
+        sent = 0
+        stderr_chunks: list[bytes] = []
+
+        def _drain_stderr() -> None:
+            try:
+                if proc.stderr:
+                    stderr_chunks.append(proc.stderr.read() or b"")
+            except Exception:
+                pass
+
+        drain = threading.Thread(target=_drain_stderr, daemon=True)
+        drain.start()
+        try:
+            with gzip.open(filepath, "rb") as gz:
+                while True:
+                    chunk = gz.read(256 * 1024)
+                    if not chunk:
+                        break
+                    if proc.poll() is not None:
+                        break
+                    proc.stdin.write(chunk)
+                    sent += len(chunk)
+                    pct = 10 + int(80 * min(sent, total) / total)
+                    report(min(90, pct), "Restoring database…")
+            if proc.stdin:
+                proc.stdin.close()
+            report(92, "Finalizing MySQL restore…")
+            proc.wait(timeout=600)
+            drain.join(timeout=10)
+            stderr = b"".join(stderr_chunks)
+        except Exception:
+            proc.kill()
+            drain.join(timeout=2)
+            raise
         if proc.returncode != 0:
-            raise RuntimeError(f"mysql restore failed: {proc.stderr.decode('utf-8', errors='replace')}")
+            raise RuntimeError(
+                f"mysql restore failed: {(stderr or b'').decode('utf-8', errors='replace')}"
+            )
     finally:
         try:
             defaults_file.unlink(missing_ok=True)
         except Exception:
             pass
 
+    report(98, "Refreshing connections…")
     return {
         "status": "restored",
         "method": "sql",
@@ -643,15 +912,21 @@ def _restore_sql(filepath: Path) -> dict:
     }
 
 
-def _restore_json(filepath: Path) -> dict:
+def _restore_json(filepath: Path, progress: Optional[Callable[[int, str], None]] = None) -> dict:
     """Restore from a JSON .json.gz backup — truncate + re-insert."""
+    report = progress or (lambda _pct, _phase: None)
+    report(10, "Reading JSON backup…")
     with gzip.open(filepath, "rt", encoding="utf-8") as f:
         data = json.load(f)
+
+    tables_with_rows = [table for table in TABLES_TO_BACKUP if data.get(table)]
+    total_tables = max(len(tables_with_rows), 1)
 
     db: Session = SessionLocal()
     try:
         db.execute(text("SET FOREIGN_KEY_CHECKS = 0"))
         restored_tables = []
+        report(20, "Clearing live tables…")
 
         for table in reversed(TABLES_TO_BACKUP):
             if table in data:
@@ -670,6 +945,8 @@ def _restore_json(filepath: Path) -> dict:
                 stmt = text(f"INSERT INTO `{table}` ({cols}) VALUES ({placeholders})")
                 db.execute(stmt, row)
             restored_tables.append(f"{table} ({len(rows)} rows)")
+            pct = 25 + int(70 * min(len(restored_tables), total_tables) / total_tables)
+            report(min(95, pct), f"Restoring {table}…")
 
         db.execute(text("SET FOREIGN_KEY_CHECKS = 1"))
         db.commit()

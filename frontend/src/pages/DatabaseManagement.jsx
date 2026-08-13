@@ -1,5 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useTheme } from '../context/ThemeContext';
+import { useConfig } from '../context/ConfigContext';
+import { useBranding } from '../context/BrandingContext';
+import { useFeatureFlags } from '../context/FeatureFlagsContext';
 import { pageClass } from '../themes/tileHelpers';
 import PageHeader from '../components/PageHeader';
 import api from '../api/client';
@@ -8,6 +12,10 @@ import { formatMaxMb, MAX_BACKUP_BYTES, validateBackupFile } from '../utils/uplo
 export default function DatabaseManagement() {
   const { theme: t } = useTheme();
   const s = getStyles(t);
+  const navigate = useNavigate();
+  const { reload: reloadConfig } = useConfig();
+  const { reload: reloadBranding } = useBranding();
+  const { reload: reloadFeatures } = useFeatureFlags();
 
   const [backupCfg, setBackupCfg] = useState({ enabled: false, interval_days: 15, max_backups: 10 });
   const [histCfg, setHistCfg] = useState({
@@ -50,7 +58,10 @@ export default function DatabaseManagement() {
   const [msg, setMsg] = useState('');
   const [err, setErr] = useState('');
   const [restoring, setRestoring] = useState(null);
+  const [restorePct, setRestorePct] = useState(null);
+  const [restorePhase, setRestorePhase] = useState('');
   const [confirmRestore, setConfirmRestore] = useState(null);
+  const [ackConfigDiff, setAckConfigDiff] = useState(false);
   const [infoModal, setInfoModal] = useState(null); // 'about' | 'setup' | null
   const [showAboutBackups, setShowAboutBackups] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -208,16 +219,65 @@ export default function DatabaseManagement() {
     }
   };
 
-  const handleRestore = async (filename) => {
-    setConfirmRestore(null);
-    setRestoring(filename);
+  const openRestorePreview = async (filename) => {
+    setAckConfigDiff(false);
     try {
-      await api.post(`/api/archive/restore/${encodeURIComponent(filename)}`, null, { timeout: 600000 });
-      flash(`Database restored from: ${filename}`);
+      const res = await api.get(`/api/archive/restore-preview/${encodeURIComponent(filename)}`);
+      setConfirmRestore({ filename, preview: res.data });
     } catch (e) {
-      flash(e.response?.data?.detail || 'Restore failed', true);
+      setConfirmRestore({
+        filename,
+        preview: {
+          filename,
+          config_differs: true,
+          changes: [],
+          warning: e.response?.data?.detail || 'Could not compare live and backup configuration',
+        },
+      });
+    }
+  };
+
+  const handleRestore = async (filename, confirmConfigDiff) => {
+    setConfirmRestore(null);
+    setAckConfigDiff(false);
+    setRestoring(filename);
+    setRestorePct(1);
+    setRestorePhase('Starting restore…');
+    const poll = setInterval(async () => {
+      try {
+        const res = await api.get('/api/archive/restore-progress');
+        if (res.data?.filename === filename || res.data?.active) {
+          setRestorePct(res.data.pct ?? 0);
+          setRestorePhase(res.data.phase || 'Restoring…');
+        }
+      } catch { /* ignore poll errors */ }
+    }, 400);
+    try {
+      await api.post(
+        `/api/archive/restore/${encodeURIComponent(filename)}`,
+        { confirm_config_diff: !!confirmConfigDiff },
+        { timeout: 600000 },
+      );
+      setRestorePct(100);
+      setRestorePhase('Restore complete');
+      try {
+        await Promise.all([reloadConfig(), reloadBranding(), reloadFeatures()]);
+      } catch { /* pages still reload on navigation */ }
+      window.dispatchEvent(new Event('pms-db-restored'));
+      navigate('/dashboard', { state: { restoreSuccess: filename } });
+    } catch (e) {
+      const detail = e.response?.data?.detail;
+      if (e.response?.status === 409 && detail && typeof detail === 'object' && detail.config_differs) {
+        setConfirmRestore({ filename, preview: detail });
+        flash('Live configuration differs from the backup. Confirm to continue.', true, 8000);
+      } else {
+        flash((typeof detail === 'string' ? detail : null) || 'Restore failed', true, 8000);
+      }
     } finally {
+      clearInterval(poll);
       setRestoring(null);
+      setRestorePct(null);
+      setRestorePhase('');
     }
   };
 
@@ -357,8 +417,8 @@ export default function DatabaseManagement() {
             </p>
 
             <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-              <button style={s.btn} onClick={saveConfig}>Save Schedule</button>
-              <button style={{ ...s.btn, background: '#16a34a' }} onClick={triggerBackup} disabled={loading || uploading}>
+              <button style={s.btn} onClick={saveConfig} disabled={!!restoring}>Save Schedule</button>
+              <button style={{ ...s.btn, background: '#16a34a' }} onClick={triggerBackup} disabled={loading || uploading || !!restoring}>
                 {loading ? 'Creating Backup...' : 'Create Backup Now'}
               </button>
               <input
@@ -374,7 +434,7 @@ export default function DatabaseManagement() {
               <button
                 style={{ ...s.btn, background: '#0ea5e9' }}
                 onClick={() => backupFileRef.current?.click()}
-                disabled={loading || uploading}
+                disabled={loading || uploading || !!restoring}
               >
                 {uploading
                   ? (uploadPhase === 'processing'
@@ -396,6 +456,23 @@ export default function DatabaseManagement() {
                   </span>
                   <span style={{ color: t.textDim, fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap' }}>
                     {uploadPhase === 'processing' ? 'Saving on server…' : `${uploadPct ?? 0}%`}
+                  </span>
+                </span>
+              )}
+              {restoring && (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, minWidth: 260 }}>
+                  <span style={{
+                    flex: 1, height: 8, borderRadius: 99, background: t.surface2 || '#e2e8f0',
+                    overflow: 'hidden', minWidth: 160,
+                  }}>
+                    <span style={{
+                      display: 'block', height: '100%', borderRadius: 99, background: '#16a34a',
+                      width: `${restorePct ?? 0}%`,
+                      transition: 'width 0.2s ease',
+                    }} />
+                  </span>
+                  <span style={{ color: t.textDim, fontSize: 12, fontWeight: 600, whiteSpace: 'nowrap' }}>
+                    {restorePhase || 'Restoring…'} {restorePct ?? 0}%
                   </span>
                 </span>
               )}
@@ -448,9 +525,9 @@ export default function DatabaseManagement() {
                           ⬇ Download zip
                         </ActionBtn>
                         <ActionBtn color="#16a34a"
-                          onClick={() => setConfirmRestore(b.filename)}
-                          disabled={restoring === b.filename}>
-                          {restoring === b.filename ? '...' : '🔄 Restore'}
+                          onClick={() => openRestorePreview(b.filename)}
+                          disabled={!!restoring || uploading}>
+                          {restoring === b.filename ? `${restorePct ?? 0}%` : '🔄 Restore'}
                         </ActionBtn>
                         <ActionBtn color="#ef4444" onClick={() => handleDelete(b.filename)}>
                           🗑 Delete
@@ -785,30 +862,73 @@ export default function DatabaseManagement() {
           display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 9999,
         }}>
           <div style={{
-            background: t.surface, borderRadius: 12, padding: 24, maxWidth: 440, width: '90%',
+            background: t.surface, borderRadius: 12, padding: 24, maxWidth: 560, width: '92%',
+            maxHeight: '85vh', overflowY: 'auto',
             boxShadow: '0 8px 32px rgba(0,0,0,0.3)',
           }}>
             <h4 style={{ color: '#ef4444', margin: '0 0 12px', fontSize: 16 }}>
               Confirm Database Restore
             </h4>
             <p style={{ color: t.text, fontSize: 13, lineHeight: 1.5, margin: '0 0 8px' }}>
-              This will <strong>overwrite all current data</strong> with the backup:
+              This will <strong>overwrite all current live data</strong> with the backup.
+              Other features stay unchanged until you confirm restore.
             </p>
-            <p style={{ color: t.accent, fontSize: 13, fontWeight: 600, fontFamily: 'monospace', margin: '0 0 16px' }}>
-              {confirmRestore}
+            <p style={{ color: t.accent, fontSize: 13, fontWeight: 600, fontFamily: 'monospace', margin: '0 0 12px' }}>
+              {confirmRestore.filename}
             </p>
+            {confirmRestore.preview?.config_differs && (
+              <div style={{
+                background: '#fff7ed', border: '1px solid #fdba74', borderRadius: 8,
+                padding: 12, margin: '0 0 14px',
+              }}>
+                <p style={{ color: '#9a3412', fontSize: 13, fontWeight: 700, margin: '0 0 8px' }}>
+                  Live configuration differs from this backup
+                </p>
+                {(confirmRestore.preview.changes || []).length > 0 && (
+                  <ul style={{ margin: '0 0 10px', paddingLeft: 18, color: '#9a3412', fontSize: 12, lineHeight: 1.5 }}>
+                    {confirmRestore.preview.changes.map((line) => (
+                      <li key={line}>{line}</li>
+                    ))}
+                  </ul>
+                )}
+                {confirmRestore.preview.warning && (
+                  <p style={{ color: '#9a3412', fontSize: 12, margin: '0 0 10px' }}>
+                    {confirmRestore.preview.warning}
+                  </p>
+                )}
+                <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={ackConfigDiff}
+                    onChange={(e) => setAckConfigDiff(e.target.checked)}
+                    style={{ marginTop: 2 }}
+                  />
+                  <span style={{ color: '#9a3412', fontSize: 12, fontWeight: 600 }}>
+                    I understand factory / shift / archive settings on this IPC will be replaced by the backup.
+                  </span>
+                </label>
+              </div>
+            )}
             <p style={{ color: '#ef4444', fontSize: 12, margin: '0 0 20px' }}>
-              This action cannot be undone. Create a backup of current data first.
+              This cannot be undone. Create a backup of current data first if you may need it.
             </p>
             <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
               <button
                 style={{ padding: '8px 20px', background: t.surface2, color: t.text, border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13 }}
-                onClick={() => setConfirmRestore(null)}>
+                onClick={() => { setConfirmRestore(null); setAckConfigDiff(false); }}>
                 Cancel
               </button>
               <button
-                style={{ padding: '8px 20px', background: '#ef4444', color: '#fff', border: 'none', borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600 }}
-                onClick={() => handleRestore(confirmRestore)}>
+                style={{
+                  padding: '8px 20px', background: '#ef4444', color: '#fff', border: 'none',
+                  borderRadius: 6, cursor: 'pointer', fontSize: 13, fontWeight: 600,
+                  opacity: (confirmRestore.preview?.config_differs && !ackConfigDiff) ? 0.5 : 1,
+                }}
+                disabled={confirmRestore.preview?.config_differs && !ackConfigDiff}
+                onClick={() => handleRestore(
+                  confirmRestore.filename,
+                  !!(confirmRestore.preview?.config_differs && ackConfigDiff),
+                )}>
                 Restore Database
               </button>
             </div>

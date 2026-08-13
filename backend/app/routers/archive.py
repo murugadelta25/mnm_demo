@@ -6,7 +6,7 @@ import json
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
@@ -17,12 +17,15 @@ from ..models import SiteConfig, get_db
 from ..auth import require_superadmin
 from ..archive_service import (
     BACKUP_DIR,
+    RestoreNeedsConfirmation,
     build_backup_bundle,
     classify_backup_upload_name,
     create_backup,
     delete_backup,
+    get_restore_progress,
     import_uploaded_backup_files,
     list_backups,
+    preview_restore,
     restore_backup,
     unlink_quietly,
 )
@@ -166,14 +169,43 @@ def download_backup(filename: str, _=Depends(require_superadmin())):
     )
 
 
-@router.post("/restore/{filename}")
-def restore_from_backup(filename: str, _=Depends(require_superadmin())):
-    """Restore database from a backup file. WARNING: overwrites current data."""
+class RestorePayload(BaseModel):
+    confirm_config_diff: bool = False
+
+
+@router.get("/restore-preview/{filename}")
+def restore_preview(filename: str, _=Depends(require_superadmin())):
+    """Compare live configuration with backup before restoring."""
     try:
-        result = restore_backup(filename)
+        return preview_restore(filename)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Backup not found")
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/restore-progress")
+def restore_progress(_=Depends(require_superadmin())):
+    return get_restore_progress()
+
+
+@router.post("/restore/{filename}")
+def restore_from_backup(
+    filename: str,
+    payload: Optional[RestorePayload] = Body(default=None),
+    _=Depends(require_superadmin()),
+):
+    """Restore database from a backup file. WARNING: overwrites current live data only."""
+    try:
+        confirm = bool(payload and payload.confirm_config_diff)
+        result = restore_backup(filename, confirm_config_diff=confirm)
         return result
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="Backup not found")
+    except RestoreNeedsConfirmation as exc:
+        raise HTTPException(status_code=409, detail=exc.preview) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
 
