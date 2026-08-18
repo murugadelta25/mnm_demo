@@ -1,0 +1,9 @@
+{
+  "domain": "vapt.eappms",
+  "sslCert": "deploy/ssl/vapt.eappms.crt",
+  "lanIp": "",
+  "sslKey": "deploy/ssl/vapt.eappms.key",
+  "dnsEnabled": false,
+  "autoGenerateSsl": true,
+  "useHttps": true
+}
