@@ -1,0 +1,331 @@
+[
+    {
+        "id": "ahplc_tab_read_modbus",
+        "type": "tab",
+        "label": "AH_PLC_to_PMS",
+        "disabled": false,
+        "info": "Reads AH PLC kit Modbus (D200–D212 holding + M301–M316 coils) and POSTs merged readings to EAP-PMS machine 8 (SPM_AH_PLC).\n\nEdit node 'cfg PMS target' before Deploy:\n  PMS_BASE = http://192.168.1.116:8010\n  MACHINE_ID = 8\n  DEVICE_NAME = SPM_AH_PLC\n\nAlso keeps GET /api/plcdata for local dashboards.",
+        "env": []
+    },
+    {
+        "id": "ahplc_cfg_pms",
+        "type": "function",
+        "z": "ahplc_tab_read_modbus",
+        "name": "cfg PMS target",
+        "func": "// ===== EDIT THESE FOR YOUR LAN =====\nconst PMS_BASE = 'http://192.168.1.116:8010';\nconst MACHINE_ID = 8;\nconst DEVICE_NAME = 'SPM_AH_PLC';\n// ====================================\nflow.set('pmsBase', String(PMS_BASE).replace(/\\/$/, ''));\nflow.set('machineId', MACHINE_ID);\nflow.set('deviceName', DEVICE_NAME);\nreturn null;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "// seed defaults on deploy\nconst PMS_BASE = 'http://192.168.1.116:8010';\nconst MACHINE_ID = 8;\nconst DEVICE_NAME = 'SPM_AH_PLC';\nflow.set('pmsBase', String(PMS_BASE).replace(/\\/$/, ''));\nflow.set('machineId', MACHINE_ID);\nflow.set('deviceName', DEVICE_NAME);\n",
+        "finalize": "",
+        "libs": [],
+        "x": 160,
+        "y": 60,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "ahplc_modbus_hr",
+        "type": "modbus-read",
+        "z": "ahplc_tab_read_modbus",
+        "name": "Read All D200-D212",
+        "topic": "",
+        "showStatusActivities": false,
+        "logIOActivities": false,
+        "showErrors": false,
+        "showWarnings": true,
+        "unitid": "1",
+        "dataType": "HoldingRegister",
+        "adr": "200",
+        "quantity": "13",
+        "rate": "1",
+        "rateUnit": "s",
+        "delayOnStart": false,
+        "enableDeformedMessages": false,
+        "startDelayTime": "",
+        "server": "ahplc_modbus_server",
+        "useIOFile": false,
+        "ioFile": "",
+        "useIOForPayload": false,
+        "emptyMsgOnFail": false,
+        "x": 200,
+        "y": 160,
+        "wires": [
+            [
+                "ahplc_fmt_hr"
+            ],
+            []
+        ]
+    },
+    {
+        "id": "ahplc_fmt_hr",
+        "type": "function",
+        "z": "ahplc_tab_read_modbus",
+        "name": "Format All Parameters",
+        "func": "const d = msg.payload;\nmsg.payload = {\n    timestamp:     new Date().toISOString(),\n    pressure:      d[0],\n    flow:          d[2],\n    tankLevel:     d[4],\n    temperature:   d[6],\n    plcStatus:     d[12] // 2 --> PLC B and 1 --> PLC A Master\n};\nflow.set('plcdata', msg.payload);\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 450,
+        "y": 160,
+        "wires": [
+            [
+                "ahplc_debug_plc",
+                "ahplc_merge_post"
+            ]
+        ]
+    },
+    {
+        "id": "ahplc_debug_plc",
+        "type": "debug",
+        "z": "ahplc_tab_read_modbus",
+        "name": "All PLC Data",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "x": 690,
+        "y": 120,
+        "wires": []
+    },
+    {
+        "id": "ahplc_modbus_coils",
+        "type": "modbus-read",
+        "z": "ahplc_tab_read_modbus",
+        "name": "Coils M301-M316",
+        "topic": "",
+        "showStatusActivities": false,
+        "logIOActivities": false,
+        "showErrors": false,
+        "showWarnings": true,
+        "unitid": "1",
+        "dataType": "Coil",
+        "adr": "301",
+        "quantity": "16",
+        "rate": "1",
+        "rateUnit": "s",
+        "delayOnStart": false,
+        "enableDeformedMessages": false,
+        "startDelayTime": "",
+        "server": "ahplc_modbus_server",
+        "useIOFile": false,
+        "ioFile": "",
+        "useIOForPayload": false,
+        "emptyMsgOnFail": false,
+        "x": 210,
+        "y": 280,
+        "wires": [
+            [
+                "ahplc_fmt_coils"
+            ],
+            []
+        ]
+    },
+    {
+        "id": "ahplc_fmt_coils",
+        "type": "function",
+        "z": "ahplc_tab_read_modbus",
+        "name": "Format Coils M301-M316",
+        "func": "const d = msg.payload;\nmsg.payload = {\n    timestamp: new Date().toISOString(),\n    // Digital Output Status - Output register M301-M308\n    Pump    : d[0],//M301\n    Blower  : d[1],//M302\n    Chiller : d[2],//M303\n    Motor   : d[3],//M304\n    Boiler  : d[4],//M305\n    Furnace : d[5],//M306\n    Conveyor: d[6],//M307\n    Electric_Generators: d[7],//M308\n    // Digital Input Status - Input register M309 - M316\n    Digital_Input1: d[8],//M309\n    Digital_Input2: d[9],//M310\n    Digital_Input3: d[10],//M311\n    Digital_Input4: d[11],//M312\n    Digital_Input5: d[12],//M313\n    Digital_Input6: d[13],//M314\n    Digital_Input7: d[14],//M315\n    Digital_Input8: d[15]//M316\n};\nflow.set('coils', msg.payload);\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 450,
+        "y": 280,
+        "wires": [
+            [
+                "ahplc_debug_coils",
+                "ahplc_merge_post"
+            ]
+        ]
+    },
+    {
+        "id": "ahplc_debug_coils",
+        "type": "debug",
+        "z": "ahplc_tab_read_modbus",
+        "name": "Coils M301-M316",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 700,
+        "y": 240,
+        "wires": []
+    },
+    {
+        "id": "ahplc_merge_post",
+        "type": "function",
+        "z": "ahplc_tab_read_modbus",
+        "name": "Merge + build PMS readings",
+        "func": "const plc = flow.get('plcdata');\nconst coils = flow.get('coils');\nif (!plc || !coils) {\n    node.status({ fill: 'yellow', shape: 'ring', text: 'waiting plc+coils' });\n    return null;\n}\n\nconst pmsBase = flow.get('pmsBase') || 'http://192.168.1.116:8010';\nconst machineId = flow.get('machineId') || 8;\nconst deviceName = flow.get('deviceName') || 'SPM_AH_PLC';\n\nfunction reading(name, value) {\n    return { name, value: value === undefined || value === null ? null : value };\n}\n\nconst readings = [\n    reading('pressure', plc.pressure),\n    reading('flow', plc.flow),\n    reading('tankLevel', plc.tankLevel),\n    reading('temperature', plc.temperature),\n    reading('plcStatus', plc.plcStatus),\n    reading('Pump', coils.Pump),\n    reading('Blower', coils.Blower),\n    reading('Chiller', coils.Chiller),\n    reading('Motor', coils.Motor),\n    reading('Boiler', coils.Boiler),\n    reading('Furnace', coils.Furnace),\n    reading('Conveyor', coils.Conveyor),\n    reading('Electric_Generators', coils.Electric_Generators),\n    reading('Digital_Input1', coils.Digital_Input1),\n    reading('Digital_Input2', coils.Digital_Input2),\n    reading('Digital_Input3', coils.Digital_Input3),\n    reading('Digital_Input4', coils.Digital_Input4),\n    reading('Digital_Input5', coils.Digital_Input5),\n    reading('Digital_Input6', coils.Digital_Input6),\n    reading('Digital_Input7', coils.Digital_Input7),\n    reading('Digital_Input8', coils.Digital_Input8)\n];\n\nmsg.url = pmsBase + '/api/machines/' + machineId + '/telemetry';\nmsg.method = 'POST';\nmsg.headers = { 'Content-Type': 'application/json' };\nmsg.payload = {\n    syncBy: 'MODBUS',\n    origin: Date.now(),\n    deviceName: deviceName,\n    machine_id: machineId,\n    readings: readings\n};\nnode.status({ fill: 'blue', shape: 'dot', text: 'posting' });\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 720,
+        "y": 200,
+        "wires": [
+            [
+                "ahplc_http_post"
+            ]
+        ]
+    },
+    {
+        "id": "ahplc_http_post",
+        "type": "http request",
+        "z": "ahplc_tab_read_modbus",
+        "name": "POST /api/machines/8/telemetry",
+        "method": "use",
+        "ret": "obj",
+        "paytoqs": "ignore",
+        "url": "",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [],
+        "x": 1000,
+        "y": 200,
+        "wires": [
+            [
+                "ahplc_post_result"
+            ]
+        ]
+    },
+    {
+        "id": "ahplc_post_result",
+        "type": "function",
+        "z": "ahplc_tab_read_modbus",
+        "name": "POST result status",
+        "func": "const code = msg.statusCode || 0;\nif (code >= 200 && code < 300) {\n    node.status({ fill: 'green', shape: 'dot', text: 'ok ' + code });\n} else {\n    node.status({ fill: 'red', shape: 'ring', text: 'fail ' + code });\n}\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1240,
+        "y": 200,
+        "wires": [
+            [
+                "ahplc_debug_post"
+            ]
+        ]
+    },
+    {
+        "id": "ahplc_debug_post",
+        "type": "debug",
+        "z": "ahplc_tab_read_modbus",
+        "name": "PMS telemetry ACK",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "x": 1460,
+        "y": 200,
+        "wires": []
+    },
+    {
+        "id": "ahplc_http_in_plcdata",
+        "type": "http in",
+        "z": "ahplc_tab_read_modbus",
+        "name": "GET /api/plcdata",
+        "url": "/api/plcdata",
+        "method": "get",
+        "upload": false,
+        "swaggerDoc": "",
+        "x": 180,
+        "y": 400,
+        "wires": [
+            [
+                "ahplc_build_plcdata_resp"
+            ]
+        ]
+    },
+    {
+        "id": "ahplc_build_plcdata_resp",
+        "type": "function",
+        "z": "ahplc_tab_read_modbus",
+        "name": "Build plcdata Response",
+        "func": "const plc = flow.get('plcdata') || {};\nconst coils = flow.get('coils') || {};\nmsg.payload = Object.keys(plc).length || Object.keys(coils).length\n    ? { ...plc, ...coils }\n    : { error: 'No data yet' };\nmsg.headers = {\n    'Content-Type': 'application/json',\n    'Access-Control-Allow-Origin': 'http://192.168.1.116:5174',\n    'Access-Control-Allow-Methods': 'GET',\n    'Access-Control-Allow-Headers': 'Content-Type'\n};\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 420,
+        "y": 400,
+        "wires": [
+            [
+                "ahplc_http_resp_plcdata"
+            ]
+        ]
+    },
+    {
+        "id": "ahplc_http_resp_plcdata",
+        "type": "http response",
+        "z": "ahplc_tab_read_modbus",
+        "name": "Send Response",
+        "statusCode": "200",
+        "headers": {},
+        "x": 650,
+        "y": 400,
+        "wires": []
+    },
+    {
+        "id": "ahplc_modbus_server",
+        "type": "modbus-client",
+        "name": "AH PLC Modbus Device",
+        "clienttype": "tcp",
+        "bufferCommands": true,
+        "stateLogEnabled": false,
+        "queueLogEnabled": false,
+        "failureLogEnabled": true,
+        "tcpHost": "192.168.1.5",
+        "tcpPort": "502",
+        "tcpType": "DEFAULT",
+        "serialPort": "/dev/ttyUSB0",
+        "serialType": "RTU-BUFFERED",
+        "serialBaudrate": "9600",
+        "serialDatabits": "8",
+        "serialStopbits": "1",
+        "serialParity": "none",
+        "serialConnectionDelay": "100",
+        "serialAsciiResponseStartDelimiter": "",
+        "unit_id": "",
+        "commandDelay": "",
+        "clientTimeout": "",
+        "reconnectOnTimeout": true,
+        "reconnectTimeout": "",
+        "parallelUnitIdsAllowed": false,
+        "showErrors": true,
+        "showWarnings": true,
+        "showLogs": true
+    },
+    {
+        "id": "ahplc_global_config",
+        "type": "global-config",
+        "env": [],
+        "modules": {
+            "node-red-contrib-modbus": "5.60.2"
+        }
+    }
+]

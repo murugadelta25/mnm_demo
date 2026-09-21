@@ -152,6 +152,141 @@ def get_deviation_recipient_emails(db: Session) -> List[str]:
     return out
 
 
+DEFAULT_PLC_SENDER = "learncode612000@gmail.com"
+
+
+def send_plc_threshold_deviation_emails(
+    db: Session,
+    *,
+    machine: Machine,
+    raised_events: List[dict],
+) -> Optional[dict]:
+    """
+    Email concern persons when PLC process tags breach LSL/USL.
+    Uses existing SMTP (sender defaults to learncode612000@gmail.com) and
+    deviation_alerts / loss_tracker recipient groups.
+    Returns a status payload for the UI banner (sent / failed / skipped).
+    """
+    if not raised_events:
+        return None
+
+    cfg = db.query(EmailSmtpConfig).first()
+    if not cfg:
+        return {
+            "status": "failed",
+            "message": "SMTP not configured — set Email Settings (sender learncode612000@gmail.com)",
+            "sent_at": now_ist().isoformat(timespec="seconds"),
+            "recipients": [],
+            "event_ids": [e.get("event_id") for e in raised_events if e.get("event_id")],
+        }
+    if not (cfg.email_address or "").strip():
+        cfg.email_address = DEFAULT_PLC_SENDER
+    if not cfg.email_password:
+        return {
+            "status": "failed",
+            "message": f"SMTP password missing for {cfg.email_address or DEFAULT_PLC_SENDER}",
+            "sent_at": now_ist().isoformat(timespec="seconds"),
+            "recipients": [],
+            "event_ids": [e.get("event_id") for e in raised_events if e.get("event_id")],
+        }
+
+    recipients = get_deviation_recipient_emails(db)
+    if not recipients:
+        recipients = [cfg.email_address or DEFAULT_PLC_SENDER]
+
+    ctx = _machine_context(db, machine.id)
+    mname = ctx.get("machine_name") or machine.name or f"Machine #{machine.id}"
+    station = ctx.get("station_name") or "—"
+
+    fresh = []
+    for ev in raised_events:
+        eid = str(ev.get("event_id") or "").strip()
+        if not eid:
+            continue
+        alert_type = f"plc_thr:{eid}"[:50]
+        exists = (
+            db.query(DeviationAlertLog)
+            .filter(
+                DeviationAlertLog.machine_id == machine.id,
+                DeviationAlertLog.alert_type == alert_type,
+            )
+            .first()
+        )
+        if exists:
+            continue
+        fresh.append((ev, alert_type, eid))
+
+    if not fresh:
+        return None
+
+    lines = []
+    for ev, _at, eid in fresh:
+        unit = ev.get("unit") or ""
+        side = "above USL" if ev.get("side") == "high" else "below LSL"
+        lines.append(
+            f"- {ev.get('label') or ev.get('tag_key')}: {ev.get('value')} {unit} {side}"
+            f" (LSL={ev.get('lsl')} / USL={ev.get('usl')}) · event {eid}"
+        )
+    subject = f"[PMS] PLC threshold breach — {mname}"
+    body = (
+        f"PLC process parameter deviation\n"
+        f"Machine : {mname}\n"
+        f"Station : {station}\n"
+        f"Time    : {_fmt_ist(now_ist())}\n"
+        f"Sender  : {cfg.email_address}\n\n"
+        f"Breaches:\n" + "\n".join(lines) + "\n\n"
+        f"Open equipment overview: /overview/equipment/{machine.id}\n"
+    )
+
+    log = EmailLog(
+        sent_at=now_ist(),
+        recipients=", ".join(recipients),
+        subject=subject,
+        report_type="deviation_alert",
+        status="pending",
+    )
+    db.add(log)
+    db.flush()
+
+    try:
+        from .routers.email_router import do_send
+        do_send(cfg, recipients, subject, body)
+        log.status = "sent"
+        delivery = "sent"
+        message = f"Deviation alert email sent to {', '.join(recipients)}"
+    except Exception as exc:
+        log.status = "failed"
+        log.error_msg = str(exc)
+        delivery = "failed"
+        message = f"Deviation alert email failed: {exc}"
+
+    for ev, alert_type, eid in fresh:
+        db.add(DeviationAlertLog(
+            sent_at=now_ist(),
+            alert_type=alert_type,
+            machine_id=machine.id,
+            status="plc_threshold",
+            segment_log_id=None,
+            breach_count=1,
+            duration_sec=None,
+            deviation_reason=(ev.get("label") or str(ev.get("tag_key") or ""))[:500],
+            recipients=", ".join(recipients),
+            subject=subject[:255],
+            email_log_id=log.id,
+            delivery_status=delivery,
+            escalation_level=0,
+        ))
+
+    return {
+        "status": delivery,
+        "message": message,
+        "sent_at": now_ist().isoformat(timespec="seconds"),
+        "recipients": recipients,
+        "event_ids": [eid for _ev, _at, eid in fresh],
+        "from_email": cfg.email_address,
+    }
+
+
 def get_level_recipient_emails(db: Session, level_def: dict) -> List[str]:
     return _emails_for_group_names(db, level_def.get('group_names') or [])
 

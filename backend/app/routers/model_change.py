@@ -12,7 +12,7 @@ def now_ist():
 from pydantic import BaseModel
 from typing import Optional
 from ..models import ModelChangeRequest, Machine, ProductionPlan, BreakdownTicket, get_db
-from ..auth import get_current_user, require_role
+from ..auth import get_current_user, require_capability
 from ..ws_manager import manager
 from .machines import _log_status
 
@@ -70,7 +70,7 @@ def _start_linked_plan(mcr, db):
 
 
 @router.post("/")
-async def request_model_change(data: MCRCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
+async def request_model_change(data: MCRCreate, db: Session = Depends(get_db), user=Depends(require_capability("capability.raise_model_change", "operator", "supervisor", "admin"))):
     mcr = ModelChangeRequest(
         machine_id=data.machine_id,
         plan_id=data.plan_id,
@@ -99,7 +99,7 @@ async def request_model_change(data: MCRCreate, db: Session = Depends(get_db), u
 
 
 @router.patch("/{mcr_id}/approve")
-async def approve_request(mcr_id: int, db: Session = Depends(get_db), user=Depends(require_role("supervisor", "admin"))):
+async def approve_request(mcr_id: int, db: Session = Depends(get_db), user=Depends(require_capability("capability.approve_model_change", "supervisor", "admin"))):
     mcr = db.query(ModelChangeRequest).filter(ModelChangeRequest.id == mcr_id).first()
     if not mcr:
         raise HTTPException(404, "Not found")
@@ -209,7 +209,7 @@ async def complete_request(mcr_id: int, db: Session = Depends(get_db), user=Depe
 
 
 @router.patch("/{mcr_id}/reject")
-async def reject_request(mcr_id: int, db: Session = Depends(get_db), user=Depends(require_role("supervisor", "admin"))):
+async def reject_request(mcr_id: int, db: Session = Depends(get_db), user=Depends(require_capability("capability.approve_model_change", "supervisor", "admin"))):
     mcr = db.query(ModelChangeRequest).filter(ModelChangeRequest.id == mcr_id).first()
     if not mcr:
         raise HTTPException(404, "Not found")

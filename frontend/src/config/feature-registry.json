@@ -1,5 +1,5 @@
 {
-  "$schema": "Feature registry — add new pages here only; nav, routes, and /platform/modules auto-update.",
+  "$schema": "Feature registry \u2014 add new pages here only; nav, routes, and /platform/modules auto-update.",
   "version": 1,
   "standalone": [
     {
@@ -15,36 +15,67 @@
       "id": "overview",
       "label": "Overview",
       "navIcon": "overview",
-      "roles": ["admin", "superadmin", "supervisor", "operator", "maintenance"],
+      "roles": [
+        "admin",
+        "site_admin",
+        "superadmin",
+        "supervisor",
+        "operator",
+        "maintenance"
+      ],
       "items": [
         {
           "id": "overview.factory",
           "label": "Factory Overview",
           "path": "/overview/factory",
           "navIcon": "factoryOverview",
-          "roles": ["admin", "superadmin", "supervisor", "operator", "maintenance"]
+          "roles": [
+            "admin",
+            "site_admin",
+            "superadmin",
+            "supervisor",
+            "operator",
+            "maintenance"
+          ]
         },
         {
           "id": "overview.line",
           "label": "Line Overview",
           "path": "/overview/line",
           "navIcon": "lineOverview",
-          "roles": ["admin", "superadmin", "supervisor", "operator", "maintenance"]
+          "roles": [
+            "admin",
+            "site_admin",
+            "superadmin",
+            "supervisor",
+            "operator",
+            "maintenance"
+          ]
         },
         {
           "id": "overview.equipment",
           "label": "Equipment Overview",
           "path": "/overview/equipment",
           "navIcon": "machines",
-          "roles": ["admin", "superadmin", "supervisor", "operator", "maintenance"]
+          "roles": [
+            "admin",
+            "site_admin",
+            "superadmin",
+            "supervisor",
+            "operator",
+            "maintenance"
+          ]
         },
         {
           "id": "overview.monitor",
           "label": "Monitor Mode",
           "path": "/overview/monitor",
           "navIcon": "monitor",
-          "hideFromNav": true,
-          "roles": ["admin", "superadmin", "supervisor", "maintenance"]
+          "roles": [
+            "admin",
+            "site_admin",
+            "superadmin"
+          ]
         }
       ]
     },
@@ -52,42 +83,78 @@
       "id": "production",
       "label": "Production",
       "navIcon": "production",
-      "roles": ["admin", "superadmin", "supervisor", "operator"],
+      "roles": [
+        "admin",
+        "site_admin",
+        "superadmin",
+        "supervisor",
+        "operator"
+      ],
       "items": [
         {
           "id": "production.work_orders",
           "label": "Work Orders",
           "path": "/work-orders",
           "navIcon": "workOrders",
-          "roles": ["admin", "superadmin", "supervisor", "operator"]
+          "roles": [
+            "admin",
+            "site_admin",
+            "superadmin",
+            "supervisor",
+            "operator"
+          ]
         },
         {
           "id": "production.planning",
           "label": "Planning",
           "path": "/planning",
           "navIcon": "planning",
-          "roles": ["admin", "superadmin", "supervisor", "operator"]
+          "roles": [
+            "admin",
+            "site_admin",
+            "superadmin",
+            "supervisor",
+            "operator"
+          ]
         },
         {
           "id": "production.data_entry",
           "label": "Data Entry",
           "path": "/entry",
           "navIcon": "entry",
-          "roles": ["admin", "superadmin", "supervisor", "operator"]
+          "roles": [
+            "admin",
+            "site_admin",
+            "superadmin",
+            "supervisor",
+            "operator"
+          ]
         },
         {
           "id": "production.hourly_output",
           "label": "Hourly Output",
           "path": "/hourly-output",
           "navIcon": "hourlyOutput",
-          "roles": ["admin", "superadmin", "supervisor", "operator"]
+          "roles": [
+            "admin",
+            "site_admin",
+            "superadmin",
+            "supervisor",
+            "operator"
+          ]
         },
         {
           "id": "production.model_change",
           "label": "Model Change",
           "path": "/model-change",
           "navIcon": "modelChange",
-          "roles": ["admin", "superadmin", "supervisor", "operator"]
+          "roles": [
+            "admin",
+            "site_admin",
+            "superadmin",
+            "supervisor",
+            "operator"
+          ]
         }
       ]
     },
@@ -95,21 +162,42 @@
       "id": "qc",
       "label": "QC",
       "navIcon": "qc",
-      "roles": ["admin", "superadmin", "supervisor", "operator", "quality"],
+      "roles": [
+        "admin",
+        "site_admin",
+        "superadmin",
+        "supervisor",
+        "operator",
+        "quality"
+      ],
       "items": [
         {
           "id": "qc.approvals",
           "label": "QC Approvals",
           "path": "/qc-approvals",
           "navIcon": "workInstructions",
-          "roles": ["admin", "superadmin", "supervisor", "quality", "operator"]
+          "roles": [
+            "admin",
+            "site_admin",
+            "superadmin",
+            "supervisor",
+            "quality",
+            "operator"
+          ]
         },
         {
           "id": "qc.work_instructions",
           "label": "Work Instructions",
           "path": "/work-instructions",
           "navIcon": "workInstructions",
-          "roles": ["admin", "superadmin", "supervisor", "quality", "operator"]
+          "roles": [
+            "admin",
+            "site_admin",
+            "superadmin",
+            "supervisor",
+            "quality",
+            "operator"
+          ]
         }
       ]
     },
@@ -117,28 +205,52 @@
       "id": "maintenance",
       "label": "Maintenance",
       "navIcon": "maintenance",
-      "roles": ["admin", "superadmin", "supervisor", "operator", "maintenance"],
+      "roles": [
+        "admin",
+        "site_admin",
+        "superadmin",
+        "supervisor",
+        "operator",
+        "maintenance"
+      ],
       "items": [
         {
           "id": "maintenance.breakdown",
           "label": "Breakdown",
           "path": "/breakdown",
           "navIcon": "breakdown",
-          "roles": ["admin", "superadmin", "supervisor", "operator"]
+          "roles": [
+            "admin",
+            "site_admin",
+            "superadmin",
+            "supervisor",
+            "operator"
+          ]
         },
         {
           "id": "maintenance.dashboard",
           "label": "Maintenance",
           "path": "/maintenance",
           "navIcon": "maintenance",
-          "roles": ["admin", "superadmin", "maintenance"]
+          "roles": [
+            "admin",
+            "site_admin",
+            "superadmin",
+            "maintenance"
+          ]
         },
         {
           "id": "maintenance.loss_tracker",
           "label": "Loss Tracker",
           "path": "/loss-tracker",
           "navIcon": "lossTracker",
-          "roles": ["admin", "superadmin", "supervisor", "maintenance"]
+          "roles": [
+            "admin",
+            "site_admin",
+            "superadmin",
+            "supervisor",
+            "maintenance"
+          ]
         }
       ]
     },
@@ -146,12 +258,23 @@
       "id": "alerts",
       "label": "Alerts",
       "navIcon": "alerts",
-      "roles": ["admin", "superadmin", "supervisor"],
+      "roles": [
+        "admin",
+        "site_admin",
+        "superadmin",
+        "supervisor"
+      ],
       "items": [
         {
           "id": "alerts.email",
           "label": "Email Alerts",
           "path": "/alerts/email",
+          "navIcon": "emailAlerts"
+        },
+        {
+          "id": "alerts.processSetpoints",
+          "label": "Process Setpoint Alerts",
+          "path": "/alerts/process-setpoints",
           "navIcon": "emailAlerts"
         }
       ]
@@ -160,23 +283,219 @@
       "id": "operators",
       "label": "Operators",
       "navIcon": "users",
-      "roles": ["admin", "superadmin", "supervisor", "operator"],
+      "roles": [
+        "admin",
+        "site_admin",
+        "superadmin",
+        "supervisor",
+        "operator"
+      ],
       "items": [
         {
           "id": "operators.management",
           "label": "Operator Management",
           "path": "/operators",
           "navIcon": "users",
-          "roles": ["admin", "superadmin", "supervisor"]
+          "roles": [
+            "admin",
+            "site_admin",
+            "superadmin",
+            "supervisor"
+          ]
         },
         {
           "id": "operators.my_work_hours",
           "label": "My Work Hours",
           "path": "/my-work-hours",
           "navIcon": "hourlyOutput",
-          "roles": ["operator"],
+          "roles": [
+            "operator"
+          ],
           "roleToggleable": true,
           "description": "Operator personal work-hours view. Disabled for supervisor/admin/superadmin by default; enable per role below if needed."
+        }
+      ]
+    },
+    {
+      "id": "fmms",
+      "label": "FMMS",
+      "navIcon": "maintenance",
+      "roles": [
+        "admin",
+        "site_admin",
+        "superadmin",
+        "supervisor",
+        "maintenance"
+      ],
+      "items": [
+        {
+          "id": "fmms.dashboard",
+          "label": "FMMS Live Dashboard",
+          "path": "/fmms/dashboard",
+          "navIcon": "dashboard",
+          "roles": ["admin", "site_admin", "superadmin", "supervisor", "maintenance"]
+        },
+        {
+          "id": "fmms.asset_management",
+          "label": "Asset Management",
+          "path": "/fmms/assets",
+          "navIcon": "machines",
+          "roles": ["admin", "site_admin", "superadmin", "supervisor", "maintenance"]
+        },
+        {
+          "id": "fmms.asset_hierarchy",
+          "label": "Asset Hierarchy",
+          "path": "/fmms/asset-hierarchy",
+          "navIcon": "machines",
+          "roles": ["admin", "site_admin", "superadmin", "supervisor", "maintenance"]
+        },
+        {
+          "id": "fmms.work_orders",
+          "label": "FMMS Work Order",
+          "path": "/fmms/work-orders",
+          "navIcon": "workOrders",
+          "roles": ["admin", "site_admin", "superadmin", "supervisor", "maintenance"]
+        },
+        {
+          "id": "fmms.ringi_sor",
+          "label": "Ringi / SOR Approvals",
+          "path": "/fmms/ringi-sor",
+          "navIcon": "config",
+          "roles": ["admin", "site_admin", "superadmin", "supervisor"]
+        },
+        {
+          "id": "fmms.amc_calibration",
+          "label": "AMC & Calibration",
+          "path": "/fmms/amc-calibration",
+          "navIcon": "config",
+          "roles": ["admin", "site_admin", "superadmin", "supervisor", "maintenance"]
+        },
+        {
+          "id": "fmms.breakdown_rca",
+          "label": "Breakdown & RCA",
+          "path": "/fmms/breakdown-rca",
+          "navIcon": "breakdown",
+          "roles": ["admin", "site_admin", "superadmin", "supervisor", "maintenance"]
+        },
+        {
+          "id": "fmms.pic_assignment",
+          "label": "PIC Assignment",
+          "path": "/fmms/pic-assignment",
+          "navIcon": "users",
+          "roles": ["admin", "site_admin", "superadmin", "supervisor", "maintenance"]
+        },
+        {
+          "id": "fmms.pic_master",
+          "label": "PIC Allocation Master",
+          "path": "/fmms/pic-master",
+          "navIcon": "users",
+          "roles": ["admin", "site_admin", "superadmin", "supervisor", "maintenance"]
+        },
+        {
+          "id": "fmms.compliance",
+          "label": "Compliance Management",
+          "path": "/fmms/compliance",
+          "navIcon": "config",
+          "roles": ["admin", "site_admin", "superadmin", "supervisor"]
+        },
+        {
+          "id": "fmms.monitoring",
+          "label": "Asset Monitoring",
+          "path": "/fmms/monitoring",
+          "navIcon": "monitor",
+          "roles": ["admin", "site_admin", "superadmin", "supervisor", "maintenance"]
+        },
+        {
+          "id": "fmms.spare_parts",
+          "label": "Spares Master",
+          "path": "/fmms/spare-parts",
+          "navIcon": "parts",
+          "roles": ["admin", "site_admin", "superadmin", "supervisor", "maintenance"]
+        },
+        {
+          "id": "fmms.planning",
+          "label": "Planning & Resources",
+          "path": "/fmms/planning",
+          "navIcon": "dashboard",
+          "roles": ["admin", "site_admin", "superadmin", "supervisor", "maintenance"]
+        },
+        {
+          "id": "fmms.integrations",
+          "label": "System Integrations",
+          "path": "/fmms/integrations",
+          "navIcon": "config",
+          "roles": ["admin", "site_admin", "superadmin"]
+        },
+        {
+          "id": "fmms.incidents",
+          "label": "Incident Tracking",
+          "path": "/fmms/incidents",
+          "navIcon": "breakdown",
+          "roles": ["admin", "site_admin", "superadmin", "supervisor", "maintenance", "operator"]
+        }
+      ]
+    },
+    {
+      "id": "taco_fmms",
+      "label": "TACO-FMMS",
+      "navIcon": "maintenance",
+      "roles": [
+        "admin",
+        "site_admin",
+        "superadmin",
+        "supervisor",
+        "maintenance",
+        "quality"
+      ],
+      "items": [
+        {
+          "id": "taco_fmms.dashboard",
+          "label": "TACO Management Dashboard",
+          "path": "/taco-fmms/dashboard",
+          "navIcon": "dashboard",
+          "roles": ["admin", "site_admin", "superadmin", "supervisor", "maintenance", "quality"]
+        },
+        {
+          "id": "taco_fmms.vendors",
+          "label": "Vendor Master & Rates",
+          "path": "/taco-fmms/vendors",
+          "navIcon": "config",
+          "roles": ["admin", "site_admin", "superadmin", "supervisor", "quality"]
+        },
+        {
+          "id": "taco_fmms.vendor_workflow",
+          "label": "Vendor Pickup Workflow",
+          "path": "/taco-fmms/vendor-workflow",
+          "navIcon": "workOrders",
+          "roles": ["admin", "site_admin", "superadmin", "supervisor", "maintenance", "quality"]
+        },
+        {
+          "id": "taco_fmms.calibration_cost",
+          "label": "Calibration Cost Analytics",
+          "path": "/taco-fmms/calibration-cost",
+          "navIcon": "dashboard",
+          "roles": ["admin", "site_admin", "superadmin", "supervisor"]
+        },
+        {
+          "id": "taco_fmms.testing_equipment",
+          "label": "Testing Equipment Hub",
+          "path": "/taco-fmms/testing-equipment",
+          "navIcon": "machines",
+          "roles": ["admin", "site_admin", "superadmin", "supervisor", "maintenance", "quality"]
+        },
+        {
+          "id": "taco_fmms.booking",
+          "label": "Equipment Booking",
+          "path": "/taco-fmms/booking",
+          "navIcon": "workOrders",
+          "roles": ["admin", "site_admin", "superadmin", "supervisor", "maintenance", "quality"]
+        },
+        {
+          "id": "taco_fmms.testing_kpis",
+          "label": "Testing KPIs & Savings",
+          "path": "/taco-fmms/testing-kpis",
+          "navIcon": "dashboard",
+          "roles": ["admin", "site_admin", "superadmin", "supervisor"]
         }
       ]
     },
@@ -184,63 +503,99 @@
       "id": "settings",
       "label": "Settings",
       "navIcon": "settings",
-      "roles": ["admin", "superadmin"],
+      "roles": [
+        "admin",
+        "site_admin",
+        "superadmin"
+      ],
       "items": [
         {
           "id": "settings.users",
           "label": "Users",
           "path": "/users",
           "navIcon": "users",
-          "roles": ["admin", "superadmin"]
+          "roles": [
+            "admin",
+            "site_admin",
+            "superadmin"
+          ]
         },
         {
           "id": "settings.parts",
           "label": "Part Master",
           "path": "/parts",
           "navIcon": "parts",
-          "roles": ["admin", "superadmin", "supervisor"]
+          "roles": [
+            "admin",
+            "site_admin",
+            "superadmin",
+            "supervisor"
+          ]
         },
         {
           "id": "settings.tools",
           "label": "Tool Management",
           "path": "/tools",
           "navIcon": "tools",
-          "roles": ["admin", "superadmin", "supervisor"]
+          "roles": [
+            "admin",
+            "site_admin",
+            "superadmin",
+            "supervisor"
+          ]
         },
         {
           "id": "settings.wi_revisions",
           "label": "WI Revisions",
           "path": "/wi-revisions",
           "navIcon": "workInstructions",
-          "roles": ["admin", "superadmin", "supervisor"]
+          "roles": [
+            "admin",
+            "site_admin",
+            "superadmin",
+            "supervisor"
+          ]
         },
         {
           "id": "settings.machines",
           "label": "Machines",
           "path": "/machines",
           "navIcon": "machines",
-          "roles": ["admin", "superadmin", "supervisor"]
+          "roles": [
+            "admin",
+            "site_admin",
+            "superadmin",
+            "supervisor"
+          ]
         },
         {
           "id": "settings.factory_setup",
           "label": "Factory Setup",
           "path": "/factory-setup",
           "navIcon": "config",
-          "roles": ["superadmin"]
+          "roles": [
+            "superadmin"
+          ]
         },
         {
           "id": "settings.configuration",
           "label": "Configuration",
           "path": "/config",
           "navIcon": "config",
-          "roles": ["admin", "superadmin"]
+          "roles": [
+            "admin",
+            "site_admin",
+            "superadmin"
+          ]
         },
         {
           "id": "settings.database_management",
           "label": "Database Management",
           "path": "/database-management",
           "navIcon": "config",
-          "roles": ["superadmin"]
+          "roles": [
+            "superadmin"
+          ]
         }
       ]
     }

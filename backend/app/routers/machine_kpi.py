@@ -306,6 +306,24 @@ def compute_machine_kpi(
     if not result:
         raise HTTPException(400, f"Shift '{shift}' not found in config")
 
+    # Telemetry machines (Servo Press / Linear Motor / PLC / SPM): return dedicated
+    # Modbus OEE for the Dashboard KPI dialog; keep classic PMS KPI under pms_kpi.
+    try:
+        from ..servo_press_oee import compute_servo_press_oee, uses_telemetry_dashboard
+        if uses_telemetry_dashboard(machine):
+            servo = compute_servo_press_oee(db, machine, entry_date, shift, cfg)
+            if servo:
+                servo["pms_kpi"] = result
+                if save:
+                    try:
+                        # Do not overwrite CNC KPI snapshots with servo formula
+                        _save_kpi_snapshot(db, result, source='auto')
+                    except Exception:
+                        pass
+                return servo
+    except Exception as exc:
+        print(f"[WARN] servo press KPI compute: {exc}")
+
     if save:
         try:
             _save_kpi_snapshot(db, result, source='auto')

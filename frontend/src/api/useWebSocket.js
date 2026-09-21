@@ -36,13 +36,13 @@ export function useWebSocket(onMessage, enabled = true) {
     if (!enabled) return undefined;
 
     unmounted.current = false;
-    retryMs.current = 3000;
+    retryMs.current = 5000;
 
     function scheduleReconnect() {
       if (unmounted.current) return;
       clearTimeout(retryRef.current);
       retryRef.current = setTimeout(connect, retryMs.current);
-      retryMs.current = Math.min(retryMs.current * 1.5, 30000);
+      retryMs.current = Math.min(retryMs.current * 2, 60000);
     }
 
     function connect() {
@@ -59,7 +59,7 @@ export function useWebSocket(onMessage, enabled = true) {
       wsRef.current = ws;
 
       ws.onopen = () => {
-        retryMs.current = 3000;
+        retryMs.current = 5000;
       };
 
       ws.onmessage = (e) => {

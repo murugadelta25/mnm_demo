@@ -8,6 +8,9 @@ from .routers import email_router
 from .routers import machines as machines_router
 from .routers import stations as stations_router
 from .routers import users as users_router
+from .routers import roles as roles_router
+from .routers import fmms as fmms_router
+from .routers import taco_fmms as taco_fmms_router
 from .routers import config as config_router
 from .routers import hourly_output as hourly_output_router
 from .routers import parts as parts_router
@@ -24,6 +27,7 @@ from .routers import mobile as mobile_router
 from .routers import operators as operators_router
 from .routers import tool_groups as tool_groups_router
 from .routers import overview as overview_router
+from .routers import process_setpoint_alerts as process_setpoint_alerts_router
 from .ws_manager import manager
 from sqlalchemy import text, inspect
 from sqlalchemy.orm import Session
@@ -112,6 +116,11 @@ def _ensure_work_instruction_tables():
         _run_migrate("entity_enabled", entity_enabled_migrate)
     except Exception as exc:
         print(f"[WARN] entity_enabled import failed: {exc}")
+    try:
+        from migrate_app_roles import main as app_roles_migrate
+        _run_migrate("app_roles", app_roles_migrate)
+    except Exception as exc:
+        print(f"[WARN] app_roles import failed: {exc}")
 
 
 def _ensure_deviation_alert_table():
@@ -137,28 +146,33 @@ def _ensure_deviation_alert_table():
 
 
 def _ensure_superadmin_role():
-    """Add 'superadmin' to the users.role ENUM and bootstrap the first superadmin."""
+    """Migrate users.role to VARCHAR, seed app_roles, bootstrap SuperAdmin."""
     from .models import User, SessionLocal
+    from .role_definitions import ensure_roles_table_and_seed
     try:
         insp = inspect(engine)
-        if not insp.has_table("users"):
-            return
-        cols = insp.get_columns("users")
-        role_col = next((c for c in cols if c["name"] == "role"), None)
-        if not role_col:
-            return
-        role_type = role_col.get("type")
-        enums = getattr(role_type, "enums", None)
-        if enums and "superadmin" not in enums:
-            with engine.begin() as conn:
-                conn.execute(text(
-                    "ALTER TABLE users MODIFY COLUMN role "
-                    "ENUM('operator','supervisor','maintenance','admin','quality','superadmin') NOT NULL"
-                ))
-            print("[OK] users.role ENUM updated — added 'superadmin'")
+        if insp.has_table("users"):
+            cols = insp.get_columns("users")
+            role_col = next((c for c in cols if c["name"] == "role"), None)
+            if role_col:
+                role_type = role_col.get("type")
+                enums = getattr(role_type, "enums", None)
+                if enums:
+                    with engine.begin() as conn:
+                        conn.execute(text(
+                            "ALTER TABLE users MODIFY COLUMN role VARCHAR(50) NOT NULL"
+                        ))
+                    print("[OK] users.role migrated from ENUM to VARCHAR(50) for dynamic roles")
     except Exception as exc:
-        print(f"[WARN] superadmin role migration skipped: {exc}")
-        return
+        print(f"[WARN] users.role VARCHAR migration skipped: {exc}")
+
+    try:
+        db = SessionLocal()
+        ensure_roles_table_and_seed(db)
+        print("[OK] app_roles table seeded")
+        db.close()
+    except Exception as exc:
+        print(f"[WARN] app_roles seed skipped: {exc}")
 
     try:
         from .auth import hash_password
@@ -203,6 +217,22 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[WARN] mobile schema: {e}")
     try:
+        from .machine_telemetry_service import ensure_machine_telemetry_schema
+        ensure_machine_telemetry_schema()
+        print("[OK] machine_telemetry schema ensured")
+    except Exception as e:
+        print(f"[WARN] machine_telemetry schema: {e}")
+    try:
+        from .telemetry_tags_service import ensure_tags_ready
+        db_tags = next(get_db())
+        try:
+            ensure_tags_ready(db_tags)
+            print("[OK] telemetry_tags seeded / ready")
+        finally:
+            db_tags.close()
+    except Exception as e:
+        print(f"[WARN] telemetry_tags: {e}")
+    try:
         from .routers.tool_groups import ensure_tool_groups_schema
         ensure_tool_groups_schema()
         print("[OK] tool_groups schema ensured")
@@ -236,6 +266,9 @@ app.include_router(email_router.router)
 app.include_router(stations_router.router)
 app.include_router(machines_router.router)
 app.include_router(users_router.router)
+app.include_router(roles_router.router)
+app.include_router(fmms_router.router)
+app.include_router(taco_fmms_router.router)
 app.include_router(config_router.router)
 app.include_router(hourly_output_router.router)
 app.include_router(parts_router.router)
@@ -252,6 +285,7 @@ app.include_router(mobile_router.router)
 app.include_router(operators_router.router)
 app.include_router(tool_groups_router.router)
 app.include_router(overview_router.router)
+app.include_router(process_setpoint_alerts_router.router)
 
 # Serve uploaded machine images — pathlib works on both Windows and Linux
 STATIC_DIR = Path(__file__).parent.parent / "static"
@@ -272,7 +306,8 @@ async def websocket_endpoint(websocket: WebSocket):
         manager.disconnect(websocket)
 
 @app.get("/health")
-def health(): return {"status": "ok"}
+async def health():
+    return {"status": "ok"}
 
 @app.get("/health/db")
 def health_db(db: Session = Depends(get_db)):

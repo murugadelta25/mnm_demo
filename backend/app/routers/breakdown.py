@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional
 from ..models import BreakdownTicket, Machine, Operator, ProductionPlan, User, get_db, now_ist
-from ..auth import get_current_user, require_role
+from ..auth import get_current_user, require_capability
 from ..ws_manager import manager
 
 from .machines import _log_status
@@ -154,7 +154,7 @@ class TicketResolve(BaseModel):
 
 
 @router.post("/")
-async def raise_ticket(data: TicketCreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
+async def raise_ticket(data: TicketCreate, db: Session = Depends(get_db), user=Depends(require_capability("capability.raise_breakdown", "operator", "supervisor", "admin"))):
     _ensure_raised_by_name_column(db)
     raised_by_id, raised_by_name = _resolve_raiser(db, user, data.raised_by)
     ticket = BreakdownTicket(
@@ -184,7 +184,7 @@ async def raise_ticket(data: TicketCreate, db: Session = Depends(get_db), user=D
 
 
 @router.patch("/{ticket_id}/acknowledge")
-async def acknowledge_ticket(ticket_id: int, db: Session = Depends(get_db), user=Depends(require_role("maintenance", "admin", "supervisor"))):
+async def acknowledge_ticket(ticket_id: int, db: Session = Depends(get_db), user=Depends(require_capability("capability.ack_breakdown", "maintenance", "admin"))):
     ticket = db.query(BreakdownTicket).filter(BreakdownTicket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(404, "Not found")
@@ -202,7 +202,7 @@ async def acknowledge_ticket(ticket_id: int, db: Session = Depends(get_db), user
 
 
 @router.patch("/{ticket_id}/start")
-async def start_troubleshoot(ticket_id: int, db: Session = Depends(get_db), user=Depends(require_role("maintenance", "admin", "supervisor"))):
+async def start_troubleshoot(ticket_id: int, db: Session = Depends(get_db), user=Depends(require_capability("capability.resolve_breakdown", "maintenance", "admin"))):
     ticket = db.query(BreakdownTicket).filter(BreakdownTicket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(404, "Not found")
@@ -214,7 +214,7 @@ async def start_troubleshoot(ticket_id: int, db: Session = Depends(get_db), user
 
 
 @router.patch("/{ticket_id}/resolve")
-async def resolve_ticket(ticket_id: int, data: TicketResolve, db: Session = Depends(get_db), user=Depends(require_role("maintenance", "admin", "supervisor"))):
+async def resolve_ticket(ticket_id: int, data: TicketResolve, db: Session = Depends(get_db), user=Depends(require_capability("capability.resolve_breakdown", "maintenance", "admin"))):
     ticket = db.query(BreakdownTicket).filter(BreakdownTicket.id == ticket_id).first()
     if not ticket:
         raise HTTPException(404, "Not found")

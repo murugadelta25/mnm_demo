@@ -9,6 +9,7 @@ import AddWorkOrderModal from '../components/production-planning/AddWorkOrderMod
 import WorkOrderOverview from '../components/production-planning/WorkOrderOverview';
 import WorkOrderDetailPanel from '../components/production-planning/WorkOrderDetailPanel';
 import { useWebSocket } from '../api/useWebSocket';
+import { useFeatureFlags } from '../context/FeatureFlagsContext';
 
 const WO_BTN_COLOR = '#7c3aed';
 const WO_LINK_COLOR = '#f97316';
@@ -58,6 +59,7 @@ const clampHistoricRange = (from, to) => {
 
 export default function WorkOrderManagement() {
   const { user } = useAuth();
+  const { canAccess } = useFeatureFlags();
   const { theme: t } = useTheme();
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedId = searchParams.get('id');
@@ -82,8 +84,8 @@ export default function WorkOrderManagement() {
   const [scheduleOnly, setScheduleOnly] = useState(null);
   const detailRef = useRef(null);
 
-  const canCreate = user?.role !== 'maintenance';
-  const canManage = ['admin', 'superadmin', 'supervisor'].includes(user?.role);
+  const canCreate = canAccess('capability.edit_work_orders', user?.role);
+  const canManage = canCreate;
 
   const fetchList = useCallback(async () => {
     const { from: rangeFrom, to: rangeTo } = appliedRange;

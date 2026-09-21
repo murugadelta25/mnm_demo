@@ -11,7 +11,7 @@ from ..models import (
     OEEEntry, OEEDefectLog, Machine, Station, ProductionPlan,
     WorkOrder, MachineStatusLog, SiteConfig, get_db, now_ist,
 )
-from ..auth import get_current_user
+from ..auth import get_current_user, require_capability
 from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
@@ -121,7 +121,7 @@ def calculate_oee(data: OEECreate) -> dict:
     }
 
 @router.post("/")
-def create_entry(data: OEECreate, db: Session = Depends(get_db), user=Depends(get_current_user)):
+def create_entry(data: OEECreate, db: Session = Depends(get_db), user=Depends(require_capability("capability.edit_data_entry", "operator", "supervisor", "admin"))):
     from ..models import ProductionPlan
     calc = calculate_oee(data)
     # Only store raw values when capping actually occurred
@@ -339,6 +339,52 @@ def _compute_realtime_oee_for_date(
             if not m:
                 continue
             st = station_map.get(m.station_id)
+
+            # ---- Telemetry machines (Servo Press / Linear Motor / PLC / SPM):
+            # dedicated Modbus OEE (does not use CNC status-log part counting)
+            try:
+                from ..servo_press_oee import (
+                    apply_servo_oee_to_realtime_row,
+                    compute_servo_press_oee,
+                    uses_telemetry_dashboard,
+                )
+                if uses_telemetry_dashboard(m):
+                    servo = compute_servo_press_oee(db, m, target_date, sh_id, cfg)
+                    if servo:
+                        wo_no_list = list({wo_map.get(p.work_order_id, "") for p in mplans if p.work_order_id})
+                        wo_display = ", ".join(w for w in wo_no_list if w) or "—"
+                        model_variants = list({(p.model_variant or "").strip() for p in mplans})
+                        model_display = ", ".join(v for v in model_variants if v) or "—"
+                        base_row = {
+                            "id": f"rt_{mid}_{sh_id}_{target_date.isoformat()}",
+                            "source": "realtime",
+                            "entry_date": target_date.isoformat(),
+                            "station_no": m.station_id,
+                            "station_name": st.display_name if st else f"Station {m.station_id}",
+                            "machine_id": mid,
+                            "machine_name": m.name,
+                            "shift": sh_id,
+                            "work_order_no": wo_display,
+                            "model_variant": model_display,
+                            "current_operation": mplans[0].current_operation if mplans else "",
+                            "next_operation": mplans[0].next_operation if mplans else "",
+                            "process_time": float(servo.get("process_time_sec") or 0),
+                            "loading_unloading": float(servo.get("loading_unloading_sec") or 0),
+                            "cycle_time": float(servo.get("cycle_time_sec") or 0),
+                            "available_shift_time": round(float(servo.get("available_time_min") or 0)),
+                            "operating_time": round(float(servo.get("operating_time_min") or 0)),
+                            "possible_qty": int(servo.get("expected_qty") or 0),
+                            "actual_qty": int(servo.get("actual_qty") or 0),
+                            "production_loss": 0,
+                            "accp_qty": int(servo.get("good_qty") or 0),
+                            "defect_qty": int(servo.get("defect_qty") or 0),
+                            "ar": 0, "pr": 0, "qr": 100, "oee": 0,
+                            "planned_qty": int(servo.get("planned_qty") or 0),
+                        }
+                        results.append(apply_servo_oee_to_realtime_row(base_row, servo))
+                        continue
+            except Exception as exc:
+                print(f"[WARN] servo press realtime OEE machine={mid}: {exc}")
 
             segments = _build_status_segments(db, mid, shift_start, effective_end)
 

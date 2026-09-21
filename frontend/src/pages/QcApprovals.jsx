@@ -10,6 +10,7 @@ import { pageClass } from '../themes/tileHelpers';
 import { getWorkInstructionStyles } from '../themes/workInstructionStyles';
 import { INSTANCE_STATUS_LABEL, buildHourSlots } from '../utils/qcShiftHours';
 import { useConfig } from '../context/ConfigContext';
+import { useFeatureFlags } from '../context/FeatureFlagsContext';
 
 const PAGE_SIZE = 10;
 /** Max hour columns per band so the table stays within a normal window. */
@@ -206,13 +207,14 @@ function layoutForGroup(group, config) {
 
 export default function QcApprovals() {
   const { user } = useAuth();
+  const { canAccess } = useFeatureFlags();
   const { theme: t } = useTheme();
   const { config } = useConfig();
   const s = getWorkInstructionStyles(t);
   const navigate = useNavigate();
 
-  const isInspector = ['quality', 'supervisor', 'admin'].includes(user?.role);
-  const isSupervisor = ['supervisor', 'admin'].includes(user?.role);
+  const isInspector = canAccess('capability.qc_inspect', user?.role);
+  const isSupervisor = canAccess('capability.qc_approve', user?.role);
   const defaultTab = isSupervisor && user?.role !== 'quality' ? 'incharge' : 'inspector';
   const [tab, setTab] = useState(defaultTab);
   const [rows, setRows] = useState([]);

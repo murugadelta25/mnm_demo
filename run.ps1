@@ -3,10 +3,12 @@
 #   .\run.ps1
 #   .\run.ps1 preflight
 #   .\run.ps1 help
+#   .\run.ps1 -Reload        (backend hot-reload, for backend development only)
 # Note: ASCII-only output for Windows PowerShell encoding compatibility
 
 param(
-    [string]$Action = "start"
+    [string]$Action = "start",
+    [switch]$Reload
 )
 
 $ErrorActionPreference = "Stop"
@@ -496,7 +498,7 @@ if ($networkIPs.Count -eq 0) {
 # [5/8] Backend - always use this project's backend\venv
 Write-StepHeader 5 "Starting backend on port $BackendPort..."
 
-# Free port 8010 from stale uvicorn/--reload orphans (common cause of 502 Bad Gateway)
+# Free port 8010/5174 from stale uvicorn/vite orphans (common cause of 502 / hang)
 function Clear-PortListeners {
     param([int]$Port)
     $killed = @()
@@ -506,13 +508,10 @@ function Clear-PortListeners {
             $procId = [int]$c.OwningProcess
             if ($procId -le 4) { continue }
             if ($killed -contains $procId) { continue }
-            $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $procId" -ErrorAction SilentlyContinue
-            $cmd = [string]$proc.CommandLine
-            if ($cmd -match 'uvicorn|multiprocessing\.spawn|app\.main:app' -or -not $cmd) {
-                Write-Host "  Clearing stale process on port $Port (PID $procId)..." -ForegroundColor Yellow
-                Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
-                $killed += $procId
-            }
+            # Always clear listeners on our app ports - hung sockets cause 30s timeouts / 502
+            Write-Host "  Clearing process on port $Port (PID $procId)..." -ForegroundColor Yellow
+            Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+            $killed += $procId
         }
     } catch { }
     # Orphaned --reload workers whose parent already died
@@ -524,14 +523,38 @@ function Clear-PortListeners {
         Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
         $killed += $_.ProcessId
     }
+    Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue | Where-Object {
+        $_.CommandLine -match "vite|5174"
+    } | ForEach-Object {
+        if ($killed -contains $_.ProcessId) { return }
+        Write-Host "  Stopping leftover Vite/node (PID $($_.ProcessId))..." -ForegroundColor Yellow
+        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        $killed += $_.ProcessId
+    }
     if ($killed.Count -gt 0) { Start-Sleep -Seconds 2 }
+    # Windows lets a second socket bind an already-bound port, and requests then land on
+    # whichever instance is picked - a dead one answers nothing and the browser times out.
+    # So refuse to start until the port is genuinely free.
+    for ($wait = 1; $wait -le 15; $wait++) {
+        if (-not (Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)) { return }
+        Start-Sleep -Seconds 1
+    }
+    Write-Host "  WARNING: port $Port is still held by another process." -ForegroundColor Yellow
+    Write-Host "  Close every old Backend/Frontend window, then re-run this script." -ForegroundColor Yellow
 }
 
 Clear-PortListeners -Port $BackendPort
+Clear-PortListeners -Port $FrontendPort
 
+# Hot-reload is opt-in: uvicorn's reloader keeps the port bound if its worker dies, so
+# every request then hangs until the browser's 30s timeout instead of failing fast.
+$reloadArg = if ($Reload) { " --reload" } else { "" }
+if ($Reload) {
+    Write-Host "  Hot-reload enabled - if the backend stops answering, restart this script." -ForegroundColor DarkGray
+}
 Start-Process powershell -ArgumentList @(
     "-NoExit", "-Command",
-    "cd '$BackendDir'; & '.\.venv\Scripts\Activate.ps1'; python -m uvicorn app.main:app --host 0.0.0.0 --port $BackendPort --reload"
+    "cd '$BackendDir'; & '.\.venv\Scripts\Activate.ps1'; python -m uvicorn app.main:app --host 0.0.0.0 --port $BackendPort$reloadArg"
 ) -WindowStyle Normal
 Start-Sleep -Seconds 3
 $backendOk = $false
@@ -545,6 +568,13 @@ for ($i = 1; $i -le 45; $i++) {
     }
 }
 if ($backendOk) {
+    # A duplicate listener that appeared anyway would silently swallow requests
+    $owners = @(Get-NetTCPConnection -LocalPort $BackendPort -State Listen -ErrorAction SilentlyContinue |
+        Select-Object -ExpandProperty OwningProcess -Unique)
+    if ($owners.Count -gt 1) {
+        Write-Host "  WARNING: $($owners.Count) processes are listening on port $BackendPort (PIDs: $($owners -join ', '))." -ForegroundColor Yellow
+        Write-Host "  Requests may hit a dead instance and time out. Close old Backend windows and re-run." -ForegroundColor Yellow
+    }
     Write-StepOk "Backend running (dedicated PowerShell window)"
 } else {
     Write-StepFail "Backend not responding on port $BackendPort"
@@ -555,6 +585,7 @@ if ($backendOk) {
 
 # [6/8] Frontend
 Write-StepHeader 6 "Starting frontend on port $FrontendPort..."
+Clear-PortListeners -Port $FrontendPort
 Start-Process powershell -ArgumentList @(
     "-NoExit", "-Command",
     "cd '$FrontendDir'; npm run dev"

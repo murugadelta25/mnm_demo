@@ -7,7 +7,7 @@ from datetime import date
 import json
 
 from ..models import QcInspectionReport, User, Machine, Station, PartQcParameter, get_db, now_ist
-from ..auth import get_current_user, require_role
+from ..auth import get_current_user, require_capability
 from ..ws_manager import manager
 from ..qc_shift_utils import (
     build_hour_slots,
@@ -518,7 +518,7 @@ def approve_inspector(
     report_id: int,
     body: Optional[InstanceAction] = None,
     db: Session = Depends(get_db),
-    user=Depends(require_role(*INSPECTOR_ROLES)),
+    user=Depends(require_capability("capability.qc_inspect", *INSPECTOR_ROLES)),
 ):
     report = db.query(QcInspectionReport).filter(QcInspectionReport.id == report_id).first()
     if not report:
@@ -565,7 +565,7 @@ def approve_inspector_all(
     report_id: int,
     body: Optional[InstanceAction] = None,
     db: Session = Depends(get_db),
-    user=Depends(require_role(*INSPECTOR_ROLES)),
+    user=Depends(require_capability("capability.qc_inspect", *INSPECTOR_ROLES)),
 ):
     """QC consolidated sign-off — approves every instance awaiting inspector review."""
     report = db.query(QcInspectionReport).filter(QcInspectionReport.id == report_id).first()
@@ -615,7 +615,7 @@ def reject_instance(
     report_id: int,
     body: InstanceAction,
     db: Session = Depends(get_db),
-    user=Depends(require_role(*INSPECTOR_ROLES, *INCHARGE_ROLES)),
+    user=Depends(require_capability("capability.qc_inspect", *INSPECTOR_ROLES, *INCHARGE_ROLES)),
 ):
     report = db.query(QcInspectionReport).filter(QcInspectionReport.id == report_id).first()
     if not report:
@@ -641,7 +641,7 @@ def approve_incharge(
     report_id: int,
     body: Optional[InstanceAction] = None,
     db: Session = Depends(get_db),
-    user=Depends(require_role(*INCHARGE_ROLES)),
+    user=Depends(require_capability("capability.qc_approve", *INCHARGE_ROLES)),
 ):
     report = db.query(QcInspectionReport).filter(QcInspectionReport.id == report_id).first()
     if not report:
@@ -675,7 +675,7 @@ def approve_incharge(
 def approve_incharge_all(
     report_id: int,
     db: Session = Depends(get_db),
-    user=Depends(require_role(*INCHARGE_ROLES)),
+    user=Depends(require_capability("capability.qc_approve", *INCHARGE_ROLES)),
 ):
     """Supervisor consolidated sign-off — approves all QC-reviewed instances for the shift."""
     report = db.query(QcInspectionReport).filter(QcInspectionReport.id == report_id).first()
@@ -719,7 +719,7 @@ def approve_incharge_all(
 def close_shift(
     report_id: int,
     db: Session = Depends(get_db),
-    user=Depends(require_role(*INCHARGE_ROLES)),
+    user=Depends(require_capability("capability.qc_approve", *INCHARGE_ROLES)),
 ):
     """Supervisor closes the shift — approves remaining instances and locks the sheet."""
     report = db.query(QcInspectionReport).filter(QcInspectionReport.id == report_id).first()

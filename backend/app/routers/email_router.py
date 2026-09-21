@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
 from datetime import datetime
+import os
 import pytz as _pytz
 _IST = _pytz.timezone('Asia/Kolkata')
 def _now_ist(): return datetime.now(_IST).replace(tzinfo=None)
@@ -25,7 +26,7 @@ class SmtpConfigIn(BaseModel):
     smtp_server: str = "smtp.gmail.com"
     smtp_port: int = 587
     email_address: str
-    email_password: str
+    email_password: str = ""  # empty = keep existing password on update
 
 class RecipientIn(BaseModel):
     group_id: int
@@ -66,6 +67,51 @@ class ManualSendIn(BaseModel):
 
 def get_smtp(db: Session):
     cfg = db.query(EmailSmtpConfig).first()
+    if not cfg or not cfg.email_address or not cfg.email_password:
+        # Seed from project email/config.py (or env) so Test SMTP works without manual save
+        email_address = os.getenv("EMAIL_ADDRESS", "learncode612000@gmail.com")
+        email_password = (os.getenv("EMAIL_PASSWORD") or "").replace(" ", "")
+        smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+        smtp_port = int(os.getenv("SMTP_PORT", "587"))
+        try:
+            import importlib.util
+            from pathlib import Path
+            cfg_path = Path(__file__).resolve().parents[3] / "email" / "config.py"
+            if cfg_path.is_file():
+                spec = importlib.util.spec_from_file_location("pms_email_config", cfg_path)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                email_address = getattr(mod, "EMAIL_ADDRESS", email_address) or email_address
+                raw_pwd = getattr(mod, "EMAIL_PASSWORD", "") or email_password
+                email_password = str(raw_pwd).replace(" ", "")
+                smtp_server = getattr(mod, "SMTP_SERVER", smtp_server) or smtp_server
+                smtp_port = int(getattr(mod, "SMTP_PORT", smtp_port) or smtp_port)
+        except Exception as exc:
+            print(f"[WARN] email config seed skipped: {exc}")
+        if not cfg:
+            cfg = EmailSmtpConfig(
+                smtp_server=smtp_server,
+                smtp_port=smtp_port,
+                email_address=email_address,
+                email_password=email_password,
+            )
+            db.add(cfg)
+            db.commit()
+            db.refresh(cfg)
+        else:
+            if not cfg.email_address:
+                cfg.email_address = email_address
+            if not cfg.email_password and email_password:
+                cfg.email_password = email_password
+            if not cfg.smtp_server:
+                cfg.smtp_server = smtp_server
+            if not cfg.smtp_port:
+                cfg.smtp_port = smtp_port
+            db.commit()
+            db.refresh(cfg)
+    if cfg and cfg.email_password and " " in cfg.email_password:
+        cfg.email_password = cfg.email_password.replace(" ", "")
+        db.commit()
     if not cfg or not cfg.email_address or not cfg.email_password:
         raise HTTPException(400, "SMTP not configured. Go to Alerts > Email Settings.")
     return cfg
@@ -1187,22 +1233,39 @@ def build_attachments_for_report_types(report_types: str, db: Session, report_da
     return attachments
 
 def do_send(cfg, to_list: List[str], subject: str, body: str,
-            attachments: dict = None):
-    """attachments = {filename: bytes}"""
+            attachments: dict = None, body_html: str = None):
+    """attachments = {filename: bytes}. Optional body_html for rich (colored) mail."""
     if not to_list:
         return
-    msg = MIMEMultipart()
+    msg = MIMEMultipart('alternative' if body_html else 'mixed')
     msg['From']    = cfg.email_address
     msg['To']      = ", ".join(to_list)
     msg['Subject'] = subject
-    msg.attach(MIMEText(body, 'plain'))
+    msg.attach(MIMEText(body, 'plain', 'utf-8'))
+    if body_html:
+        msg.attach(MIMEText(body_html, 'html', 'utf-8'))
 
-    for fname, data in (attachments or {}).items():
-        part = MIMEBase('application', 'octet-stream')
-        part.set_payload(data)
-        encoders.encode_base64(part)
-        part.add_header('Content-Disposition', f'attachment; filename="{fname}"')
-        msg.attach(part)
+    # If attachments needed with HTML, wrap in outer mixed
+    if attachments:
+        outer = MIMEMultipart('mixed')
+        outer['From'] = msg['From']
+        outer['To'] = msg['To']
+        outer['Subject'] = msg['Subject']
+        outer.attach(msg)
+        for fname, data in attachments.items():
+            part = MIMEBase('application', 'octet-stream')
+            part.set_payload(data)
+            encoders.encode_base64(part)
+            part.add_header('Content-Disposition', f'attachment; filename="{fname}"')
+            outer.attach(part)
+        msg = outer
+    elif not body_html:
+        for fname, data in (attachments or {}).items():
+            part = MIMEBase('application', 'octet-stream')
+            part.set_payload(data)
+            encoders.encode_base64(part)
+            part.add_header('Content-Disposition', f'attachment; filename="{fname}"')
+            msg.attach(part)
 
     server = smtplib.SMTP(cfg.smtp_server, cfg.smtp_port, timeout=15)
     server.starttls()
@@ -1223,17 +1286,27 @@ def get_smtp_config(db: Session = Depends(get_db), _=Depends(require_role("admin
 @router.post("/smtp")
 def save_smtp_config(data: SmtpConfigIn, db: Session = Depends(get_db),
                      _=Depends(require_role("admin"))):
+    # Empty password on save means "keep existing" (UI clears the field after load)
+    new_pwd = (data.email_password or "").replace(" ", "").strip()
     cfg = db.query(EmailSmtpConfig).first()
     if cfg:
         cfg.smtp_server    = data.smtp_server
         cfg.smtp_port      = data.smtp_port
         cfg.email_address  = data.email_address
-        cfg.email_password = data.email_password
+        if new_pwd:
+            cfg.email_password = new_pwd
     else:
-        cfg = EmailSmtpConfig(**data.model_dump())
+        if not new_pwd:
+            raise HTTPException(400, "App Password is required for first-time SMTP setup.")
+        cfg = EmailSmtpConfig(
+            smtp_server=data.smtp_server,
+            smtp_port=data.smtp_port,
+            email_address=data.email_address,
+            email_password=new_pwd,
+        )
         db.add(cfg)
     db.commit()
-    return {"ok": True}
+    return {"ok": True, "password_set": bool(cfg.email_password)}
 
 @router.post("/smtp/test")
 def test_smtp(db: Session = Depends(get_db), _=Depends(require_role("admin"))):

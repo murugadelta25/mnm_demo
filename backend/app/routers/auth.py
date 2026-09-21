@@ -8,7 +8,7 @@ from ..password_policy import PASSWORD_HINT, validate_password_or_raise
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-APPROVER_ROLES = {"admin", "superadmin"}
+APPROVER_ROLES = {"admin", "superadmin", "site_admin"}
 
 
 class ForgotPasswordRequest(BaseModel):
@@ -42,6 +42,7 @@ def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get
 
 
 @router.post("/forgot-password")
+@router.post("/forgot_password")
 def forgot_password(data: ForgotPasswordRequest, db: Session = Depends(get_db)):
     """
     Reset any user's password from the login screen.

@@ -107,6 +107,12 @@ def main() -> int:
     except Exception as exc:
         print(f"[schema-guard] entity_enabled import skipped: {exc}")
 
+    try:
+        from migrate_app_roles import main as app_roles_migrate
+        _run_safe("app_roles", app_roles_migrate)
+    except Exception as exc:
+        print(f"[schema-guard] app_roles import skipped: {exc}")
+
     print("[schema-guard] completed")
     if created:
         print(f"[schema-guard] ensured tables/features: {', '.join(created)}")

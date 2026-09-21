@@ -7,6 +7,7 @@ import { useWebSocket } from '../api/useWebSocket';
 import PageHeader from '../components/PageHeader';
 import { useTheme } from '../context/ThemeContext';
 import { pageClass } from '../themes/tileHelpers';
+import { useFeatureFlags } from '../context/FeatureFlagsContext';
 import { formatDateTime } from '../utils/dateFormat';
 
 const STATUS_CFG = {
@@ -27,6 +28,7 @@ const MACHINE_STATUS = {
 
 export default function MaintenanceDashboard() {
   const { user } = useAuth();
+  const { canAccess } = useFeatureFlags();
   const { theme: t } = useTheme();
   const [machines, setMachines] = useState([]);
   const [stations, setStations] = useState([]);
@@ -302,7 +304,7 @@ export default function MaintenanceDashboard() {
                   </div>
                 )}
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                  {tk.status === 'raised' && (
+                  {tk.status === 'raised' && canAccess('capability.ack_breakdown', user?.role) && (
                     ackForm.id === tk.id ? (
                       <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
                         <input style={{ ...inp, minWidth: 160 }} placeholder="Technician ID"
@@ -321,12 +323,12 @@ export default function MaintenanceDashboard() {
                         onClick={() => beginAcknowledge(tk.id)}>🔵 Acknowledge</button>
                     )
                   )}
-                  {tk.status === 'acknowledged' && (
+                  {tk.status === 'acknowledged' && canAccess('capability.resolve_breakdown', user?.role) && (
                     <button style={{ padding: '7px 14px', border: 'none', borderRadius: 6, color: '#fff',
                                      cursor: 'pointer', fontSize: 12, fontWeight: 600, background: '#f59e0b' }}
                       onClick={() => startWork(tk.id)}>🟡 Start Troubleshoot</button>
                   )}
-                  {tk.status === 'in_progress' && (
+                  {tk.status === 'in_progress' && canAccess('capability.resolve_breakdown', user?.role) && (
                     resolveForm.id === tk.id ? (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: 6, width: '100%' }}>
                         <input style={{ ...inp, width: '100%', boxSizing: 'border-box' }}

@@ -8,7 +8,7 @@ import LogoIcon from '../components/graphics/LogoIcon';
 import ThemeModeToggler from '../components/layout/ThemeModeToggler';
 import api from '../api/client';
 import { SESSION_EXPIRED_KEY } from '../components/IdleTimeoutGuard';
-import { isFeatureEnabled } from '../config/featureRegistry';
+import { canRoleAccessFeature, firstAllowedPath } from '../config/featureRegistry';
 import { PASSWORD_HINT, passwordPolicyError } from '../utils/passwordPolicy';
 
 const EMPTY_RESET = {
@@ -119,7 +119,7 @@ export default function Login() {
   const [forceError, setForceError] = useState('');
   const [forceLoading, setForceLoading] = useState(false);
   const { login, user, clearMustChangePassword, logout } = useAuth();
-  const { modules } = useFeatureFlags();
+  const { modules, roleAccess } = useFeatureFlags();
   const nav = useNavigate();
   const { theme: t } = useTheme();
   const { siteTitle } = useBranding();
@@ -144,11 +144,14 @@ export default function Login() {
   }, []);
 
   const goAfterLogin = (role) => {
-    if (role === 'maintenance' && isFeatureEnabled('maintenance.dashboard', modules)) {
+    if (
+      role === 'maintenance'
+      && canRoleAccessFeature('maintenance.dashboard', role, modules, roleAccess)
+    ) {
       nav('/maintenance');
-    } else {
-      nav('/dashboard');
+      return;
     }
+    nav(firstAllowedPath(role, modules, roleAccess));
   };
 
   const inputStyle = {

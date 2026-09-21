@@ -29,6 +29,7 @@ def get_role_access(
         "roleAccess": payload["roleAccess"],
         "accessMatrix": payload["accessMatrix"],
         "toggleableRoles": payload["toggleableRoles"],
+        "roles": payload.get("roles") or [],
     }
 
 
@@ -47,4 +48,5 @@ def update_role_access(
         "roleAccess": updated,
         "accessMatrix": payload["accessMatrix"],
         "toggleableRoles": payload["toggleableRoles"],
+        "roles": payload.get("roles") or [],
     }

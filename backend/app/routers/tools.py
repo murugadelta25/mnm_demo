@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from ..auth import get_current_user, require_role
+from ..auth import get_current_user, require_role, require_capability
 from ..models import ToolStock, ToolEvent, ToolAlert, WorkOrder, Machine, get_db, now_ist
 from ..tool_service import (
     QR_SCAN_ENABLED,
@@ -196,7 +196,7 @@ def list_alerts(
 def suppress_alert(
     alert_id: int,
     db: Session = Depends(get_db),
-    user=Depends(require_role("admin", "superadmin", "supervisor")),
+    user=Depends(require_capability("capability.edit_tools", "admin", "superadmin", "supervisor")),
 ):
     a = db.query(ToolAlert).filter(ToolAlert.id == alert_id).first()
     if not a:
@@ -217,7 +217,7 @@ def suppress_alert(
 def acknowledge_alert(
     alert_id: int,
     db: Session = Depends(get_db),
-    user=Depends(require_role("admin", "superadmin", "supervisor")),
+    user=Depends(require_capability("capability.edit_tools", "admin", "superadmin", "supervisor")),
 ):
     a = db.query(ToolAlert).filter(ToolAlert.id == alert_id).first()
     if not a:
@@ -281,7 +281,7 @@ def work_order_tool_monitor(wo_id: int, db: Session = Depends(get_db), _=Depends
 def sync_stock_from_sap(
     data: SapSyncRequest,
     db: Session = Depends(get_db),
-    _=Depends(require_role("admin", "superadmin", "supervisor")),
+    _=Depends(require_capability("capability.edit_tools", "admin", "superadmin", "supervisor")),
 ):
     if not data.items:
         raise HTTPException(400, "No SAP stock items provided")
@@ -377,7 +377,7 @@ def export_tools_report(
 def email_tools_report(
     data: ToolEmailReportRequest,
     db: Session = Depends(get_db),
-    user=Depends(require_role("admin", "superadmin", "supervisor")),
+    user=Depends(require_capability("capability.edit_tools", "admin", "superadmin", "supervisor")),
 ):
     """Send Tool Management Excel report to recipients (uses configured SMTP)."""
     import smtplib
@@ -498,7 +498,7 @@ def tool_history(
 def create_tool(
     data: ToolStockCreate,
     db: Session = Depends(get_db),
-    user=Depends(require_role("admin", "superadmin", "supervisor")),
+    user=Depends(require_capability("capability.edit_tools", "admin", "superadmin", "supervisor")),
 ):
     code = data.tool_code.strip()
     if not code:
@@ -542,7 +542,7 @@ def update_tool(
     tool_id: int,
     data: ToolStockUpdate,
     db: Session = Depends(get_db),
-    user=Depends(require_role("admin", "superadmin", "supervisor")),
+    user=Depends(require_capability("capability.edit_tools", "admin", "superadmin", "supervisor")),
 ):
     t = db.query(ToolStock).filter(ToolStock.id == tool_id).first()
     if not t:
@@ -572,7 +572,7 @@ def acknowledge_correction(
     tool_id: int,
     data: CorrectionRequest,
     db: Session = Depends(get_db),
-    user=Depends(require_role("admin", "superadmin", "supervisor")),
+    user=Depends(require_capability("capability.edit_tools", "admin", "superadmin", "supervisor")),
 ):
     """Allow continued use after EOL via tool correction (QR suppressed for now)."""
     t = db.query(ToolStock).filter(ToolStock.id == tool_id).first()
@@ -615,7 +615,7 @@ def replace_tool(
     tool_id: int,
     data: ReplaceRequest,
     db: Session = Depends(get_db),
-    user=Depends(require_role("admin", "superadmin", "supervisor")),
+    user=Depends(require_capability("capability.edit_tools", "admin", "superadmin", "supervisor")),
 ):
     """Restock / reset life with new tool instance (QR suppressed for now)."""
     t = db.query(ToolStock).filter(ToolStock.id == tool_id).first()

@@ -3,6 +3,8 @@ import api from '../api/client';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import { useConfig } from '../context/ConfigContext';
+import { useFeatureFlags } from '../context/FeatureFlagsContext';
+import { hasRole } from '../config/accessMatrix';
 import TitanModal from './basic/TitanModal';
 import { getWorkInstructionStyles } from '../themes/workInstructionStyles';
 import {
@@ -173,6 +175,7 @@ export default function QcInspectionSheet({
   context, onClose, onSubmitted, initialReportId = null, reviewingInstanceKey: reviewingProp = null,
 }) {
   const { user } = useAuth();
+  const { canAccess } = useFeatureFlags();
   const { theme: t } = useTheme();
   const { config } = useConfig();
   const s = getWorkInstructionStyles(t);
@@ -284,7 +287,10 @@ export default function QcInspectionSheet({
         }, shiftStart, shiftEnd);
         setInstances(r.data.instances || r.data.approval?.instances || {});
         if (reviewingProp) setReviewingInstanceKey(reviewingProp);
-        else if (['quality', 'supervisor', 'admin'].includes(user?.role)) {
+        else if (
+          canAccess('capability.qc_inspect', user?.role)
+          || canAccess('capability.qc_approve', user?.role)
+        ) {
           setReviewingInstanceKey(pendingReviewInstance(r.data.approval || { instances: r.data.instances }));
         }
       } else {
@@ -579,8 +585,8 @@ export default function QcInspectionSheet({
   };
 
   const ro = { ...s.inp, ...s.inpReadonly };
-  const canInspector = ['quality', 'supervisor', 'admin'].includes(user?.role);
-  const canIncharge = ['supervisor', 'admin'].includes(user?.role);
+  const canInspector = canAccess('capability.qc_inspect', user?.role);
+  const canIncharge = canAccess('capability.qc_approve', user?.role);
   const currentInstanceKey = currentEditableInstance(approval);
   const pendingInspectorCount = Object.values(instances).filter((v) => v.status === 'pending_inspector').length;
   const pendingInchargeCount = Object.values(instances).filter((v) => v.status === 'pending_incharge').length;
@@ -657,7 +663,7 @@ export default function QcInspectionSheet({
   const showOperatorSubmit = currentInstanceKey
     && approvalStatus !== 'approved'
     && !reviewingInstanceKey
-    && ['operator', 'admin'].includes(user?.role);
+    && (user?.role === 'operator' || hasRole(user?.role, 'admin'));
 
   const currentSlotLabel = currentInstanceKey === 'first'
     ? '1st piece'

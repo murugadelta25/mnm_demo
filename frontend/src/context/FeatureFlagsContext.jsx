@@ -5,13 +5,14 @@ import {
   getDefaultFeatureRoleAccess,
   canRoleAccessFeature,
 } from '../config/featureRegistry';
-import { getAccessMatrixRoleDefaults } from '../config/accessMatrix';
+import { getAccessMatrixRoleDefaults, mergeAccessMatrixRoles } from '../config/accessMatrix';
 
 const FeatureFlagsCtx = createContext({
   modules: getDefaultFeatureModules(),
   roleAccess: { ...getDefaultFeatureRoleAccess(), ...getAccessMatrixRoleDefaults() },
   accessMatrix: [],
   toggleableRoles: [],
+  roles: [],
   registry: null,
   loading: true,
   reload: () => {},
@@ -27,6 +28,7 @@ export function FeatureFlagsProvider({ children }) {
   }));
   const [accessMatrix, setAccessMatrix] = useState([]);
   const [toggleableRoles, setToggleableRoles] = useState([]);
+  const [roles, setRoles] = useState([]);
   const [registry, setRegistry] = useState(null);
   const [loading, setLoading] = useState(true);
 
@@ -34,18 +36,30 @@ export function FeatureFlagsProvider({ children }) {
     return api.get('/api/features/')
       .then(r => {
         setModules({ ...getDefaultFeatureModules(), ...(r.data?.modules || {}) });
-        setRoleAccess({
-          ...getDefaultFeatureRoleAccess(),
-          ...getAccessMatrixRoleDefaults(),
-          ...(r.data?.roleAccess || {}),
+        setRoleAccess(() => {
+          const slugs = mergeAccessMatrixRoles(r.data?.toggleableRoles || []);
+          const defaults = {
+            ...getDefaultFeatureRoleAccess(),
+            ...getAccessMatrixRoleDefaults(slugs),
+          };
+          const stored = r.data?.roleAccess || {};
+          const merged = { ...defaults };
+          for (const [id, roleMap] of Object.entries(stored)) {
+            merged[id] = { ...(defaults[id] || {}), ...(roleMap || {}) };
+          }
+          return merged;
         });
         setAccessMatrix(r.data?.accessMatrix || []);
-        setToggleableRoles(r.data?.toggleableRoles || []);
+        setToggleableRoles(mergeAccessMatrixRoles(r.data?.toggleableRoles || []));
+        setRoles(r.data?.roles || []);
         if (r.data?.registry) setRegistry(r.data.registry);
       })
       .catch(() => {
         setModules(getDefaultFeatureModules());
         setRoleAccess({ ...getDefaultFeatureRoleAccess(), ...getAccessMatrixRoleDefaults() });
+        setToggleableRoles(mergeAccessMatrixRoles([]));
+        setAccessMatrix([]);
+        setRoles([]);
       })
       .finally(() => setLoading(false));
   }, []);
@@ -70,6 +84,7 @@ export function FeatureFlagsProvider({ children }) {
       roleAccess,
       accessMatrix,
       toggleableRoles,
+      roles,
       registry,
       loading,
       reload,

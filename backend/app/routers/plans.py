@@ -13,7 +13,7 @@ from email import encoders
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 from ..models import ProductionPlan, Machine, ModelChangeRequest, EmailLog, get_db, now_ist, WorkOrder
-from ..auth import get_current_user, require_role
+from ..auth import get_current_user, require_capability
 from ..ws_manager import manager
 from .work_orders import sync_work_order_after_plan_change
 
@@ -252,7 +252,7 @@ def _apply_machine_relocation(plan: ProductionPlan, data: RescheduleRequest, db:
 
 @router.post("/")
 async def create_plan(data: PlanCreate, db: Session = Depends(get_db),
-                      user=Depends(get_current_user)):
+                      user=Depends(require_capability("capability.edit_planning", "supervisor", "admin"))):
     start = data.plan_date
     end   = data.end_date if data.end_date and data.end_date >= start else start
     delta = (end - start).days + 1
@@ -537,7 +537,7 @@ def _previous_model_on_machine(db: Session, machine_id: int, exclude_plan_id: in
 
 @router.patch("/{plan_id}/status")
 async def update_status(plan_id: int, data: PlanUpdate, db: Session = Depends(get_db),
-                        user=Depends(get_current_user)):
+                        user=Depends(require_capability("capability.edit_planning", "supervisor", "admin"))):
     plan = db.query(ProductionPlan).filter(ProductionPlan.id == plan_id).first()
     if not plan:
         raise HTTPException(404, "Plan not found")
@@ -787,7 +787,7 @@ async def update_actual_qty(plan_id: int, data: ActualQtyUpdate, db: Session = D
 
 @router.delete("/{plan_id}")
 async def delete_plan(plan_id: int, db: Session = Depends(get_db),
-                      user=Depends(require_role("supervisor", "admin"))):
+                      user=Depends(require_capability("capability.edit_planning", "supervisor", "admin"))):
     plan = db.query(ProductionPlan).filter(ProductionPlan.id == plan_id).first()
     if not plan: raise HTTPException(404, "Plan not found")
     db.delete(plan)
@@ -801,7 +801,7 @@ async def reschedule_plan(
     plan_id: int,
     data: RescheduleRequest,
     db: Session = Depends(get_db),
-    user=Depends(require_role("supervisor", "admin")),
+    user=Depends(require_capability("capability.edit_planning", "supervisor", "admin")),
 ):
     plan = db.query(ProductionPlan).filter(ProductionPlan.id == plan_id).first()
     if not plan:
@@ -878,7 +878,7 @@ async def reschedule_plan(
 async def bulk_reschedule(
     data: BulkRescheduleRequest,
     db: Session = Depends(get_db),
-    user=Depends(require_role("supervisor", "admin")),
+    user=Depends(require_capability("capability.edit_planning", "supervisor", "admin")),
 ):
     if not data.plan_ids:
         raise HTTPException(400, "No plans selected")

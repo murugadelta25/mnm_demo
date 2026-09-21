@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 
-from ..auth import get_current_user, require_role
+from ..auth import get_current_user, require_capability
 from ..models import WorkOrder, ProductionPlan, Machine, Part, ToolEvent, get_db, now_ist
 from ..ws_manager import manager
 
@@ -319,7 +319,7 @@ def _consume_source_wos(db: Session, source_ids: List[int], new_wo_id: int, part
 async def create_work_order(
     data: WorkOrderCreate,
     db: Session = Depends(get_db),
-    user=Depends(get_current_user),
+    user=Depends(require_capability("capability.edit_work_orders", "supervisor", "admin")),
 ):
     if db.query(WorkOrder).filter(WorkOrder.work_order_no == data.work_order_no).first():
         raise HTTPException(400, "Work order number already exists")
@@ -420,7 +420,7 @@ def list_outstanding_work_orders(
 def discard_outstanding(
     data: OutstandingDiscardBody,
     db: Session = Depends(get_db),
-    _=Depends(require_role("admin", "superadmin", "supervisor")),
+    _=Depends(require_capability("capability.edit_work_orders", "admin", "superadmin", "supervisor")),
 ):
     """Discard leftover qty so it is no longer offered for reuse/clubbing."""
     discarded = []
@@ -1025,7 +1025,7 @@ async def update_work_order(
     wo_id: int,
     data: WorkOrderUpdate,
     db: Session = Depends(get_db),
-    user=Depends(require_role("supervisor", "admin")),
+    user=Depends(require_capability("capability.edit_work_orders", "supervisor", "admin")),
 ):
     wo = db.query(WorkOrder).filter(WorkOrder.id == wo_id).first()
     if not wo:
@@ -1093,7 +1093,7 @@ async def update_work_order(
 async def delete_work_order(
     wo_id: int,
     db: Session = Depends(get_db),
-    user=Depends(require_role("supervisor", "admin")),
+    user=Depends(require_capability("capability.edit_work_orders", "supervisor", "admin")),
 ):
     """Delete a work order. Linked plans/tool events are unlinked (not deleted)."""
     wo = db.query(WorkOrder).filter(WorkOrder.id == wo_id).first()

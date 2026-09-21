@@ -14,6 +14,7 @@ import { DRAFT_KEYS } from '../utils/formPersistence';
 import usePersistedState from '../hooks/usePersistedState';
 import MachineSuggestions from '../components/production-planning/MachineSuggestions';
 import MovePlanModal from '../components/production-planning/MovePlanModal';
+import { useFeatureFlags } from '../context/FeatureFlagsContext';
 import { Link } from 'react-router-dom';
 
 /** Distinct from accent blue — work order links/labels across planning UI */
@@ -122,6 +123,7 @@ const getMonthEnd = (date) => new Date(date.getFullYear(), date.getMonth() + 1, 
 
 export default function ProductionPlanning() {
   const { user } = useAuth();
+  const { canAccess } = useFeatureFlags();
   const { theme: t } = useTheme();
   const { config } = useConfig();
   const enabledShifts = useMemo(() => config.shifts.filter(s => s.enabled), [config.shifts]);
@@ -799,8 +801,8 @@ export default function ProductionPlanning() {
     }
   };
 
-  const canEdit   = ['supervisor', 'admin', 'superadmin'].includes(user?.role);
-  const canCreate = user?.role !== 'maintenance';
+  const canEdit   = canAccess('capability.edit_planning', user?.role);
+  const canCreate = canEdit;
 
   const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   const daysDiff = filters.start_date && filters.end_date ? 

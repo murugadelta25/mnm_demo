@@ -254,6 +254,106 @@ def list_notifications(db: Session = Depends(get_db), user=Depends(get_current_u
         except Exception:
             pass
 
+    # Active PLC LSL/USL breaches (SPM_AH_PLC and other generic PLC telemetry)
+    try:
+        import json
+        from ..models import MachineTelemetry
+        tel_rows = (
+            db.query(MachineTelemetry)
+            .order_by(MachineTelemetry.updated_at.desc())
+            .limit(40)
+            .all()
+        )
+        machine_ids = [r.machine_id for r in tel_rows]
+        machines = {
+            m.id: m for m in db.query(Machine).filter(Machine.id.in_(machine_ids or [-1])).all()
+        } if machine_ids else {}
+        for row in tel_rows:
+            try:
+                mapped = json.loads(row.mapped_json or "{}")
+            except Exception:
+                mapped = {}
+            if not isinstance(mapped, dict):
+                continue
+            breaches = mapped.get("threshold_breaches") or {}
+            if not isinstance(breaches, dict) or not breaches:
+                continue
+            machine = machines.get(row.machine_id)
+            mname = (machine.name if machine else None) or row.device_name or f"Machine #{row.machine_id}"
+            parts = []
+            for key, br in breaches.items():
+                if not isinstance(br, dict):
+                    continue
+                label = br.get("label") or key
+                unit = br.get("unit") or ""
+                side = "above USL" if br.get("side") == "high" else "below LSL"
+                limit = br.get("usl") if br.get("side") == "high" else br.get("lsl")
+                val = br.get("value")
+                val_s = f"{val:g}" if isinstance(val, (int, float)) else str(val)
+                lim_s = f"{limit:g}" if isinstance(limit, (int, float)) else "—"
+                parts.append(f"{label} {val_s} {unit} {side} ({lim_s})".replace("  ", " ").strip())
+            if not parts:
+                continue
+            items.append({
+                "id": f"plc-threshold-{row.machine_id}",
+                "kind": "plc_threshold",
+                "severity": "alert",
+                "title": f"Threshold breach — {mname}",
+                "body": "; ".join(parts[:4]) + (f" (+{len(parts) - 4} more)" if len(parts) > 4 else ""),
+                "path": f"/overview/equipment/{row.machine_id}",
+                "created_at": _iso(row.updated_at),
+                "meta": {
+                    "machine_id": row.machine_id,
+                    "breach_count": len(parts),
+                },
+            })
+    except Exception as exc:
+        print(f"[Notifications] PLC threshold alerts skipped: {exc}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    # FMMS calibration / PM due alerts
+    try:
+        from ..models_fmms import FmmsAsset
+        from .fmms import _service_alert_info
+        from datetime import date as _date
+        fmms_assets = (
+            db.query(FmmsAsset)
+            .filter(FmmsAsset.next_service_date.isnot(None))
+            .order_by(FmmsAsset.next_service_date.asc())
+            .limit(80)
+            .all()
+        )
+        today = _date.today()
+        for a in fmms_assets:
+            info = _service_alert_info(a, today)
+            if not info:
+                continue
+            items.append({
+                "id": f"fmms-service-{a.id}-{info['status']}",
+                "kind": "fmms_calibration" if info["schedule_type"] == "calibration" else "fmms_pm",
+                "severity": info["severity"],
+                "title": info["title"],
+                "body": info["body"],
+                "path": "/fmms/assets",
+                "created_at": _iso(info.get("next_service_date")),
+                "meta": {
+                    "asset_id": a.id,
+                    "asset_code": a.asset_code,
+                    "schedule_type": info["schedule_type"],
+                    "days_until": info["days_until"],
+                    "status": info["status"],
+                },
+            })
+    except Exception as exc:
+        print(f"[Notifications] FMMS service alerts skipped: {exc}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
     items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
 
     return {

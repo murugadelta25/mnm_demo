@@ -1,0 +1,190 @@
+[
+    {
+        "id": "d5d0733b4ac2ae94",
+        "type": "tab",
+        "label": "SIE_SPM_AH_PLC_to_PMS",
+        "disabled": false,
+        "info": "SIE → buffer/merge tags → rate-limit 1 POST/sec → PMS.\n\nWhy: posting every SIE event saturates PMS DB/WS.\nLive UI still updates ~1 Hz via WebSocket (feels continuous for process gauges).\n\nPMS: http://192.168.1.216:8010  machineId=8",
+        "env": []
+    },
+    {
+        "id": "c82052ac4a5b6392",
+        "type": "sie-device-data",
+        "z": "d5d0733b4ac2ae94",
+        "name": "SPM_AH_PLC",
+        "broker": "be0bd145e8a8a8f9",
+        "prefetch": 0,
+        "noAck": true,
+        "exchangeName": "message-bus",
+        "exchangeType": "topic",
+        "exchangeRoutingKey": "eda.data.edgexevent.#.eda49c35-04af-476e-89eb-3263ecf58206.#",
+        "exchangeDurable": true,
+        "queueName": "",
+        "queueExclusive": true,
+        "queueDurable": false,
+        "queueAutoDelete": true,
+        "headers": "{}",
+        "device": "eda49c35-04af-476e-89eb-3263ecf58206",
+        "x": 280,
+        "y": 280,
+        "wires": [
+            [
+                "816e920a399e3058",
+                "a1mergebuf001"
+            ]
+        ]
+    },
+    {
+        "id": "816e920a399e3058",
+        "type": "debug",
+        "z": "d5d0733b4ac2ae94",
+        "name": "SPM_AH_PLC raw",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 520,
+        "y": 200,
+        "wires": []
+    },
+    {
+        "id": "a1mergebuf001",
+        "type": "function",
+        "z": "d5d0733b4ac2ae94",
+        "name": "1) Merge into buffer",
+        "func": "// Merge every SIE partial (analogs / DI / DO) into one tag map.\n// Does NOT POST yet — a rate-limit node flushes ~1/sec.\nconst src = msg.payload || {};\nconst incoming = Array.isArray(src.readings) ? src.readings : [];\nif (!incoming.length) {\n    node.status({ fill: 'yellow', shape: 'ring', text: 'no readings' });\n    return null;\n}\n\nconst buf = flow.get('plcBuf') || {};\nfor (const r of incoming) {\n    if (!r || r.name == null) continue;\n    const name = String(r.name);\n    buf[name] = {\n        name: name,\n        value: (r.value === undefined ? null : r.value)\n    };\n}\nflow.set('plcBuf', buf);\nflow.set('plcMeta', {\n    id: src.id,\n    syncBy: src.syncBy || 'MODBUS',\n    deviceName: src.deviceName || flow.get('deviceName') || 'SPM_AH_PLC',\n    device: src.device || flow.get('deviceUuid') || 'eda49c35-04af-476e-89eb-3263ecf58206',\n    origin: src.origin || Date.now()\n});\nflow.set('plcDirty', true);\n\nconst n = Object.keys(buf).length;\nnode.status({ fill: 'blue', shape: 'dot', text: 'buf ' + n + ' tags' });\n\n// Tick only — delay node rate-limits the actual POST\nreturn { payload: { tick: Date.now(), tags: n } };",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "flow.set('pmsBase', 'http://192.168.1.216:8010');\nflow.set('machineId', 8);\nflow.set('deviceName', 'SPM_AH_PLC');\nflow.set('deviceUuid', 'eda49c35-04af-476e-89eb-3263ecf58206');\nif (!flow.get('plcBuf')) flow.set('plcBuf', {});\n",
+        "finalize": "",
+        "libs": [],
+        "x": 560,
+        "y": 280,
+        "wires": [
+            [
+                "a2ratelimit001"
+            ]
+        ]
+    },
+    {
+        "id": "a2ratelimit001",
+        "type": "delay",
+        "z": "d5d0733b4ac2ae94",
+        "name": "2) Max 1 POST / sec",
+        "pauseType": "rate",
+        "timeout": "5",
+        "timeoutUnits": "seconds",
+        "rate": "1",
+        "nbRateUnits": "1",
+        "rateUnits": "second",
+        "randomFirst": "1",
+        "randomLast": "5",
+        "randomUnits": "seconds",
+        "drop": true,
+        "allowrate": false,
+        "outputs": 1,
+        "x": 800,
+        "y": 280,
+        "wires": [
+            [
+                "a3buildpost001"
+            ]
+        ]
+    },
+    {
+        "id": "a3buildpost001",
+        "type": "function",
+        "z": "d5d0733b4ac2ae94",
+        "name": "3) Build PMS POST (flush buffer)",
+        "func": "// Flush merged buffer → one full snapshot POST.\n// Dashboard stays live: PMS WS pushes this ~1 Hz to Equipment Overview.\nif (!flow.get('plcDirty')) {\n    node.status({ fill: 'grey', shape: 'ring', text: 'no change' });\n    return null;\n}\n\nconst PMS_BASE = 'http://192.168.1.216:8010';\nflow.set('pmsBase', PMS_BASE);\nconst machineId = flow.get('machineId') || 8;\nconst meta = flow.get('plcMeta') || {};\nconst buf = flow.get('plcBuf') || {};\nconst readings = Object.keys(buf).map(k => buf[k]);\nif (!readings.length) {\n    node.status({ fill: 'yellow', shape: 'ring', text: 'empty buf' });\n    return null;\n}\n\nflow.set('plcDirty', false);\n\nmsg.method = 'POST';\nmsg.url = PMS_BASE + '/api/machines/' + machineId + '/telemetry';\nmsg.headers = { 'Content-Type': 'application/json' };\nmsg.payload = {\n    id: meta.id,\n    syncBy: meta.syncBy || 'MODBUS',\n    deviceName: meta.deviceName || 'SPM_AH_PLC',\n    device: meta.device || 'eda49c35-04af-476e-89eb-3263ecf58206',\n    origin: meta.origin || Date.now(),\n    machine_id: machineId,\n    readings: readings\n};\nnode.status({ fill: 'blue', shape: 'dot', text: 'POST ' + readings.length + ' @1Hz' });\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1060,
+        "y": 280,
+        "wires": [
+            [
+                "58f212def6accf32"
+            ]
+        ]
+    },
+    {
+        "id": "58f212def6accf32",
+        "type": "http request",
+        "z": "d5d0733b4ac2ae94",
+        "name": "POST /api/machines/8/telemetry",
+        "method": "use",
+        "ret": "obj",
+        "paytoqs": "ignore",
+        "url": "",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [],
+        "x": 1350,
+        "y": 280,
+        "wires": [
+            [
+                "750b7c958dc7f954"
+            ]
+        ]
+    },
+    {
+        "id": "750b7c958dc7f954",
+        "type": "function",
+        "z": "d5d0733b4ac2ae94",
+        "name": "POST result",
+        "func": "const code = msg.statusCode || 0;\nconst body = msg.payload || {};\nif (code >= 200 && code < 300) {\n    const dio = body.digital_io || {};\n    const onDo = (dio.outputs || []).filter(o => o && o.on === true).map(o => o.label).join(',') || '-';\n    const onDi = (dio.inputs || []).filter(i => i && i.on === true).map(i => i.label).join(',') || '-';\n    const scaled = body.scaled || {};\n    const p = scaled.pressure != null ? scaled.pressure : '-';\n    node.status({ fill: 'green', shape: 'dot', text: 'ok P=' + p + ' DO:' + onDo });\n} else {\n    const err = (body && body.detail) ? String(body.detail).slice(0, 40) : '';\n    node.status({ fill: 'red', shape: 'ring', text: 'fail ' + code + ' ' + err });\n}\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1610,
+        "y": 280,
+        "wires": [
+            [
+                "6b19381961d63977"
+            ]
+        ]
+    },
+    {
+        "id": "6b19381961d63977",
+        "type": "debug",
+        "z": "d5d0733b4ac2ae94",
+        "name": "PMS ACK",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1790,
+        "y": 280,
+        "wires": []
+    },
+    {
+        "id": "be0bd145e8a8a8f9",
+        "type": "broker-config",
+        "name": "",
+        "host": "rabbitmq.eda",
+        "port": "5672",
+        "vhost": "",
+        "tls": false,
+        "credsFromSettings": false
+    }
+]

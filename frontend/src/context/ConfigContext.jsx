@@ -68,20 +68,30 @@ export function timeToMinutes(start, end) {
   return diff;
 }
 
-const ConfigContext = createContext({ config: DEFAULT_CONFIG, ready: false, reload: () => {} });
+const ConfigContext = createContext({
+  config: DEFAULT_CONFIG,
+  ready: false,
+  unreachable: false,
+  reload: () => {},
+});
 
 export function ConfigProvider({ children }) {
   const { user } = useAuth();
   const [config, setConfig] = useState(DEFAULT_CONFIG);
   const [ready, setReady] = useState(false);
+  // Config never arrived (server down / request timed out). Callers must not read
+  // DEFAULT_CONFIG as "the plant is not set up yet".
+  const [unreachable, setUnreachable] = useState(false);
 
   const reload = useCallback(() => {
     return api.get('/api/config/')
       .then(r => {
         setConfig(r.data);
+        setUnreachable(false);
         setReady(true);
       })
       .catch(() => {
+        setUnreachable(true);
         setReady(true);
       });
   }, []);
@@ -91,6 +101,13 @@ export function ConfigProvider({ children }) {
       if (b) applySiteBranding(b);
     });
   }, []);
+
+  // Keep retrying while the server is down so the app recovers on its own
+  useEffect(() => {
+    if (!user || !unreachable) return undefined;
+    const id = setInterval(reload, 15000);
+    return () => clearInterval(id);
+  }, [user, unreachable, reload]);
 
   useEffect(() => {
     const fc = config?.factory;
@@ -109,11 +126,16 @@ export function ConfigProvider({ children }) {
       reload();
     } else {
       setConfig(DEFAULT_CONFIG);
+      setUnreachable(false);
       setReady(false);
     }
   }, [user, reload]);
 
-  return <ConfigContext.Provider value={{ config, ready, reload }}>{children}</ConfigContext.Provider>;
+  return (
+    <ConfigContext.Provider value={{ config, ready, unreachable, reload }}>
+      {children}
+    </ConfigContext.Provider>
+  );
 }
 
 export function useConfig() {

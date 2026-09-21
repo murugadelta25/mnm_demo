@@ -13,15 +13,13 @@ from .feature_registry import (
     registry_standalone,
 )
 from .access_matrix import (
-    TOGGLEABLE_ROLES,
     access_matrix_payload,
     access_matrix_role_defaults,
 )
+from .role_definitions import list_role_slugs, list_roles_payload
 from .models import SiteConfig
 
-# Re-export for routers
 __all__ = [
-    "TOGGLEABLE_ROLES",
     "default_feature_modules",
     "get_feature_modules",
     "set_feature_modules",
@@ -72,30 +70,42 @@ def _normalize(modules: dict[str, Any] | None) -> dict[str, bool]:
 def _iter_registry_items() -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for item in registry_standalone():
-        if not item.get("alwaysEnabled"):
-            items.append(item)
+        items.append(item)
     for group in registry_groups():
-        items.extend(group.get("items") or [])
+        group_roles = group.get("roles")
+        for item in group.get("items") or []:
+            merged = dict(item)
+            if merged.get("roles") is None and group_roles is not None:
+                merged["roles"] = list(group_roles)
+            items.append(merged)
     return items
 
 
-def _default_role_access_for_item(item: dict[str, Any]) -> dict[str, bool]:
-    allowed = set(item.get("roles") or [])
-    return {role: (role in allowed) for role in TOGGLEABLE_ROLES}
+def _toggleable_roles(db: Session) -> list[str]:
+    return list_role_slugs(db)
 
 
-def default_feature_role_access() -> dict[str, dict[str, bool]]:
+def _default_role_access_for_item(item: dict[str, Any], role_slugs: list[str]) -> dict[str, bool]:
+    from .access_matrix import roles_map_from_allowed
+    allowed = item.get("roles")
+    if allowed is None:
+        allowed = list(role_slugs)
+    return roles_map_from_allowed(allowed, role_slugs)
+
+
+def default_feature_role_access(db: Session) -> dict[str, dict[str, bool]]:
+    role_slugs = _toggleable_roles(db)
     out: dict[str, dict[str, bool]] = {}
     for item in _iter_registry_items():
-        out[item["id"]] = _default_role_access_for_item(item)
-    # Access-matrix defaults override / extend (e.g. My Work Hours operator-only)
-    for feature_id, roles in access_matrix_role_defaults().items():
+        out[item["id"]] = _default_role_access_for_item(item, role_slugs)
+    for feature_id, roles in access_matrix_role_defaults(role_slugs).items():
         out[feature_id] = dict(roles)
     return out
 
 
-def _normalize_role_access(stored: dict[str, Any] | None) -> dict[str, dict[str, bool]]:
-    out = default_feature_role_access()
+def _normalize_role_access(stored: dict[str, Any] | None, db: Session) -> dict[str, dict[str, bool]]:
+    role_slugs = _toggleable_roles(db)
+    out = default_feature_role_access(db)
     if not isinstance(stored, dict):
         return out
     for feature_id, roles_map in stored.items():
@@ -104,13 +114,16 @@ def _normalize_role_access(stored: dict[str, Any] | None) -> dict[str, dict[str,
         if feature_id in _ROLE_ACCESS_REPAIR_IDS and not any(
             bool(v) for v in roles_map.values()
         ):
-            # Never a real admin choice: the item had no User Management row, so
-            # the all-false map came from the missing registry `roles` list and
-            # was persisted wholesale by set_feature_role_access().
             continue
-        merged = dict(out[feature_id])
+        merged = {role: bool(out[feature_id].get(role, False)) for role in role_slugs}
         for role, enabled in roles_map.items():
-            if role in TOGGLEABLE_ROLES:
+            if role in role_slugs:
+                merged[role] = bool(enabled)
+        if "site_admin" in role_slugs and "site_admin" not in roles_map and roles_map.get("admin"):
+            merged["site_admin"] = bool(roles_map["admin"])
+        # Preserve custom role keys from stored data
+        for role, enabled in roles_map.items():
+            if role not in role_slugs:
                 merged[role] = bool(enabled)
         out[feature_id] = merged
     return out
@@ -148,7 +161,7 @@ def set_feature_modules(db: Session, modules: dict[str, bool]) -> dict[str, bool
 
 def get_feature_role_access(db: Session) -> dict[str, dict[str, bool]]:
     stored = _load_site_json(db).get("featureRoleAccess")
-    return _normalize_role_access(stored)
+    return _normalize_role_access(stored, db)
 
 
 def set_feature_role_access(
@@ -156,7 +169,8 @@ def set_feature_role_access(
     role_access: dict[str, dict[str, bool]],
 ) -> dict[str, dict[str, bool]]:
     """Update role access for registry + access-matrix feature ids."""
-    defaults = default_feature_role_access()
+    role_slugs = set(_toggleable_roles(db))
+    defaults = default_feature_role_access(db)
     allowed_ids = set(defaults.keys())
     current = get_feature_role_access(db)
     next_map = dict(current)
@@ -168,11 +182,10 @@ def set_feature_role_access(
             continue
         merged = dict(next_map.get(feature_id) or defaults[feature_id])
         for role, enabled in roles_map.items():
-            if role in TOGGLEABLE_ROLES:
+            if role in role_slugs or role in merged:
                 merged[role] = bool(enabled)
         next_map[feature_id] = merged
-        # Keep registry id in sync when matrix row uses the same roles
-        for row in access_matrix_payload():
+        for row in access_matrix_payload(list(role_slugs)):
             if row["id"] == feature_id and row.get("registryId") and row["registryId"] != feature_id:
                 next_map[row["registryId"]] = dict(merged)
             if row.get("registryId") == feature_id and row["id"] != feature_id:
@@ -190,10 +203,12 @@ def set_feature_role_access(
 
 
 def feature_modules_payload(db: Session) -> dict:
+    role_slugs = _toggleable_roles(db)
     return {
         "registry": registry_payload(),
         "modules": get_feature_modules(db),
         "roleAccess": get_feature_role_access(db),
-        "accessMatrix": access_matrix_payload(),
-        "toggleableRoles": TOGGLEABLE_ROLES,
+        "accessMatrix": access_matrix_payload(role_slugs),
+        "toggleableRoles": role_slugs,
+        "roles": list_roles_payload(db),
     }

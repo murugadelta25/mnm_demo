@@ -79,6 +79,7 @@ def require_role(*roles):
         allowed = set(roles)
         if "admin" in allowed:
             allowed.add("superadmin")
+            allowed.add("site_admin")
         if getattr(current_user, "is_operator_principal", False):
             if "operator" not in allowed:
                 raise HTTPException(status_code=403, detail="Insufficient permissions")
@@ -86,6 +87,41 @@ def require_role(*roles):
         if current_user.role not in allowed:
             raise HTTPException(status_code=403, detail="Insufficient permissions")
         return current_user
+    return checker
+
+
+def require_capability(capability_id: str, *fallback_roles: str):
+    """Allow if Feature Access Matrix grants this capability to the user's role.
+
+    fallback_roles apply only when the capability is missing from the stored map
+    (so existing deployments keep working until the matrix is saved).
+    """
+    def checker(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+        from .feature_modules import get_feature_role_access
+
+        role = getattr(current_user, "role", None)
+        try:
+            access = (get_feature_role_access(db) or {}).get(capability_id) or {}
+        except Exception as exc:
+            print(f"[auth] capability lookup failed for {capability_id}: {exc}")
+            access = {}
+        if role and isinstance(access, dict) and role in access:
+            if access[role]:
+                return current_user
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        if role == "site_admin" and access.get("admin"):
+            return current_user
+        allowed = set(fallback_roles)
+        if "admin" in allowed:
+            allowed.add("superadmin")
+            allowed.add("site_admin")
+        if getattr(current_user, "is_operator_principal", False):
+            if "operator" in allowed:
+                return current_user
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        if role in allowed:
+            return current_user
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
     return checker
 
 

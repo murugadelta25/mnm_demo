@@ -1,13 +1,14 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import api from '../api/client';
+import { useWebSocket } from '../api/useWebSocket';
 import PageHeader from '../components/PageHeader';
 import OverviewSelector, { FactoryTitleBanner } from '../components/OverviewSelector';
 import DonutGauge from '../components/charts/DonutGauge';
+import ServoPressEquipmentView, { usesTelemetryDashboard } from '../components/overview/ServoPressEquipmentView';
 import { useTheme } from '../context/ThemeContext';
 import { pageClass, surfaceClass } from '../themes/tileHelpers';
 import { statusPalette, STATUS_ROWS } from '../utils/overviewStatus';
-
 const AR_COLOR = '#4fc3f7';
 const PR_COLOR = '#fb7185';
 const QR_COLOR = '#34d399';
@@ -65,15 +66,63 @@ export default function EquipmentOverview() {
       }
       setErr('');
     } catch (e) {
-      setErr(e.response?.data?.detail || e.message || 'Failed to load equipment overview');
+      // No response at all = server down / request timed out, so the zeros below are a
+      // display artefact, not deleted data. Say so, or users read it as data loss.
+      setErr(
+        e.response
+          ? e.response.data?.detail || e.message || 'Failed to load equipment overview'
+          : `Server not reachable (${e.message}). Equipment and counters read 0 until it responds — nothing has been deleted.`,
+      );
     }
   }, [machineId]);
 
   useEffect(() => { load(); }, [load]);
+  // Slow poll is only a safety net — live DI/DO comes from WebSocket below
   useEffect(() => {
-    const id = setInterval(load, 5000);
+    const id = setInterval(load, machineId ? 10000 : 5000);
     return () => clearInterval(id);
-  }, [load]);
+  }, [load, machineId]);
+
+  // Node-RED / SIE telemetry → immediate UI patch (was waiting up to 5s on poll)
+  const telPatchTimer = useRef(null);
+  useWebSocket(useCallback((msg) => {
+    if (!msg || msg.type !== 'machine_telemetry_updated') return;
+    if (!machineId || String(msg.id) !== String(machineId)) return;
+
+    const patch = msg.telemetry;
+    if (patch && typeof patch === 'object') {
+      setDetail((prev) => {
+        if (!prev) return prev;
+        const prevTel = prev.telemetry || {};
+        return {
+          ...prev,
+          telemetry: {
+            ...prevTel,
+            ...patch,
+            // Keep rings that the live push omits (history / alarms / full trend)
+            trend: patch.trend != null ? patch.trend : prevTel.trend,
+            alarms: patch.alarms != null ? patch.alarms : prevTel.alarms,
+            history: patch.history != null ? patch.history : prevTel.history,
+            thresholds: patch.thresholds != null ? patch.thresholds : prevTel.thresholds,
+            threshold_breaches: patch.threshold_breaches != null
+              ? patch.threshold_breaches
+              : prevTel.threshold_breaches,
+            email_alert_status: patch.email_alert_status != null
+              ? patch.email_alert_status
+              : prevTel.email_alert_status,
+            available: true,
+          },
+        };
+      });
+      return;
+    }
+
+    // Fallback: debounce a full detail reload if the push has no telemetry body
+    clearTimeout(telPatchTimer.current);
+    telPatchTimer.current = setTimeout(() => { load(); }, 50);
+  }, [machineId, load]));
+
+  useEffect(() => () => clearTimeout(telPatchTimer.current), []);
 
   const machines = listData?.machines || [];
 
@@ -168,7 +217,13 @@ export default function EquipmentOverview() {
       />
       {err && <div style={s.alert}>{err}</div>}
 
-      {machineId && detail ? (
+      {machineId && detail && usesTelemetryDashboard(info?.type || detail?.machine?.machine_type) ? (
+        <ServoPressEquipmentView
+          detail={detail}
+          theme={t}
+          onNavigateLine={(lineId) => navigate(`/overview/line/${encodeURIComponent(lineId)}`)}
+        />
+      ) : machineId && detail ? (
         <div style={s.detailLayout}>
           <div style={s.detailTop}>
             {/* Tile 1 — Machine card */}
@@ -908,7 +963,10 @@ function styles(t, isDark) {
       minHeight: 100,
       objectFit: 'contain',
       borderRadius: 12,
-      border: '2px solid',
+      // Longhand only: callers override borderColor with the live status colour, and
+      // mixing that with the border shorthand makes React drop one of the two.
+      borderWidth: 2,
+      borderStyle: 'solid',
       background: isDark ? 'rgba(15,23,42,0.55)' : '#f1f5f9',
       padding: 10,
       boxSizing: 'border-box',

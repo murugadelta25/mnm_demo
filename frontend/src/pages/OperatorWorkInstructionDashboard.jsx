@@ -16,6 +16,7 @@ import {
 import { useConfig, getCurrentShift } from '../context/ConfigContext';
 import { useWebSocket } from '../api/useWebSocket';
 import { useAuth } from '../context/AuthContext';
+import { useFeatureFlags } from '../context/FeatureFlagsContext';
 import { INSTANCE_STATUS_LABEL, instanceStatusTheme } from '../utils/qcShiftHours';
 import { formatCtSeconds } from '../utils/cycleTime';
 import { DRAFT_KEYS, loadDraft, saveDraft } from '../utils/formPersistence';
@@ -49,6 +50,7 @@ function PdfThumb({ url, label, revision, revDate, onOpen, s, t }) {
 
 export default function OperatorWorkInstructionDashboard() {
   const { user } = useAuth();
+  const { canAccess } = useFeatureFlags();
   const { theme: t } = useTheme();
   const s = getWorkInstructionStyles(t);
   const { config } = useConfig();
@@ -370,7 +372,9 @@ export default function OperatorWorkInstructionDashboard() {
                 QC Inspection Sheet
               </button>
               <button type="button" style={{ ...s.btnSecondary, marginLeft: 8 }} onClick={() => navigate('/qc-approvals')}>
-                {['quality', 'supervisor', 'admin'].includes(user?.role) ? 'QC Approvals' : 'My QC Status'}
+                {(canAccess('capability.qc_inspect', user?.role) || canAccess('capability.qc_approve', user?.role))
+                  ? 'QC Approvals'
+                  : 'My QC Status'}
               </button>
             </div>
           </div>

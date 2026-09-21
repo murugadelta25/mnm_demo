@@ -378,6 +378,32 @@ def _build_lines_meta(cfg: dict, stations: dict[int, Station]) -> list[dict]:
 
 def _machine_payload(m: Machine, db: Session, stations: dict[int, Station], plan_by_machine: dict) -> dict:
     live = _compute_status(m, db)
+    # Prefer fresh Modbus Status*/Alarm for telemetry machines
+    # (Servo Press / Servo Linear Motor / PLC / SPM)
+    try:
+        from ..machine_telemetry_profiles import is_telemetry_dashboard_type
+        if is_telemetry_dashboard_type(m.machine_type):
+            from ..machine_telemetry_service import (
+                derive_pms_status_from_modbus,
+                get_telemetry_for_machine,
+                sync_machine_status_from_telemetry,
+            )
+            tel = get_telemetry_for_machine(db, m.id)
+            if tel.get("available"):
+                # Rebuild mapped shape for derive helper
+                mapped = {
+                    "status": tel.get("status") or {},
+                    "scaled": tel.get("scaled") or {},
+                }
+                derived = derive_pms_status_from_modbus(mapped)
+                if derived:
+                    if (m.status or "") != derived:
+                        sync_machine_status_from_telemetry(db, m, mapped)
+                    # Do not override breakdown / setting_change from tickets
+                    if live not in ("breakdown", "setting_change", "offline"):
+                        live = derived
+    except Exception:
+        pass
     st = stations.get(m.station_id)
     plan = plan_by_machine.get(m.id)
     return {
@@ -1115,7 +1141,7 @@ def equipment_detail(machine_id: int, db: Session = Depends(get_db), _=Depends(g
     except Exception as exc:
         print(f"[WARN] equipment_detail hourly output failed: {exc}")
 
-    return {
+    result = {
         "machine": machine,
         "factory_name": (line or {}).get("factory_name") or data.get("factory_name") or "",
         "factories": data.get("factories") or [],
@@ -1160,8 +1186,29 @@ def equipment_detail(machine_id: int, db: Session = Depends(get_db), _=Depends(g
         },
         "kpi_panel": kpi_panel,
         "hourly_output": hourly_output,
+        "telemetry": None,
         "all_machines": [
             {"id": m["id"], "name": m["name"], "status": m["status"], "station_name": m.get("station_name")}
             for m in data["machines"]
         ],
     }
+
+    # Servo Press / Node-RED Modbus live snapshot + dedicated Servo OEE (does not mutate PMS KPI)
+    try:
+        from ..machine_telemetry_service import ensure_machine_telemetry_schema, get_telemetry_for_machine
+        from ..servo_press_oee import compute_servo_press_oee, uses_telemetry_dashboard
+        ensure_machine_telemetry_schema()
+        tel = get_telemetry_for_machine(db, machine_id)
+        result["telemetry"] = tel
+        # Keep original kpi_panel untouched for CNC/PMS formulas; attach servo_oee separately
+        if uses_telemetry_dashboard(m_orm):
+            servo = compute_servo_press_oee(db, m_orm, now.date(), shift_id, cfg)
+            result["servo_oee"] = servo
+        else:
+            result["servo_oee"] = None
+    except Exception as exc:
+        print(f"[WARN] equipment_detail telemetry: {exc}")
+        result["telemetry"] = {"available": False, "error": str(exc)}
+        result["servo_oee"] = None
+
+    return result

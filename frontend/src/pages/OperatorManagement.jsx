@@ -1535,7 +1535,7 @@ function getStyles(t) {
       background: t.inp, color: t.text, fontSize: 13, minWidth: 140,
     },
     tabBtn: {
-      padding: '8px 16px', borderRadius: 8, border: '1px solid', cursor: 'pointer',
+      padding: '8px 16px', borderRadius: 8, borderWidth: 1, borderStyle: 'solid', cursor: 'pointer',
       fontWeight: 600, fontSize: 13,
     },
     submitBtn: {

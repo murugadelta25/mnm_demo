@@ -8,6 +8,7 @@ import PageHeader from '../components/PageHeader';
 import { formatDateTime } from '../utils/dateFormat';
 import { DRAFT_KEYS } from '../utils/formPersistence';
 import usePersistedState from '../hooks/usePersistedState';
+import { useFeatureFlags } from '../context/FeatureFlagsContext';
 
 const REASONS = [
   { value: 'setting_change', label: 'Setting Change' },
@@ -22,6 +23,7 @@ const today = () => new Date().toISOString().slice(0, 10);
 
 export default function ModelChange() {
   const { user } = useAuth();
+  const { canAccess } = useFeatureFlags();
   const { theme: t } = useTheme();
   const s = getStyles(t);
 
@@ -131,7 +133,7 @@ export default function ModelChange() {
       <PageHeader title="MODEL / SETTING CHANGE" onRefresh={fetchData} />
 
       {/* Request Form */}
-      {(user?.role === 'operator' || user?.role === 'supervisor' || user?.role === 'admin') && (
+      {canAccess('capability.raise_model_change', user?.role) && (
         <div style={s.card}>
           <h4 style={s.cardTitle}>New Change Request</h4>
           <form onSubmit={submit}>
@@ -304,14 +306,14 @@ export default function ModelChange() {
                 )}
 
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}>
-                  {r.status === 'pending' && (user?.role === 'supervisor' || user?.role === 'admin') && <>
+                  {r.status === 'pending' && canAccess('capability.approve_model_change', user?.role) && <>
                     <button type="button" style={{ ...s.actBtn, background: '#10b981' }} onClick={() => approve(r.id)}>✓ Approve</button>
                     <button type="button" style={{ ...s.actBtn, background: '#ef4444' }} onClick={() => reject(r.id)}>✗ Reject</button>
                   </>}
-                  {r.status === 'pending' && user?.role === 'operator' && (
+                  {r.status === 'pending' && !canAccess('capability.approve_model_change', user?.role) && (
                     <span style={{ color: t.textDim, fontSize: 12 }}>⏳ Awaiting supervisor approval</span>
                   )}
-                  {['approved','in_progress'].includes(r.status) && user?.role !== 'maintenance' && (
+                  {['approved','in_progress'].includes(r.status) && canAccess('capability.raise_model_change', user?.role) && (
                     <button type="button" style={{ ...s.actBtn, background: '#8b5cf6', whiteSpace: 'nowrap' }} onClick={() => complete(r.id)}>
                       ✓ Mark Complete
                     </button>

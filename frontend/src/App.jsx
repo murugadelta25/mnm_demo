@@ -20,6 +20,7 @@ import LossTracker from './pages/LossTracker';
 import ProductionPlanning from './pages/ProductionPlanning';
 import WorkOrderManagement from './pages/WorkOrderManagement';
 import EmailAlerts from './pages/EmailAlerts';
+import ProcessSetpointAlerts from './pages/ProcessSetpointAlerts';
 import { ConfigProvider } from './context/ConfigContext';
 import Configuration from './pages/Configuration';
 import FactorySetup from './pages/FactorySetup';
@@ -39,6 +40,28 @@ import FactoryOverview from './pages/FactoryOverview';
 import LineOverview from './pages/LineOverview';
 import EquipmentOverview from './pages/EquipmentOverview';
 import MonitorMode from './pages/MonitorMode';
+import FmmsAssetManagement from './pages/fmms/FmmsAssetManagement';
+import FmmsAssetHierarchy from './pages/fmms/FmmsAssetHierarchy';
+import FmmsDashboard from './pages/fmms/FmmsDashboard';
+import FmmsWorkOrders from './pages/fmms/FmmsWorkOrders';
+import FmmsRingiSor from './pages/fmms/FmmsRingiSor';
+import FmmsAmcCalibration from './pages/fmms/FmmsAmcCalibration';
+import FmmsBreakdownRca from './pages/fmms/FmmsBreakdownRca';
+import FmmsPicAssignment from './pages/fmms/FmmsPicAssignment';
+import FmmsPicMaster from './pages/fmms/FmmsPicMaster';
+import FmmsCompliance from './pages/fmms/FmmsCompliance';
+import FmmsAssetMonitoring from './pages/fmms/FmmsAssetMonitoring';
+import FmmsSparePartsInventory from './pages/fmms/FmmsSparePartsInventory';
+import FmmsPlanning from './pages/fmms/FmmsPlanning';
+import FmmsIntegrations from './pages/fmms/FmmsIntegrations';
+import FmmsIncidentTracking from './pages/fmms/FmmsIncidentTracking';
+import TacoDashboard from './pages/fmms/taco/TacoDashboard';
+import TacoVendors from './pages/fmms/taco/TacoVendors';
+import TacoVendorWorkflow from './pages/fmms/taco/TacoVendorWorkflow';
+import TacoCalibrationCost from './pages/fmms/taco/TacoCalibrationCost';
+import TacoTestingEquipment from './pages/fmms/taco/TacoTestingEquipment';
+import TacoBooking from './pages/fmms/taco/TacoBooking';
+import TacoTestingKpis from './pages/fmms/taco/TacoTestingKpis';
 
 /** CPLM Root + Outlet pattern — shell wraps all authenticated routes */
 function AuthenticatedShell() {
@@ -81,6 +104,7 @@ function AppRoutes() {
         <Route path="/maintenance" element={<MaintenanceDashboard />} />
         <Route path="/loss-tracker" element={<LossTracker />} />
         <Route path="/alerts/email" element={<EmailAlerts />} />
+        <Route path="/alerts/process-setpoints" element={<ProcessSetpointAlerts />} />
         <Route path="/factory-setup" element={<FactorySetup />} />
         <Route path="/config" element={<Configuration />} />
         <Route path="/machines" element={<MachineConfig />} />
@@ -94,6 +118,29 @@ function AppRoutes() {
         <Route path="/operators" element={<OperatorManagement />} />
         <Route path="/my-work-hours" element={<MyWorkHours />} />
         <Route path="/database-management" element={<DatabaseManagement />} />
+        <Route path="/fmms/dashboard" element={<FmmsDashboard />} />
+        <Route path="/fmms/assets" element={<FmmsAssetManagement />} />
+        <Route path="/fmms/asset-hierarchy" element={<FmmsAssetHierarchy />} />
+        <Route path="/fmms/work-orders" element={<FmmsWorkOrders />} />
+        <Route path="/fmms/ringi-sor" element={<FmmsRingiSor />} />
+        <Route path="/fmms/amc-calibration" element={<FmmsAmcCalibration />} />
+        <Route path="/fmms/breakdown-rca" element={<FmmsBreakdownRca />} />
+        <Route path="/fmms/pic-assignment" element={<FmmsPicAssignment />} />
+        <Route path="/fmms/pic-master" element={<FmmsPicMaster />} />
+        <Route path="/fmms/pmc-planning" element={<Navigate to="/fmms/planning?tab=pmc" replace />} />
+        <Route path="/fmms/compliance" element={<FmmsCompliance />} />
+        <Route path="/fmms/monitoring" element={<FmmsAssetMonitoring />} />
+        <Route path="/fmms/spare-parts" element={<FmmsSparePartsInventory />} />
+        <Route path="/fmms/planning" element={<FmmsPlanning />} />
+        <Route path="/fmms/integrations" element={<FmmsIntegrations />} />
+        <Route path="/fmms/incidents" element={<FmmsIncidentTracking />} />
+        <Route path="/taco-fmms/dashboard" element={<TacoDashboard />} />
+        <Route path="/taco-fmms/vendors" element={<TacoVendors />} />
+        <Route path="/taco-fmms/vendor-workflow" element={<TacoVendorWorkflow />} />
+        <Route path="/taco-fmms/calibration-cost" element={<TacoCalibrationCost />} />
+        <Route path="/taco-fmms/testing-equipment" element={<TacoTestingEquipment />} />
+        <Route path="/taco-fmms/booking" element={<TacoBooking />} />
+        <Route path="/taco-fmms/testing-kpis" element={<TacoTestingKpis />} />
         <Route path="*" element={<Navigate to="/dashboard" />} />
       </Route>
       <Route path="*" element={<Navigate to={user ? '/dashboard' : '/login'} />} />

@@ -13,12 +13,13 @@ import AppBar from './AppBar';
 
 export default function AppShell() {
   const { theme } = useTheme();
-  const { config, ready: configReady } = useConfig();
+  const { config, ready: configReady, unreachable: serverUnreachable, reload: reloadConfig } = useConfig();
   const { isIntegration, navHidden, toggleNav } = useEmbed();
   const [navOpen, setNavOpen] = useState(true);
   const { isEnabled } = useFeatureFlags();
   const needsFactorySetup =
     configReady &&
+    !serverUnreachable &&
     config?.factory?.configured !== true &&
     isEnabled('settings.factory_setup');
 
@@ -73,7 +74,7 @@ export default function AppShell() {
           }}
         >
           {/* Overlay — must not push LCP content (avoids CLS when config loads) */}
-          {needsFactorySetup && !isIntegration && (
+          {(needsFactorySetup || serverUnreachable) && !isIntegration && (
             <div
               className="titan-factory-banner"
               style={{
@@ -90,11 +91,36 @@ export default function AppShell() {
                 boxShadow: '0 4px 12px rgba(0,0,0,0.18)',
               }}
             >
-              <span style={{ color: '#f59e0b', fontWeight: 700 }}>Plant setup incomplete. </span>
-              Complete your plant setup:{' '}
-              <Link to="/factory-setup" style={{ color: theme.accent, fontWeight: 600 }}>
-                Factory Setup
-              </Link>
+              {serverUnreachable ? (
+                <>
+                  <span style={{ color: '#ef4444', fontWeight: 700 }}>Server not reachable. </span>
+                  Your machines and history are safe — screens stay empty until the connection is
+                  restored.{' '}
+                  <button
+                    type="button"
+                    onClick={reloadConfig}
+                    style={{
+                      background: 'none',
+                      border: 'none',
+                      padding: 0,
+                      color: theme.accent,
+                      fontWeight: 600,
+                      fontSize: 13,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Retry now
+                  </button>
+                </>
+              ) : (
+                <>
+                  <span style={{ color: '#f59e0b', fontWeight: 700 }}>Plant setup incomplete. </span>
+                  Complete your plant setup:{' '}
+                  <Link to="/factory-setup" style={{ color: theme.accent, fontWeight: 600 }}>
+                    Factory Setup
+                  </Link>
+                </>
+              )}
             </div>
           )}
           <div

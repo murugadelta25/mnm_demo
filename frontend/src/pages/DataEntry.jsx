@@ -4,6 +4,8 @@ import api from '../api/client';
 import PageHeader from '../components/PageHeader';
 import { useTheme } from '../context/ThemeContext';
 import { pageClass } from '../themes/tileHelpers';
+import { useAuth } from '../context/AuthContext';
+import { useFeatureFlags } from '../context/FeatureFlagsContext';
 import { useConfig, getCurrentShift, timeToMinutes, isMobileIntegrationEnabled, isManualDataEntryEnabled } from '../context/ConfigContext';
 import { parseCtSeconds, sumCt, formatCtSeconds, isValidDecimalInput } from '../utils/cycleTime';
 import { planModelVariant } from '../utils/partVariant';
@@ -85,6 +87,8 @@ function pickBestPlan(plans, machineId) {
 }
 
 export default function DataEntry() {
+  const { user } = useAuth();
+  const { canAccess } = useFeatureFlags();
   const { config } = useConfig();
   const mobileCoupled = isMobileIntegrationEnabled(config);
   const manualEntry = isManualDataEntryEnabled(config);
@@ -493,9 +497,14 @@ export default function DataEntry() {
 
   const shiftEntryOpen = isShiftEnabled(form.shift, form.entry_date);
   const entryEnabled = manualEntry && shiftEntryOpen;
+  const canSubmit = canAccess('capability.edit_data_entry', user?.role);
 
   const handleSubmit = async e => {
     e.preventDefault();
+    if (!canSubmit) {
+      setMsg('✗ View-only — your role cannot submit data entry');
+      return;
+    }
     if (!manualEntry) {
       setMsg('✗ Manual data entry is disabled — switch to Manual mode in Configuration');
       return;
@@ -807,7 +816,11 @@ export default function DataEntry() {
         </div>
 
         {msg && <p style={{ color: msg.startsWith('✓') ? '#10b981' : '#ef4444', marginBottom: 12 }}>{msg}</p>}
-        <button style={s.submitBtn} type="submit">Save Entry</button>
+        {canSubmit ? (
+          <button style={s.submitBtn} type="submit">Save Entry</button>
+        ) : (
+          <p style={{ color: t.textMuted, fontSize: 13 }}>View only — this role cannot submit data entry.</p>
+        )}
       </form>
     </div>
   );

@@ -4,6 +4,7 @@ import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import { pageClass } from '../themes/tileHelpers';
 import PageHeader from '../components/PageHeader';
+import { hasRole } from '../config/accessMatrix';
 
 const REPORT_OPTIONS = [
   { key: 'oee',          label: 'OEE / Production' },
@@ -34,6 +35,7 @@ export default function EmailAlerts() {
   const { theme: t } = useTheme();
   const s = getStyles(t);
   const [smtp, setSmtp]         = useState({ smtp_server:'smtp.gmail.com', smtp_port:587, email_address:'', email_password:'' });
+  const [smtpPwdSet, setSmtpPwdSet] = useState(false);
   const [smtpMsg, setSmtpMsg]   = useState('');
   const [newGroup, setNewGroup] = useState({ name:'', description:'', report_types:[] });
   const [groupMsg, setGroupMsg] = useState('');
@@ -56,7 +58,7 @@ export default function EmailAlerts() {
   const [deviationMsg, setDeviationMsg] = useState('');
   const [escalationDraft, setEscalationDraft] = useState(null);
   const [escalationMsg, setEscalationMsg] = useState('');
-  const isAdmin = user?.role === 'admin';
+  const isAdmin = hasRole(user?.role, 'admin');
 
   const fetchDeviationAlerts = useCallback(async () => {
     try {
@@ -76,15 +78,25 @@ export default function EmailAlerts() {
   }, []);
 
   const fetchAll = useCallback(async () => {
-    const [g, s] = await Promise.all([api.get('/api/email/groups'), api.get('/api/email/schedules')]);
-    setGroups(g.data);
-    setSchedules(s.data);
+    try {
+      const [g, s] = await Promise.all([
+        api.get('/api/email/groups'),
+        api.get('/api/email/schedules'),
+      ]);
+      setGroups(g.data);
+      setSchedules(s.data);
+    } catch (err) {
+      console.warn('Email alerts refresh failed', err?.response?.status || err?.message);
+    }
   }, []);
 
   useEffect(() => {
     fetchAll();
     api.get('/api/email/smtp').then(r => {
-      if (r.data.email_address) setSmtp(p => ({ ...p, ...r.data, email_password: '' }));
+      if (r.data.email_address) {
+        setSmtpPwdSet(!!r.data.password_set);
+        setSmtp(p => ({ ...p, ...r.data, email_password: '' }));
+      }
     }).catch(() => {});
   }, [fetchAll]);
 
@@ -96,12 +108,21 @@ export default function EmailAlerts() {
   const saveSmtp = async e => {
     e.preventDefault();
     try {
-      await api.post('/api/email/smtp', smtp);
-      setSmtpMsg('✓ SMTP settings saved');
+      const hadNewPwd = !!smtp.email_password?.trim();
+      const r = await api.post('/api/email/smtp', smtp);
+      setSmtpPwdSet(!!(r.data?.password_set || smtpPwdSet || hadNewPwd));
+      setSmtp(p => ({ ...p, email_password: '' }));
+      setSmtpMsg(hadNewPwd ? '✓ SMTP settings saved (password updated)' : '✓ SMTP settings saved (password unchanged)');
     } catch (err) { setSmtpMsg('✗ ' + (err.response?.data?.detail || 'Error')); }
   };
   const testSmtp = async () => {
     try {
+      // If user typed a new password, save it first so test uses the latest value
+      if (smtp.email_password?.trim()) {
+        await api.post('/api/email/smtp', smtp);
+        setSmtpPwdSet(true);
+        setSmtp(p => ({ ...p, email_password: '' }));
+      }
       const r = await api.post('/api/email/smtp/test');
       setSmtpMsg('✓ ' + r.data.message);
     } catch (err) { setSmtpMsg('✗ ' + (err.response?.data?.detail || 'Connection failed')); }
@@ -110,6 +131,10 @@ export default function EmailAlerts() {
   // Groups
   const createGroup = async e => {
     e.preventDefault();
+    if (!newGroup.name?.trim()) {
+      setGroupMsg('✗ Enter a group name');
+      return;
+    }
     const rts = newGroup.report_types.length
       ? newGroup.report_types.join(',')
       : (REPORT_DEFAULTS_BY_NAME[newGroup.name.toLowerCase()] || ['oee','planning','breakdown']).join(',');
@@ -118,7 +143,15 @@ export default function EmailAlerts() {
       setNewGroup({ name:'', description:'', report_types:[] });
       setGroupMsg('✓ Group created');
       fetchAll();
-    } catch (err) { setGroupMsg('✗ ' + (err.response?.data?.detail || 'Error')); }
+    } catch (err) {
+      const code = err?.response?.status;
+      const detail = err?.response?.data?.detail || err?.message || 'Error';
+      if (code === 502 || /timeout/i.test(String(detail))) {
+        setGroupMsg('✗ Create Group failed — backend 502/timeout. Restart with .\\run.ps1 (clear ports 8010 & 5174).');
+      } else {
+        setGroupMsg('✗ ' + detail);
+      }
+    }
   };
   const toggleGroupReport = key =>
     setNewGroup(p => ({
@@ -257,7 +290,8 @@ export default function EmailAlerts() {
               <input style={s.inp} type="email" value={smtp.email_address} onChange={e => setSmtp(p=>({...p,email_address:e.target.value}))} required />
             </FField>
             <FField label="App Password">
-              <input style={s.inp} type="password" value={smtp.email_password} placeholder="Google App Password"
+              <input style={s.inp} type="password" value={smtp.email_password} autoComplete="new-password"
+                placeholder={smtpPwdSet ? 'Saved — paste a new App Password only to replace' : 'Paste 16-char Google App Password'}
                 onChange={e => setSmtp(p=>({...p,email_password:e.target.value}))} />
             </FField>
             <div style={{ gridColumn:'span 2', display:'flex', gap:10, alignItems:'center', flexWrap:'wrap' }}>
@@ -267,7 +301,9 @@ export default function EmailAlerts() {
             </div>
           </form>
           <div style={s.infoBox}>
-            <b style={{ color:t.accent }}>Gmail Setup:</b> Enable 2FA → Google Account → Security → App Passwords → Generate password for "Mail"
+            <b style={{ color:t.accent }}>Gmail Setup:</b> Use an <b>App Password</b>, not your normal Gmail login.
+            Enable 2-Step Verification → Google Account → Security → App passwords → Generate for &quot;Mail&quot; →
+            paste the 16 characters here → Save → Test. Spaces are OK (stripped automatically).
           </div>
         </div>
       )}
@@ -907,7 +943,8 @@ function getStyles(t) {
     miniBtn: { padding:'3px 8px', border:'none', borderRadius:4, color:'#fff',
                cursor:'pointer', fontSize:12, fontWeight:600, flexShrink:0 },
     checkLabel: { display:'flex', alignItems:'center', gap:8, padding:'8px 12px', borderRadius:8,
-                  border:`1px solid ${t.surface2}`, cursor:'pointer', fontSize:13, userSelect:'none' },
+                  borderWidth:1, borderStyle:'solid', borderColor:t.surface2,
+                  cursor:'pointer', fontSize:13, userSelect:'none' },
     checkLabel2: { display:'flex', alignItems:'center', gap:8, cursor:'pointer', marginTop:8 },
     schedRow: { display:'flex', alignItems:'center', gap:10, padding:'12px 0',
                 borderBottom:`1px solid ${t.surface2}` },

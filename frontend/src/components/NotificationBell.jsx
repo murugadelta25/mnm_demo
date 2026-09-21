@@ -60,6 +60,7 @@ export default function NotificationBell() {
   const panelRef = useRef(null);
   const btnRef = useRef(null);
   const prevUnreadRef = useRef(0);
+  const failStreakRef = useRef(0);
 
   const load = useCallback(async () => {
     if (!localStorage.getItem('token')) return;
@@ -67,8 +68,9 @@ export default function NotificationBell() {
       const { data } = await api.get('/api/notifications/');
       setItems(data.items || []);
       setUnread(data.unread ?? data.count ?? 0);
+      failStreakRef.current = 0;
     } catch {
-      /* keep previous list on transient errors */
+      failStreakRef.current += 1;
     }
   }, []);
 
@@ -106,12 +108,21 @@ export default function NotificationBell() {
   useEffect(() => {
     if (!localStorage.getItem('token')) return undefined;
     load();
-    const id = setInterval(load, 30000);
+    const id = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      if (failStreakRef.current > 3 && failStreakRef.current % 4 !== 0) {
+        failStreakRef.current += 1;
+        return;
+      }
+      load();
+    }, 45000);
     return () => clearInterval(id);
   }, [load]);
 
   useWebSocket(useCallback((msg) => {
     const type = msg?.type;
+    // Do NOT reload on every machine_telemetry_updated — Node-RED can post many
+    // times per second and that floods /api/notifications/ → DB pool hang.
     if ([
       'model_change_request',
       'model_change_approved',
@@ -127,6 +138,7 @@ export default function NotificationBell() {
       'spc_alert',
       'qc_report_submitted',
       'tool_alert',
+      'plc_threshold',
     ].includes(type)) {
       load();
     }

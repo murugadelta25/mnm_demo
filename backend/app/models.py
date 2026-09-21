@@ -15,6 +15,9 @@ engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,
     pool_recycle=3600,
+    pool_size=20,
+    max_overflow=40,
+    pool_timeout=15,
     connect_args={"connect_timeout": 10},
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -98,10 +101,25 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     username = Column(String(50), unique=True, nullable=False)
     password_hash = Column(String(255), nullable=False)
-    role = Column(Enum("operator", "supervisor", "maintenance", "admin", "quality", "superadmin"), nullable=False)
+    role = Column(String(50), nullable=False)
     reference_photo_url = Column(String(500), nullable=True)
     # 1 = must set a policy-compliant password once (upgrade); cleared after successful change
     password_must_change = Column(Integer, default=0, nullable=False)
+
+
+class AppRole(Base):
+    """Configurable roles for login users — drives Feature Access Matrix columns."""
+    __tablename__ = "app_roles"
+    id = Column(Integer, primary_key=True, index=True)
+    slug = Column(String(50), unique=True, nullable=False, index=True)
+    label = Column(String(100), nullable=False)
+    description = Column(String(500), nullable=True)
+    color = Column(String(20), default="#64748b")
+    icon = Column(String(10), default="👤")
+    is_system = Column(Integer, default=0, nullable=False)
+    inherits_slug = Column(String(50), nullable=True)
+    sort_order = Column(Integer, default=100)
+    active = Column(Integer, default=1, nullable=False)
 
 
 class Operator(Base):
@@ -741,6 +759,48 @@ class OperatorLossLog(Base):
     oee_bucket = Column(String(20))  # breaks | mgmt | downtime | none
     exclude_from_oee = Column(Integer, default=0)  # 1 = avoid double-count (e.g. setting vs MCR)
     created_at = Column(TIMESTAMP)
+
+
+class MachineTelemetry(Base):
+    """Latest Node-RED / Modbus snapshot per machine (Servo Press and future PLC devices)."""
+    __tablename__ = "machine_telemetry"
+    machine_id = Column(Integer, ForeignKey("machines.id"), primary_key=True)
+    sync_by = Column(String(40))
+    device_name = Column(String(120))
+    device_uuid = Column(String(80), index=True)
+    origin = Column(String(40))  # device clock / epoch as string
+    readings_json = Column(Text)  # raw readings array
+    mapped_json = Column(Text)  # scaled + UI blocks
+    trend_json = Column(Text)  # short live trend ring
+    alarms_json = Column(Text)  # alarm event log from Modbus Alarm Code
+    history_json = Column(Text)  # production / status history snapshots
+    runtime_json = Column(Text)  # phase timing for Modbus-derived OEE
+    updated_at = Column(DateTime)
+
+
+class TelemetryTag(Base):
+    """
+    Editable Node-RED ↔ UI parameter map (Modbus §8.4.2 style).
+    Scoped by profile_id (e.g. servo_press). Drives Live Status / Pressing Result screens.
+    """
+    __tablename__ = "telemetry_tags"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    profile_id = Column(String(40), nullable=False, index=True, default="servo_press")
+    tag_key = Column(String(80), nullable=False)  # canonical id, e.g. emergency_button
+    item = Column(String(120), nullable=False)  # UI label / Item column
+    nodered_name = Column(String(120), nullable=False)  # primary Node-RED readings[].name
+    nodered_aliases = Column(Text)  # optional JSON list of extra name aliases
+    modbus = Column(String(20))  # e.g. 0x00C8
+    eip_pn = Column(String(40))  # e.g. D200
+    data_type = Column(String(10), default="W")  # W | DW
+    scale = Column(Float, default=1.0)
+    unit = Column(String(40), default="")
+    group_name = Column(String(20), nullable=False, default="live")  # live | result | other
+    note = Column(String(255))
+    sort_order = Column(Integer, default=0)
+    is_enabled = Column(Integer, default=1)
+    created_at = Column(DateTime)
+    updated_at = Column(DateTime)
 
 
 def _add_column_if_missing(bind, text, table: str, column: str, ddl: str):

@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import api from '../api/client';
 import PageHeader from '../components/PageHeader';
-import { useTheme } from '../context/ThemeContext';
 import { useAuth } from '../context/AuthContext';
+import { useTheme } from '../context/ThemeContext';
+import { useFeatureFlags } from '../context/FeatureFlagsContext';
 import { pageClass, surfaceClass } from '../themes/tileHelpers';
 import ToolGroupsPanel from '../components/ToolGroupsPanel';
 
@@ -41,8 +42,9 @@ const STATUS_STYLE = {
 export default function ToolManagement() {
   const { theme: t } = useTheme();
   const { user } = useAuth();
-  const canEdit = ['admin', 'superadmin', 'supervisor'].includes(user?.role);
-  const canDelete = ['admin', 'superadmin'].includes(user?.role);
+  const { canAccess } = useFeatureFlags();
+  const canEdit = canAccess('capability.edit_tools', user?.role);
+  const canDelete = ['admin', 'superadmin', 'site_admin'].includes(user?.role);
 
   const [tab, setTab] = useState('inventory');
   const [tools, setTools] = useState([]);

@@ -7,8 +7,52 @@ import { useConfig } from '../context/ConfigContext';
 import { useAuth } from '../context/AuthContext';
 import { getLineForStation } from '../utils/factoryHelpers';
 import PageHeader from '../components/PageHeader';
+import TelemetryTagsPanel from '../components/TelemetryTagsPanel';
 
-const MACHINE_TYPES = ['CNC', 'VMC', 'Lathe', 'Grinding', 'Drilling', 'Milling', 'Inspection', 'Other'];
+const MACHINE_TYPES = [
+  'CNC',
+  'VMC',
+  'Lathe',
+  'Grinding',
+  'Drilling',
+  'Milling',
+  'Inspection',
+  'Servo Press',
+  'Servo Linear Motor',
+  'PLC',
+  'SPM',
+  'Other',
+];
+
+/**
+ * Machine types that support Node-RED telemetry tag mapping, and therefore get the
+ * Machine Dashboard (the Servo Press screen) on Equipment Overview instead of the
+ * generic tiles. Mirrors TELEMETRY_DASHBOARD_MACHINE_TYPES in the backend.
+ */
+const TAG_CONFIG_TYPES = ['Servo Press', 'Servo Linear Motor', 'PLC', 'SPM'];
+
+const TAG_PROFILE_BY_TYPE = {
+  'Servo Press': 'servo_press',
+  'Servo Linear Motor': 'servo_linear_motor',
+  PLC: 'generic_plc',
+  SPM: 'spm',
+};
+
+/** Shown under machine form when type has a telemetry profile. */
+const TELEMETRY_PROFILE_HINTS = {
+  'Servo Press': 'Telemetry profile: Modbus §8.4.2. Use Config Tags to map Node-RED readings to Live / Result screens. Equipment Overview shows the Machine Dashboard.',
+  'Servo Linear Motor': 'Telemetry profile available. Use Config Tags to map Node-RED readings. Equipment Overview shows the Machine Dashboard.',
+  PLC: 'Telemetry profile available. Use Config Tags to map Node-RED readings to Live / Result screens. Equipment Overview shows the Machine Dashboard.',
+  SPM: 'Special Purpose Machine. Use Config Tags to map Node-RED readings to Live / Result screens. Equipment Overview shows the Machine Dashboard.',
+};
+
+function supportsTagConfig(machineType) {
+  return TAG_CONFIG_TYPES.includes(machineType);
+}
+
+function profileForMachineType(machineType) {
+  return TAG_PROFILE_BY_TYPE[machineType] || 'generic_plc';
+}
 
 const STATUS_CFG = {
   running:        { color: '#10b981', label: 'Running',        icon: '▶' },
@@ -34,6 +78,7 @@ export default function MachineConfig() {
   const [showMachineForm, setShowMachineForm] = useState(false);
   const [imageFile, setImageFile] = useState(null);
   const [imagePreview, setImagePreview] = useState(null);
+  const [tagsConfig, setTagsConfig] = useState(null); // { profileId, machineType } | null
   const fileRef = useRef();
 
   const mappedLine = useMemo(
@@ -164,6 +209,14 @@ export default function MachineConfig() {
     }
   };
 
+  const openTagsConfig = (machineType) => {
+    if (!supportsTagConfig(machineType)) return;
+    setTagsConfig({
+      profileId: profileForMachineType(machineType),
+      machineType,
+    });
+  };
+
   const s = getStyles(t);
 
   return (
@@ -240,6 +293,30 @@ export default function MachineConfig() {
                       onChange={e => setMachineForm(p => ({ ...p, machine_type: e.target.value }))}>
                       {MACHINE_TYPES.map(tp => <option key={tp} value={tp}>{tp}</option>)}
                     </select>
+                    {TELEMETRY_PROFILE_HINTS[machineForm.machine_type] ? (
+                      <div style={{ marginTop: 6, fontSize: 11, color: t.textMuted, lineHeight: 1.4 }}>
+                        {TELEMETRY_PROFILE_HINTS[machineForm.machine_type]}
+                      </div>
+                    ) : null}
+                    {supportsTagConfig(machineForm.machine_type) && (
+                      <button
+                        type="button"
+                        style={{
+                          marginTop: 8,
+                          padding: '7px 12px',
+                          background: t.accent,
+                          color: '#fff',
+                          border: 'none',
+                          borderRadius: 6,
+                          cursor: 'pointer',
+                          fontWeight: 600,
+                          fontSize: 12,
+                        }}
+                        onClick={() => openTagsConfig(machineForm.machine_type)}
+                      >
+                        ⚙ Config Tags
+                      </button>
+                    )}
                   </CF>
                   <CF label="Make / Brand" t={t}>
                     <input style={s.inp} value={machineForm.make} placeholder="e.g. Fanuc, Mazak"
@@ -329,6 +406,34 @@ export default function MachineConfig() {
             </div>
       )}
 
+      {tagsConfig && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 1200,
+            background: 'rgba(15, 23, 42, 0.55)',
+            display: 'flex',
+            alignItems: 'flex-start',
+            justifyContent: 'center',
+            padding: '40px 16px',
+            overflowY: 'auto',
+          }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setTagsConfig(null);
+          }}
+        >
+          <div style={{ width: 'min(1100px, 100%)', marginTop: 8 }}>
+            <TelemetryTagsPanel
+              theme={t}
+              canEdit={canEdit}
+              profileId={tagsConfig.profileId}
+              onClose={() => setTagsConfig(null)}
+            />
+          </div>
+        </div>
+      )}
+
       <div style={s.card}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
               <h4 style={s.cardTitle}>Machine Fleet ({machines.length})</h4>
@@ -415,6 +520,15 @@ export default function MachineConfig() {
                           {canEdit ? (
                             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                               <button style={{ ...s.miniBtn, background: t.accent }} onClick={() => openEditMachine(m)}>✏ Edit</button>
+                              {supportsTagConfig(m.machine_type || '') && (
+                                <button
+                                  style={{ ...s.miniBtn, background: '#0ea5e9' }}
+                                  onClick={() => openTagsConfig(m.machine_type)}
+                                  title={`Configure telemetry tags for ${m.machine_type}`}
+                                >
+                                  ⚙ Tags
+                                </button>
+                              )}
                               <button
                                 style={{ ...s.miniBtn, background: enabled ? '#64748b' : '#10b981' }}
                                 onClick={() => toggleMachineEnabled(m)}

@@ -1,0 +1,1000 @@
+[
+    {
+        "id": "8651b60528b3c426",
+        "type": "tab",
+        "label": "servo_press_simulation",
+        "disabled": false,
+        "info": "Simulates Servo Press Modbus §8.4.2 readings and POSTs to EAP-PMS /api/machines/telemetry.\nNode-RED host: 192.168.1.113\nEdit node 'cfg PMS URL + device' before Deploy (PMS URL, device, spool file).\n\nAlarm codes: faults 101/102/103/104 (NG) and warnings 201/202/305 (part still OK) rotate, so the Alarms tab distribution shows one coloured bar per code.\n\nSTORE AND FORWARD\nIf PMS is unreachable (ECONNREFUSED, timeout, 5xx) the sample is appended to servo_press_spool.csv in the Node-RED user directory instead of being lost.\nOn the next successful POST the spool is replayed oldest row first, then the CSV is emptied. If PMS drops again mid-replay the remaining rows stay in the file and the next reconnect picks up where it left off.\n'replay spool on start' also drains anything left over from a previous Node-RED session.\nCSV columns: iso_time, origin, device_name, device_uuid + one column per Modbus tag (raw register values, exactly as posted).\n\nWHERE IS THE CSV?\n'report spool location' warns once per session with the exact path, byte count and the hostname/user Node-RED runs as. If that hostname is not the host you are shelled into, the path is inside Node-RED's own filesystem (container, snap, or PrivateTmp) and a host 'ls' will never show it.\nGET http://<node-red-host>:1880/servo-press-spool.csv downloads the spool; it answers 404 while nothing is buffered. In a Kubernetes pod port 1880 is usually not reachable from outside, so use 'kubectl port-forward' first, or copy the file with 'kubectl cp <pod>:/var/tmp/servo_press_spool.csv .'.\n\nINSPECT THE SPOOL FROM THE EDITOR (no shell needed)\n'spool: summary' -> path, size, row count, oldest and newest sample.\n'spool: next 5 rows' -> the next five buffered samples as named fields, one row per debug message (the sidebar truncates at 1000 characters, so packing a page into one message would cut it off). Press again to walk forward; it wraps at the end.\n'spool: back to first row' -> reset the paging cursor.\n'spool: download URL' -> asks this Node-RED's /settings for httpNodeRoot and prints the exact path to open in a browser, e.g. <httpNodeRoot>/servo-press-spool.csv.\n\nRUNNING IN A POD\nThe container filesystem is wiped on pod restart, so keep the spool on the mounted volume that holds the Node-RED user directory ('/data' in the official image). The 'probe writable paths' inject reports which directories this container can write to.",
+        "env": []
+    },
+    {
+        "id": "a11inj000000001",
+        "type": "inject",
+        "z": "8651b60528b3c426",
+        "name": "every 2s",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "2",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "1",
+        "topic": "servo_press_sim",
+        "payload": "",
+        "payloadType": "date",
+        "x": 140,
+        "y": 120,
+        "wires": [
+            [
+                "a11cfg000000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11inj000000002",
+        "type": "inject",
+        "z": "8651b60528b3c426",
+        "name": "manual once",
+        "props": [
+            {
+                "p": "payload"
+            },
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "servo_press_sim",
+        "payload": "",
+        "payloadType": "date",
+        "x": 150,
+        "y": 180,
+        "wires": [
+            [
+                "a11cfg000000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11cfg000000001",
+        "type": "function",
+        "z": "8651b60528b3c426",
+        "name": "cfg PMS URL + device",
+        "func": "// ===== EDIT THESE FOR YOUR LAN =====\nconst PMS_BASE = 'http://192.168.1.116:8010'; // PMS PC Ethernet IP\nconst DEVICE_NAME = 'Press Machine 1';        // must match machines.name in PMS\nconst DEVICE_UUID = '7dcfa25e-250c-4447-9b3a-0dfce0a639ad'; // optional: machines.plc_topic\nconst MACHINE_ID = null; // set to a number (e.g. 7) to force machine match; else null\n// ====================================\n\nmsg.pmsBase = String(PMS_BASE).replace(/\\/$/, '');\nmsg.deviceName = DEVICE_NAME;\nmsg.deviceUuid = DEVICE_UUID;\nif (MACHINE_ID !== null && MACHINE_ID !== undefined) msg.machineId = MACHINE_ID;\n\n// ===== store-and-forward spool =====\n// EDIT to move the CSV. Use an ABSOLUTE path: a bare filename resolves against\n// whatever working directory Node-RED was started in, which on an appliance\n// install may not be writable.\n//   Linux / Ubuntu : '/var/tmp/servo_press_spool.csv'\n//   Windows        : 'C:/eap-pms/servo_press_spool.csv'\n// The directory is created automatically if it does not exist.\n//\n// If this path is not visible from a host shell, Node-RED is writing inside its\n// own filesystem namespace (Kubernetes pod, Docker, snap, or PrivateTmp).\n// 'report spool location' prints the path and hostname it really used.\n//\n// RUNNING IN A POD: a container filesystem is wiped when the pod restarts, so\n// '/var/tmp' buffers fine but loses the backlog on a restart. Put the CSV on the\n// mounted volume that holds the Node-RED user directory instead - '/data' in the\n// official image. Run the 'probe writable paths' inject to see which directories\n// this container can actually write to.\nconst SPOOL_FILE = '/var/tmp/servo_press_spool.csv';\n\n// CSV column -> Node-RED reading name. Must match the readings built downstream.\nconst SPOOL_COLUMNS = [\n    ['status', 'status:Int16'],\n    ['live_position', 'Live position'],\n    ['live_force', 'Live force'],\n    ['live_velocity', 'Live Velocity'],\n    ['live_mode', 'Live Mode'],\n    ['total_steps', 'Total Steps'],\n    ['live_step', 'Live Step'],\n    ['recipe_number', 'Recipe number'],\n    ['total_amount', 'Total amount'],\n    ['pass_amount', 'Pass amount'],\n    ['ng_amount', 'NG amount'],\n    ['standby_time', 'Standby time'],\n    ['pressing_time', 'Pressing time'],\n    ['production_time', 'Production time'],\n    ['alarm_code', 'Alarm Code'],\n    ['pressing_result', 'Pressing result'],\n    ['pressed_position_step1', 'Pressed position (Step 1)'],\n    ['pressed_position_step2', 'Pressed position (Step 2)']\n];\n\nmsg.spoolFile = SPOOL_FILE;\nflow.set('spoolFile', SPOOL_FILE);\nflow.set('spoolColumns', SPOOL_COLUMNS);\nflow.set('spoolHeader', 'iso_time,origin,device_name,device_uuid,' + SPOOL_COLUMNS.map(c => c[0]).join(','));\nflow.set('pmsBase', msg.pmsBase);\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 390,
+        "y": 140,
+        "wires": [
+            [
+                "a11sim000000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11sim000000001",
+        "type": "function",
+        "z": "8651b60528b3c426",
+        "name": "simulate Modbus §8.4.2 readings",
+        "func": "// Raw Modbus integers (PMS applies scale: pos×0.001, force×0.1, time×0.01/0.1)\nconst origin = Date.now();\nconst ctx = context.flow;\n\nlet tick = ctx.get('tick') || 0;\nlet total = ctx.get('total') || 1200;\nlet pass = ctx.get('pass') || 1184;\nlet ng = ctx.get('ng') || 16;\nlet faultSeq = ctx.get('faultSeq') || 0;\nlet warnSeq = ctx.get('warnSeq') || 0;\nlet goodSeq = ctx.get('goodSeq') || 0;\ntick += 1;\n\n// Alarm code tables (manufacturer alarm table 9.1 style).\n// FAULT_CODES fail the part (Pressing result = NG); WARN_CODES raise while the part stays OK.\n// Rotating through them gives the Alarms tab one bar per code instead of a single 101 bar.\nconst FAULT_CODES = [101, 102, 103, 104];\nconst WARN_CODES = [201, 202, 305];\n\n// Cycle: Idle(0) → Pressing(3) → Result OK(5) → Idle...\nconst phase = tick % 6;\nlet status = 0;\nlet liveStep = 0;\nlet pressingResult = 0;\nlet alarm = 0;\nlet pos = 10000;   // 10.000 mm\nlet force = 0;     // 0.0 kgf\nlet vel = 0;       // 0.000 mm/s\n\nif (phase === 0 || phase === 1) {\n    status = 0;\n    liveStep = 0;\n    pos = 10000 + (tick % 50);\n    force = 20 + (tick % 10);\n    vel = 100 + (tick % 20);\n} else if (phase === 2 || phase === 3) {\n    status = 3; // pressing\n    liveStep = phase === 2 ? 1 : 2;\n    pos = 35000 + phase * 4000 + (tick % 200);\n    force = 800 + (tick % 150);\n    vel = 1200 + (tick % 100);\n} else {\n    status = 5; // result ready (4–8)\n    liveStep = 2;\n    pos = 42600 + (tick % 80);\n    force = 950 + (tick % 40);\n    vel = 50 + (tick % 10);\n    pressingResult = (tick % 5 === 0) ? 2 : 1; // occasional NG\n    if (pressingResult === 2) {\n        ng += 1;\n        alarm = FAULT_CODES[faultSeq % FAULT_CODES.length];\n        faultSeq += 1;\n    } else {\n        pass += 1;\n        goodSeq += 1;\n        // Warning-class alarm on every 3rd good result: code raises, part is still OK.\n        if (goodSeq % 3 === 0) {\n            alarm = WARN_CODES[warnSeq % WARN_CODES.length];\n            warnSeq += 1;\n        } else {\n            alarm = 0;\n        }\n    }\n    total = pass + ng;\n}\n\nctx.set('tick', tick);\nctx.set('total', total);\nctx.set('pass', pass);\nctx.set('ng', ng);\nctx.set('faultSeq', faultSeq);\nctx.set('warnSeq', warnSeq);\nctx.set('goodSeq', goodSeq);\n\nfunction R(name, value) {\n    return { name: name, value: String(value), origin: origin };\n}\n\nconst readings = [\n    R('device type:String', 'Press'),\n    R('status:Int16', status),\n    R('Live position', pos),\n    R('Live force', force),\n    R('Live Velocity', vel),\n    R('Status*1', status),\n    R('Live Mode', 1),\n    R('Total Steps', 2),\n    R('Live Step', liveStep),\n    R('Recipe number', 3),\n    R('Total amount', total),\n    R('Pass amount', pass),\n    R('NG amount', ng),\n    R('Standby time', 15),      // ×0.1 → 1.5 s\n    R('Pressing time', 22),     // ×0.1 → 2.2 s\n    R('Production time', 280),  // ×0.01 → 2.80 s\n    R('Alarm Code', alarm),\n    R('Pressing result', pressingResult),\n    R('Pressed position (Step 1)', 38000),\n    R('Pressed position (Step 2)', 42600)\n];\n\n// Clear result fields while pressing (status 3) — matches Modbus rule\nif (status === 3) {\n    for (const name of [\n        'Total amount', 'Pass amount', 'NG amount',\n        'Standby time', 'Pressing time', 'Production time',\n        'Alarm Code', 'Pressing result',\n        'Pressed position (Step 1)', 'Pressed position (Step 2)'\n    ]) {\n        const i = readings.findIndex(r => r.name === name);\n        if (i >= 0) readings[i].value = '0';\n    }\n}\n\nconst body = {\n    id: 'sim-' + origin,\n    syncBy: 'MODBUS',\n    deviceName: msg.deviceName,\n    device: msg.deviceUuid,\n    origin: origin,\n    readings: readings\n};\nif (msg.machineId) body.machine_id = msg.machineId;\n\nmsg.payload = body;\n// Kept for the spool: msg.payload is overwritten by the HTTP response\nmsg.telemetry = body;\nmsg.headers = { 'Content-Type': 'application/json' };\nmsg.url = msg.pmsBase + '/api/machines/telemetry';\nmsg.method = 'POST';\nmsg.tick = tick;\nmsg.status = status;\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 680,
+        "y": 140,
+        "wires": [
+            [
+                "a11dbg000000001",
+                "a11http00000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11dbg000000001",
+        "type": "debug",
+        "z": "8651b60528b3c426",
+        "name": "payload out",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": true,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "status",
+        "statusType": "auto",
+        "x": 950,
+        "y": 80,
+        "wires": []
+    },
+    {
+        "id": "a11http00000001",
+        "type": "http request",
+        "z": "8651b60528b3c426",
+        "name": "POST /api/machines/telemetry",
+        "method": "use",
+        "ret": "obj",
+        "paytoqs": "ignore",
+        "url": "",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [],
+        "x": 990,
+        "y": 160,
+        "wires": [
+            [
+                "a11rte000000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11dbg000000002",
+        "type": "debug",
+        "z": "8651b60528b3c426",
+        "name": "PMS response",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": true,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "statusCode",
+        "statusType": "auto",
+        "x": 1520,
+        "y": 180,
+        "wires": []
+    },
+    {
+        "id": "a11rte000000001",
+        "type": "function",
+        "z": "8651b60528b3c426",
+        "name": "delivered? -> spool",
+        "func": "// Delivered, or does the sample need to go to the CSV spool?\n// A connection failure leaves msg.statusCode as a string ('ECONNREFUSED'),\n// so only a numeric 2xx counts as accepted by PMS.\nconst code = msg.statusCode;\nconst ok = typeof code === 'number' && code >= 200 && code < 300;\nmsg.ok = ok;\n\n// Replayed rows are handled by 'drain result', not spooled again here\nif (msg.replay) return [null, null, msg];\n\nif (ok) {\n    node.status({ fill: 'green', shape: 'dot', text: 'online' });\n    return [msg, null, null];\n}\nnode.status({ fill: 'yellow', shape: 'ring', text: 'offline -> CSV spool' });\nreturn [null, msg, null];",
+        "outputs": 3,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1230,
+        "y": 260,
+        "wires": [
+            [
+                "a11dbg000000002",
+                "a11flu000000001"
+            ],
+            [
+                "a11spl000000001"
+            ],
+            [
+                "a11drn000000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11spl000000001",
+        "type": "function",
+        "z": "8651b60528b3c426",
+        "name": "spool row to CSV",
+        "func": "// Offline: append this sample to the CSV spool for later replay\nconst columns = flow.get('spoolColumns') || [];\nconst body = msg.telemetry || {};\nconst readings = body.readings || [];\n\nconst byName = {};\nfor (const r of readings) byName[r.name] = r.value;\n\nfunction cell(value) {\n    const s = (value === undefined || value === null) ? '' : String(value);\n    return /[\",\\r\\n]/.test(s) ? '\"' + s.replace(/\"/g, '\"\"') + '\"' : s;\n}\n\nconst origin = body.origin || Date.now();\nconst row = [\n    new Date(Number(origin)).toISOString(),\n    origin,\n    body.deviceName || '',\n    body.device || ''\n].concat(columns.map(c => byName[c[1]])).map(cell).join(',');\n\nconst count = (flow.get('spoolCount') || 0) + 1;\nflow.set('spoolCount', count);\n\nlet payload = row;\nif (!flow.get('spoolHeaderWritten')) {\n    // First row this session: write the header so the CSV opens cleanly.\n    // Replay skips any header line, so an extra one is harmless.\n    flow.set('spoolHeaderWritten', true);\n    payload = (flow.get('spoolHeader') || '') + '\\n' + row;\n}\n\nmsg.filename = msg.spoolFile || flow.get('spoolFile') || 'servo_press_spool.csv';\nmsg.payload = payload;\nnode.status({ fill: 'yellow', shape: 'dot', text: count + ' row(s) spooled' });\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1230,
+        "y": 460,
+        "wires": [
+            [
+                "a11fil000000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11fil000000001",
+        "type": "file",
+        "z": "8651b60528b3c426",
+        "name": "append spool CSV",
+        "filename": "filename",
+        "filenameType": "msg",
+        "appendNewline": true,
+        "createDir": true,
+        "overwriteFile": "false",
+        "encoding": "none",
+        "x": 1520,
+        "y": 460,
+        "wires": [
+            [
+                "a11dbg000000003",
+                "a11prv000000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11dbg000000003",
+        "type": "debug",
+        "z": "8651b60528b3c426",
+        "name": "spool status",
+        "active": true,
+        "tosidebar": false,
+        "console": false,
+        "tostatus": true,
+        "complete": "filename",
+        "targetType": "msg",
+        "statusVal": "filename",
+        "statusType": "auto",
+        "x": 1780,
+        "y": 460,
+        "wires": []
+    },
+    {
+        "id": "a11flu000000001",
+        "type": "function",
+        "z": "8651b60528b3c426",
+        "name": "reconnected? flush spool",
+        "func": "// PMS answered, so try to push whatever the outage collected\nif (flow.get('draining')) return null;\nif (!flow.get('spoolColumns')) return null; // cfg node has not run yet\n\nconst count = flow.get('spoolCount') || 0;\nif (!count && !msg.force) return null;\n\nflow.set('draining', true);\nnode.status({ fill: 'blue', shape: 'ring', text: 'reading spool' });\nreturn { filename: flow.get('spoolFile') || 'servo_press_spool.csv' };",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1500,
+        "y": 260,
+        "wires": [
+            [
+                "a11fil000000002"
+            ]
+        ]
+    },
+    {
+        "id": "a11fil000000002",
+        "type": "file in",
+        "z": "8651b60528b3c426",
+        "name": "read spool CSV",
+        "filename": "filename",
+        "filenameType": "msg",
+        "format": "utf8",
+        "chunk": false,
+        "sendError": false,
+        "encoding": "none",
+        "allProps": false,
+        "x": 1500,
+        "y": 320,
+        "wires": [
+            [
+                "a11lod000000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11lod000000001",
+        "type": "function",
+        "z": "8651b60528b3c426",
+        "name": "load spooled rows",
+        "func": "// Oldest row first, so PMS replays history in the order it happened\nconst text = String(msg.payload || '');\nconst lines = text.split(/\\r?\\n/)\n    .map(l => l.trim())\n    .filter(l => l && l.indexOf('iso_time') !== 0);\n\nflow.set('spoolLines', lines);\nflow.set('spoolCount', lines.length);\nnode.status({ text: lines.length + ' row(s) to resend' });\nreturn {};",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1500,
+        "y": 380,
+        "wires": [
+            [
+                "a11nxt000000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11nxt000000001",
+        "type": "function",
+        "z": "8651b60528b3c426",
+        "name": "next spooled row",
+        "func": "// Send one spooled row; 'drain result' loops back here until the CSV is empty\nconst columns = flow.get('spoolColumns') || [];\nconst lines = flow.get('spoolLines') || [];\nconst file = flow.get('spoolFile') || 'servo_press_spool.csv';\nconst header = flow.get('spoolHeader') || '';\n\nif (!lines.length) {\n    flow.set('spoolCount', 0);\n    flow.set('draining', false);\n    flow.set('spoolHeaderWritten', true);\n    node.status({ fill: 'green', shape: 'dot', text: 'spool empty' });\n    return [null, { filename: file, payload: header }];\n}\n\nconst line = lines.shift();\nflow.set('spoolLines', lines);\nflow.set('spoolCount', lines.length);\n\nfunction parseRow(text) {\n    const out = [];\n    let cur = '';\n    let quoted = false;\n    for (let i = 0; i < text.length; i++) {\n        const ch = text[i];\n        if (quoted) {\n            if (ch === '\"') {\n                if (text[i + 1] === '\"') { cur += '\"'; i++; } else { quoted = false; }\n            } else { cur += ch; }\n        } else if (ch === '\"') {\n            quoted = true;\n        } else if (ch === ',') {\n            out.push(cur); cur = '';\n        } else {\n            cur += ch;\n        }\n    }\n    out.push(cur);\n    return out;\n}\n\nconst cells = parseRow(line);\nconst origin = Number(cells[1]) || Date.parse(cells[0]) || Date.now();\nconst values = cells.slice(4);\n\nconst readings = [{ name: 'device type:String', value: 'Press', origin: origin }];\nconst statusIdx = columns.findIndex(c => c[0] === 'status');\nconst status = statusIdx >= 0 ? values[statusIdx] : '0';\nreadings.push({ name: 'status:Int16', value: String(status), origin: origin });\nreadings.push({ name: 'Status*1', value: String(status), origin: origin });\ncolumns.forEach((c, i) => {\n    if (c[0] === 'status') return; // already sent as status:Int16 + Status*1\n    const v = values[i];\n    if (v === undefined || v === '') return;\n    readings.push({ name: c[1], value: String(v), origin: origin });\n});\n\nconst body = {\n    id: 'spool-' + origin,\n    syncBy: 'MODBUS',\n    deviceName: cells[2],\n    device: cells[3],\n    origin: origin,\n    readings: readings\n};\n\nconst out = {\n    payload: body,\n    telemetry: body,\n    headers: { 'Content-Type': 'application/json' },\n    url: (flow.get('pmsBase') || '') + '/api/machines/telemetry',\n    method: 'POST',\n    replay: true,\n    spoolLine: line\n};\nnode.status({ text: 'resending, ' + lines.length + ' left' });\nreturn [out, null];",
+        "outputs": 2,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1780,
+        "y": 380,
+        "wires": [
+            [
+                "a11http00000001"
+            ],
+            [
+                "a11fil000000003"
+            ]
+        ]
+    },
+    {
+        "id": "a11drn000000001",
+        "type": "function",
+        "z": "8651b60528b3c426",
+        "name": "drain result",
+        "func": "// Result of a replayed row\nif (msg.ok) return [{ next: true }, null]; // keep draining\n\n// PMS dropped again: put the row back and keep the CSV for the next reconnect\nconst lines = flow.get('spoolLines') || [];\nif (msg.spoolLine) lines.unshift(msg.spoolLine);\nflow.set('spoolLines', []);\nflow.set('spoolCount', lines.length);\nflow.set('draining', false);\nflow.set('spoolHeaderWritten', true);\nnode.status({ fill: 'yellow', shape: 'ring', text: 'offline again, ' + lines.length + ' row(s) held' });\n\nconst header = flow.get('spoolHeader') || '';\nreturn [null, {\n    filename: flow.get('spoolFile') || 'servo_press_spool.csv',\n    payload: [header].concat(lines).join('\\n')\n}];",
+        "outputs": 2,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1230,
+        "y": 360,
+        "wires": [
+            [
+                "a11nxt000000001"
+            ],
+            [
+                "a11fil000000003"
+            ]
+        ]
+    },
+    {
+        "id": "a11fil000000003",
+        "type": "file",
+        "z": "8651b60528b3c426",
+        "name": "rewrite spool CSV",
+        "filename": "filename",
+        "filenameType": "msg",
+        "appendNewline": true,
+        "createDir": true,
+        "overwriteFile": "true",
+        "encoding": "none",
+        "x": 2040,
+        "y": 380,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "a11inj000000003",
+        "type": "inject",
+        "z": "8651b60528b3c426",
+        "name": "replay spool on start",
+        "props": [
+            {
+                "p": "force",
+                "v": "true",
+                "vt": "bool"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": true,
+        "onceDelay": "12",
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 1180,
+        "y": 200,
+        "wires": [
+            [
+                "a11flu000000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11cat000000001",
+        "type": "catch",
+        "z": "8651b60528b3c426",
+        "name": "spool file missing",
+        "scope": [
+            "a11fil000000002"
+        ],
+        "uncaught": false,
+        "x": 1780,
+        "y": 320,
+        "wires": [
+            [
+                "a11cfn000000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11cfn000000001",
+        "type": "function",
+        "z": "8651b60528b3c426",
+        "name": "clear draining flag",
+        "func": "// No spool file yet (nothing was ever buffered) - nothing to replay\nflow.set('draining', false);\nnode.status({ text: 'no spool file' });\nreturn null;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 2040,
+        "y": 320,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "a11prv000000001",
+        "type": "function",
+        "z": "8651b60528b3c426",
+        "name": "prove spool file",
+        "func": "// One-shot proof of where the spool CSV actually lives.\n// Node-RED may run in a container, a snap, or a systemd unit with PrivateTmp=yes,\n// in which case '/var/tmp' here is NOT the '/var/tmp' a host shell sees.\nif (flow.get('spoolProved')) return null;\nflow.set('spoolProved', true);\nmsg.filename = flow.get('spoolFile');\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1150,
+        "y": 360,
+        "wires": [
+            [
+                "a11fil000000004"
+            ]
+        ]
+    },
+    {
+        "id": "a11fil000000004",
+        "type": "file in",
+        "z": "8651b60528b3c426",
+        "name": "read spool back",
+        "filename": "filename",
+        "filenameType": "msg",
+        "format": "utf8",
+        "chunk": false,
+        "sendError": false,
+        "encoding": "none",
+        "allProps": false,
+        "x": 1150,
+        "y": 420,
+        "wires": [
+            [
+                "a11rpt000000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11rpt000000001",
+        "type": "function",
+        "z": "8651b60528b3c426",
+        "name": "report spool location",
+        "func": "// Read-back succeeded, so the file exists. Report the path plus enough\n// environment to tell whether that path is inside Node-RED's own namespace.\nconst path = msg.filename || flow.get('spoolFile');\nconst text = String(msg.payload || '');\nconst rows = text.split(/\\r?\\n/).filter(l => l.trim() && l.indexOf('iso_time') !== 0).length;\n\nconst host = env.get('HOSTNAME') || env.get('COMPUTERNAME') || '?';\nconst where = [\n    'HOSTNAME=' + host,\n    'USER=' + (env.get('USER') || env.get('USERNAME') || '?'),\n    'HOME=' + (env.get('HOME') || env.get('USERPROFILE') || '?'),\n    'NODE_RED_HOME=' + (env.get('NODE_RED_HOME') || '?'),\n    'PWD=' + (env.get('PWD') || '?'),\n    'container=' + (env.get('container') || 'not set')\n].join('   ');\n\nnode.warn('SPOOL FILE OK -> ' + path + '   (' + text.length + ' bytes, ' + rows + ' buffered row(s))');\nnode.warn('Node-RED is running as: ' + where);\nnode.warn('If that hostname is not your shell hostname, the path above is inside Node-RED\\'s own ' +\n    'filesystem (container / pod / snap / PrivateTmp). A host \"ls\" will never show it: copy it out with ' +\n    'kubectl cp, or reach GET /servo-press-spool.csv through a port-forward.');\n\n// Emit it as a message too, so a debug node wired here shows the same facts\nreturn {\n    topic: 'spool location',\n    payload: {\n        spoolFile: path,\n        bytes: text.length,\n        bufferedRows: rows,\n        hostname: host,\n        user: env.get('USER') || env.get('USERNAME') || '?',\n        home: env.get('HOME') || env.get('USERPROFILE') || '?',\n        nodeRedHome: env.get('NODE_RED_HOME') || '?',\n        kubernetesPod: !!(env.get('KUBERNETES_SERVICE_HOST') || env.get('KUBERNETES_PORT')),\n        container: env.get('container') || 'not set'\n    }\n};",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1150,
+        "y": 480,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "a11htin00000001",
+        "type": "http in",
+        "z": "8651b60528b3c426",
+        "name": "",
+        "url": "/servo-press-spool.csv",
+        "method": "get",
+        "upload": false,
+        "swaggerDoc": "",
+        "x": 180,
+        "y": 700,
+        "wires": [
+            [
+                "a11dwn000000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11dwn000000001",
+        "type": "function",
+        "z": "8651b60528b3c426",
+        "name": "spool download path",
+        "func": "// Serve the spool CSV over HTTP so it can be collected without filesystem access\nmsg.filename = flow.get('spoolFile') || '/var/tmp/servo_press_spool.csv';\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 420,
+        "y": 700,
+        "wires": [
+            [
+                "a11fil000000005"
+            ]
+        ]
+    },
+    {
+        "id": "a11fil000000005",
+        "type": "file in",
+        "z": "8651b60528b3c426",
+        "name": "read spool for download",
+        "filename": "filename",
+        "filenameType": "msg",
+        "format": "utf8",
+        "chunk": false,
+        "sendError": false,
+        "encoding": "none",
+        "allProps": false,
+        "x": 660,
+        "y": 700,
+        "wires": [
+            [
+                "a11srv000000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11srv000000001",
+        "type": "function",
+        "z": "8651b60528b3c426",
+        "name": "serve spool CSV",
+        "func": "// Hand the CSV back as a file download\nmsg.headers = {\n    'Content-Type': 'text/csv; charset=utf-8',\n    'Content-Disposition': 'attachment; filename=\"servo_press_spool.csv\"'\n};\nmsg.statusCode = 200;\nmsg.payload = String(msg.payload || '');\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 900,
+        "y": 700,
+        "wires": [
+            [
+                "a11hto00000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11hto00000001",
+        "type": "http response",
+        "z": "8651b60528b3c426",
+        "name": "",
+        "statusCode": "",
+        "headers": {},
+        "x": 1120,
+        "y": 700,
+        "wires": []
+    },
+    {
+        "id": "a11cat000000002",
+        "type": "catch",
+        "z": "8651b60528b3c426",
+        "name": "spool read failed",
+        "scope": [
+            "a11fil000000004",
+            "a11fil000000005",
+            "a11fil000000007"
+        ],
+        "uncaught": false,
+        "x": 420,
+        "y": 780,
+        "wires": [
+            [
+                "a11rdf000000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11rdf000000001",
+        "type": "function",
+        "z": "8651b60528b3c426",
+        "name": "answer / log read failure",
+        "func": "// A spool read failed. For an HTTP request answer it; otherwise just say so.\nconst path = flow.get('spoolFile') || '?';\nconst reason = (msg.error && msg.error.message) ? msg.error.message : 'unknown error';\nif (msg.res) {\n    msg.statusCode = 404;\n    msg.headers = { 'Content-Type': 'text/plain; charset=utf-8' };\n    msg.payload = 'No spool file at ' + path + '\\n' + reason +\n        '\\nNothing is buffered, which is normal while PMS is reachable.\\n';\n    return msg;\n}\nnode.warn('Could not read the spool file at ' + path + ': ' + reason);\nreturn null;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 700,
+        "y": 780,
+        "wires": [
+            [
+                "a11hto00000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11inj000000004",
+        "type": "inject",
+        "z": "8651b60528b3c426",
+        "name": "probe writable paths",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 180,
+        "y": 860,
+        "wires": [
+            [
+                "a11cnd000000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11cnd000000001",
+        "type": "function",
+        "z": "8651b60528b3c426",
+        "name": "candidate spool dirs",
+        "func": "// Which directories can Node-RED actually write to in this container?\n// A pod's own filesystem is wiped on restart, so the spool belongs on a mounted\n// volume - usually the Node-RED user directory. Each probe writes a tiny file with\n// createDir OFF, so only directories that already exist can succeed.\nconst home = env.get('HOME') || env.get('USERPROFILE') || '';\nconst nrHome = env.get('NODE_RED_HOME') || '';\nconst candidates = [\n    '/data',\n    home ? home + '/.node-red' : '',\n    home,\n    nrHome,\n    '/var/lib/node-red',\n    '/var/tmp',\n    '/tmp'\n];\n\nconst seen = {};\nconst out = [];\nfor (const dir of candidates) {\n    if (!dir || seen[dir]) continue;\n    seen[dir] = true;\n    out.push({\n        probeDir: dir,\n        filename: dir.replace(/\\/+$/, '') + '/.pms_spool_probe',\n        payload: 'pms spool probe ' + new Date().toISOString()\n    });\n}\n\nnode.status({ text: 'probing ' + out.length + ' path(s)' });\nnode.warn('Probing ' + out.length + ' candidate spool directories. ' +\n    'A WRITABLE path can hold the CSV; whether it SURVIVES a pod restart depends on it being a mounted volume.');\nreturn [out];",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 420,
+        "y": 860,
+        "wires": [
+            [
+                "a11fil000000006"
+            ]
+        ]
+    },
+    {
+        "id": "a11fil000000006",
+        "type": "file",
+        "z": "8651b60528b3c426",
+        "name": "write probe file",
+        "filename": "filename",
+        "filenameType": "msg",
+        "appendNewline": true,
+        "createDir": false,
+        "overwriteFile": "true",
+        "encoding": "none",
+        "x": 660,
+        "y": 860,
+        "wires": [
+            [
+                "a11pok000000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11pok000000001",
+        "type": "function",
+        "z": "8651b60528b3c426",
+        "name": "path is writable",
+        "func": "// The write succeeded, so this directory exists and is writable\nnode.warn('WRITABLE  ' + msg.probeDir + '   -> usable as SPOOL_FILE, e.g. ' +\n    msg.probeDir.replace(/\\/+$/, '') + '/servo_press_spool.csv');\nreturn null;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 900,
+        "y": 860,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "a11cat000000003",
+        "type": "catch",
+        "z": "8651b60528b3c426",
+        "name": "probe write failed",
+        "scope": [
+            "a11fil000000006"
+        ],
+        "uncaught": false,
+        "x": 660,
+        "y": 930,
+        "wires": [
+            [
+                "a11pnf000000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11pnf000000001",
+        "type": "function",
+        "z": "8651b60528b3c426",
+        "name": "path is not usable",
+        "func": "// The write failed: directory missing, or read-only in this container\nconst reason = (msg.error && msg.error.message) ? msg.error.message : 'unknown error';\nnode.warn('NOT usable ' + (msg.probeDir || '?') + '   -> ' + reason);\nreturn null;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 900,
+        "y": 930,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "a11inj000000005",
+        "type": "inject",
+        "z": "8651b60528b3c426",
+        "name": "spool: summary",
+        "props": [
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "summary",
+        "payload": "",
+        "payloadType": "date",
+        "x": 180,
+        "y": 1020,
+        "wires": [
+            [
+                "a11vrq000000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11inj000000006",
+        "type": "inject",
+        "z": "8651b60528b3c426",
+        "name": "spool: next 5 rows",
+        "props": [
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "page",
+        "payload": "",
+        "payloadType": "date",
+        "x": 190,
+        "y": 1080,
+        "wires": [
+            [
+                "a11vrq000000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11inj000000007",
+        "type": "inject",
+        "z": "8651b60528b3c426",
+        "name": "spool: back to first row",
+        "props": [
+            {
+                "p": "topic",
+                "vt": "str"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "rewind",
+        "payload": "",
+        "payloadType": "date",
+        "x": 200,
+        "y": 1140,
+        "wires": [
+            [
+                "a11vrq000000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11vrq000000001",
+        "type": "function",
+        "z": "8651b60528b3c426",
+        "name": "spool view request",
+        "func": "// Read the spool for viewing in the editor. msg.topic picks what happens next.\nmsg.filename = flow.get('spoolFile') || '/var/tmp/servo_press_spool.csv';\nmsg.view = (msg.topic === 'page') ? 'page' : 'summary';\nif (msg.topic === 'rewind') {\n    flow.set('viewCursor', 0);\n    msg.view = 'summary';\n}\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 460,
+        "y": 1080,
+        "wires": [
+            [
+                "a11fil000000007"
+            ]
+        ]
+    },
+    {
+        "id": "a11fil000000007",
+        "type": "file in",
+        "z": "8651b60528b3c426",
+        "name": "read spool (view)",
+        "filename": "filename",
+        "filenameType": "msg",
+        "format": "utf8",
+        "chunk": false,
+        "sendError": false,
+        "encoding": "none",
+        "allProps": false,
+        "x": 690,
+        "y": 1080,
+        "wires": [
+            [
+                "a11vw0000000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11vw0000000001",
+        "type": "function",
+        "z": "8651b60528b3c426",
+        "name": "spool summary / rows",
+        "func": "// Show the buffered CSV without leaving the editor.\n// Output 1: one summary message. Output 2: one message per row, a page at a time.\n// One row per message on purpose - the debug sidebar truncates messages at\n// 1000 characters by default, so a page packed into a single message would be cut off.\nconst PAGE = 5;\nconst file = msg.filename;\nconst text = String(msg.payload || '');\nconst lines = text.split(/\\r?\\n/).map(l => l.trim()).filter(Boolean);\nconst header = (lines.length && lines[0].indexOf('iso_time') === 0)\n    ? lines[0]\n    : (flow.get('spoolHeader') || '');\nconst names = header.split(',');\nconst rows = lines.filter(l => l.indexOf('iso_time') !== 0);\n\nfunction parseRow(text) {\n    const out = [];\n    let cur = '';\n    let quoted = false;\n    for (let i = 0; i < text.length; i++) {\n        const ch = text[i];\n        if (quoted) {\n            if (ch === '\"') {\n                if (text[i + 1] === '\"') { cur += '\"'; i++; } else { quoted = false; }\n            } else { cur += ch; }\n        } else if (ch === '\"') {\n            quoted = true;\n        } else if (ch === ',') {\n            out.push(cur); cur = '';\n        } else {\n            cur += ch;\n        }\n    }\n    out.push(cur);\n    return out;\n}\n\nif (msg.view === 'summary') {\n    const first = rows.length ? parseRow(rows[0]) : [];\n    const last = rows.length ? parseRow(rows[rows.length - 1]) : [];\n    const cursor = flow.get('viewCursor') || 0;\n    node.status({ text: rows.length + ' row(s) buffered' });\n    return [{\n        topic: 'spool summary',\n        payload: {\n            spoolFile: file,\n            bytes: text.length,\n            bufferedRows: rows.length,\n            columns: names.length,\n            oldestSample: first[0] || null,\n            newestSample: last[0] || null,\n            nextPageStartsAtRow: Math.min(cursor + 1, rows.length || 1)\n        }\n    }, null];\n}\n\nif (!rows.length) {\n    node.status({ text: 'spool empty' });\n    return [{ topic: 'spool summary', payload: { spoolFile: file, bufferedRows: 0 } }, null];\n}\n\nlet cursor = flow.get('viewCursor') || 0;\nif (cursor >= rows.length) cursor = 0; // wrap round to the start\nconst end = Math.min(cursor + PAGE, rows.length);\n\nconst out = [];\nfor (let i = cursor; i < end; i++) {\n    const cells = parseRow(rows[i]);\n    const obj = {};\n    names.forEach((n, j) => { obj[n] = cells[j]; });\n    out.push({ topic: 'spool row ' + (i + 1) + ' / ' + rows.length, payload: obj });\n}\n\nflow.set('viewCursor', end);\nnode.status({ text: 'rows ' + (cursor + 1) + '-' + end + ' of ' + rows.length });\nreturn [null, out];",
+        "outputs": 2,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 920,
+        "y": 1080,
+        "wires": [
+            [
+                "a11dbg000000004"
+            ],
+            [
+                "a11dbg000000005"
+            ]
+        ]
+    },
+    {
+        "id": "a11dbg000000004",
+        "type": "debug",
+        "z": "8651b60528b3c426",
+        "name": "spool summary",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1170,
+        "y": 1040,
+        "wires": []
+    },
+    {
+        "id": "a11dbg000000005",
+        "type": "debug",
+        "z": "8651b60528b3c426",
+        "name": "spool rows",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1160,
+        "y": 1120,
+        "wires": []
+    },
+    {
+        "id": "a11inj000000008",
+        "type": "inject",
+        "z": "8651b60528b3c426",
+        "name": "spool: download URL",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 190,
+        "y": 1220,
+        "wires": [
+            [
+                "a11set000000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11set000000001",
+        "type": "function",
+        "z": "8651b60528b3c426",
+        "name": "ask Node-RED settings",
+        "func": "// Query this Node-RED's own admin API from inside the container\nmsg.method = 'GET';\nmsg.url = 'http://127.0.0.1:1880/settings';\nmsg.payload = '';\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 450,
+        "y": 1220,
+        "wires": [
+            [
+                "a11http00000002"
+            ]
+        ]
+    },
+    {
+        "id": "a11http00000002",
+        "type": "http request",
+        "z": "8651b60528b3c426",
+        "name": "GET /settings",
+        "method": "use",
+        "ret": "obj",
+        "paytoqs": "ignore",
+        "url": "",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [],
+        "x": 690,
+        "y": 1220,
+        "wires": [
+            [
+                "a11url000000001"
+            ]
+        ]
+    },
+    {
+        "id": "a11url000000001",
+        "type": "function",
+        "z": "8651b60528b3c426",
+        "name": "report download URL",
+        "func": "// Node-RED's own /settings says where http-in endpoints are mounted, so the\n// download URL can be reported instead of guessed.\nconst s = msg.payload;\nconst root = (s && typeof s === 'object' && s.httpNodeRoot) ? s.httpNodeRoot : null;\n\nif (!root) {\n    node.warn('Could not read Node-RED /settings (status ' + msg.statusCode + '). The download path ' +\n        'is httpNodeRoot + \"/servo-press-spool.csv\"; httpNodeRoot is defined in settings.js and ' +\n        'defaults to \"/\".');\n    return null;\n}\n\nconst p = (root === '/' ? '' : String(root).replace(/\\/+$/, '')) + '/servo-press-spool.csv';\nnode.warn('CSV download path: ' + p + '   (Node-RED ' + (s.version || '?') +\n    ', httpNodeRoot \"' + root + '\")');\nnode.warn('Open it on the same host and port you reach the editor on: http://<editor-host>' + p +\n    '   - inside the container it is http://127.0.0.1:1880' + p);\nreturn {\n    topic: 'spool download path',\n    payload: { httpNodeRoot: root, downloadPath: p, nodeRedVersion: s.version || null }\n};",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 930,
+        "y": 1220,
+        "wires": [
+            [
+                "a11dbg000000006"
+            ]
+        ]
+    },
+    {
+        "id": "a11dbg000000006",
+        "type": "debug",
+        "z": "8651b60528b3c426",
+        "name": "download URL",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 1170,
+        "y": 1220,
+        "wires": []
+    }
+]

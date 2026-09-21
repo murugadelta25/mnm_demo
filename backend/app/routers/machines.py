@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Query
 from sqlalchemy.orm import Session
-from typing import Optional, List
+from typing import Optional, List, Any, Dict
 from pydantic import BaseModel
 from pathlib import Path
 import shutil, uuid
@@ -14,6 +14,55 @@ router = APIRouter(prefix="/api/machines", tags=["machines"])
 
 UPLOAD_DIR = Path(__file__).parent.parent.parent / "static" / "machines"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+# Cap live WS fan-out: Node-RED can POST many partials/sec; UI only needs ~2–3 Hz.
+_TELEMETRY_WS_LAST: Dict[int, float] = {}
+_TELEMETRY_WS_MIN_SEC = 0.4
+
+
+def _should_broadcast_telemetry(machine_id: int, result: dict) -> bool:
+    """Throttle routine ticks; always send when thresholds/email status change."""
+    import time
+    force = bool(
+        result.get("email_alert_status")
+        or (isinstance(result.get("threshold_breaches"), dict) and result.get("threshold_breaches"))
+    )
+    now = time.monotonic()
+    if force:
+        _TELEMETRY_WS_LAST[int(machine_id)] = now
+        return True
+    last = _TELEMETRY_WS_LAST.get(int(machine_id), 0.0)
+    if (now - last) < _TELEMETRY_WS_MIN_SEC:
+        return False
+    _TELEMETRY_WS_LAST[int(machine_id)] = now
+    return True
+
+
+def _telemetry_ws_payload(machine_id: int, result: dict) -> dict:
+    return {
+        "type": "machine_telemetry_updated",
+        "id": machine_id,
+        "deviceName": result.get("device_name"),
+        "syncBy": result.get("sync_by"),
+        "telemetry": {
+            "available": True,
+            "updated_at": result.get("updated_at"),
+            "sync_by": result.get("sync_by"),
+            "device_name": result.get("device_name"),
+            "device_uuid": result.get("device_uuid"),
+            "digital_io": result.get("digital_io"),
+            "scaled": result.get("scaled"),
+            "param_rows": result.get("param_rows"),
+            "current_tiles": result.get("current_tiles"),
+            "io_status": result.get("io_status"),
+            "profile": result.get("profile"),
+            "registers": result.get("registers"),
+            "thresholds": result.get("thresholds"),
+            "threshold_breaches": result.get("threshold_breaches"),
+            "alarms": result.get("alarms"),
+            "email_alert_status": result.get("email_alert_status"),
+        },
+    }
 
 
 class MachineCreate(BaseModel):
@@ -57,6 +106,23 @@ def _machine_enabled(m: Machine) -> bool:
 class StatusPush(BaseModel):
     status: str
     source: Optional[str] = "api"
+
+
+class TelemetryReading(BaseModel):
+    name: Optional[str] = None
+    value: Optional[Any] = None
+    origin: Optional[Any] = None
+
+
+class NodeRedTelemetryPush(BaseModel):
+    """Node-RED Modbus sync payload (deviceName + readings[{name,value}])."""
+    id: Optional[str] = None
+    syncBy: Optional[str] = None
+    deviceName: Optional[str] = None
+    device: Optional[str] = None
+    origin: Optional[Any] = None
+    readings: Optional[List[TelemetryReading]] = None
+    machine_id: Optional[int] = None
 
 
 def _compute_status(machine: Machine, db: Session) -> str:
@@ -463,6 +529,230 @@ async def upload_image(machine_id: int, file: UploadFile = File(...),
     m.image_url = f"/static/machines/{fname}"
     db.commit()
     return {"image_url": m.image_url}
+
+
+@router.post("/telemetry")
+async def push_telemetry_node_red(data: NodeRedTelemetryPush, db: Session = Depends(get_db)):
+    """
+    Node-RED → PMS telemetry ingest (no JWT; same pattern as status push).
+    Body example:
+      { syncBy:"MODBUS", deviceName:"Servo press", device:"<uuid>",
+        readings:[{name:"status:Int16", value:"0"}, {name:"Live position", value:"42600"}, ...] }
+    """
+    from ..machine_telemetry_service import ensure_machine_telemetry_schema, upsert_telemetry_from_node_red
+    ensure_machine_telemetry_schema()
+    payload = data.model_dump()
+    # Normalize readings to plain dicts
+    payload["readings"] = [
+        r if isinstance(r, dict) else (r.model_dump() if hasattr(r, "model_dump") else dict(r))
+        for r in (payload.get("readings") or [])
+    ]
+    try:
+        result = upsert_telemetry_from_node_red(db, payload, machine_id=data.machine_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    mid = result.get("machine_id") or data.machine_id
+    if mid is not None and _should_broadcast_telemetry(int(mid), result):
+        await manager.broadcast(_telemetry_ws_payload(int(mid), result))
+    return result
+
+
+@router.post("/{machine_id}/telemetry")
+async def push_telemetry_for_machine(
+    machine_id: int,
+    data: NodeRedTelemetryPush,
+    db: Session = Depends(get_db),
+):
+    """Same as /telemetry but forces target machine_id."""
+    from ..machine_telemetry_service import ensure_machine_telemetry_schema, upsert_telemetry_from_node_red
+    ensure_machine_telemetry_schema()
+    payload = data.model_dump()
+    payload["readings"] = [
+        r if isinstance(r, dict) else (r.model_dump() if hasattr(r, "model_dump") else dict(r))
+        for r in (payload.get("readings") or [])
+    ]
+    try:
+        result = upsert_telemetry_from_node_red(db, payload, machine_id=machine_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    if _should_broadcast_telemetry(machine_id, result):
+        await manager.broadcast(_telemetry_ws_payload(machine_id, result))
+    return result
+
+@router.get("/{machine_id}/telemetry")
+def get_machine_telemetry(machine_id: int, db: Session = Depends(get_db), _=Depends(get_current_user)):
+    from ..machine_telemetry_service import ensure_machine_telemetry_schema, get_telemetry_for_machine
+    ensure_machine_telemetry_schema()
+    m = db.query(Machine).filter(Machine.id == machine_id).first()
+    if not m:
+        raise HTTPException(404, "Machine not found")
+    return get_telemetry_for_machine(db, machine_id)
+
+
+class PlcThresholdBody(BaseModel):
+    """LSL / USL per process tag for SPM_AH_PLC (and other generic_plc machines)."""
+    thresholds: dict
+
+
+@router.get("/{machine_id}/telemetry/thresholds")
+def get_machine_plc_thresholds(machine_id: int, db: Session = Depends(get_db), _=Depends(get_current_user)):
+    from ..machine_telemetry_service import ensure_machine_telemetry_schema, get_plc_thresholds
+    ensure_machine_telemetry_schema()
+    m = db.query(Machine).filter(Machine.id == machine_id).first()
+    if not m:
+        raise HTTPException(404, "Machine not found")
+    return get_plc_thresholds(db, machine_id)
+
+
+@router.put("/{machine_id}/telemetry/thresholds")
+async def put_machine_plc_thresholds(
+    machine_id: int,
+    data: PlcThresholdBody,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    from ..machine_telemetry_service import ensure_machine_telemetry_schema, set_plc_thresholds
+    ensure_machine_telemetry_schema()
+    try:
+        result = set_plc_thresholds(db, machine_id, data.thresholds or {})
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    await manager.broadcast({
+        "type": "machine_telemetry_updated",
+        "id": machine_id,
+        "telemetry": {
+            "thresholds": result.get("thresholds"),
+            "threshold_breaches": result.get("threshold_breaches"),
+            "alarms": result.get("alarms"),
+            "email_alert_status": result.get("email_alert_status"),
+        },
+    })
+    return result
+
+
+@router.get("/telemetry/profiles")
+def list_telemetry_profiles(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """List machine telemetry UI profiles (Servo Press, generic PLC, …)."""
+    from ..machine_telemetry_profiles import list_profiles
+    return {"profiles": list_profiles(db=db)}
+
+
+@router.get("/telemetry/profiles/{machine_type}")
+def telemetry_profile_for_type(
+    machine_type: str,
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """Resolve Live/Result parameter screens for a machine_type."""
+    from ..machine_telemetry_profiles import resolve_profile_for_machine_type
+    return resolve_profile_for_machine_type(machine_type, db=db)
+
+
+@router.get("/telemetry/modbus-catalog")
+def servo_press_modbus_catalog(db: Session = Depends(get_db), _=Depends(get_current_user)):
+    """Documented Modbus register map for Servo Press (§8.4.2)."""
+    from ..machine_telemetry_profiles import resolve_profile_for_machine_type
+    profile = resolve_profile_for_machine_type("Servo Press", db=db)
+    return {
+        "function_codes": ["03", "06", "16"],
+        "rules": {
+            "status_data": "Acquire anytime",
+            "pressing_result": "Acquire when Status* is 4-8; cleared when Status* becomes 3",
+        },
+        "profile": profile,
+        "registers": profile.get("registers") or {},
+    }
+
+
+class TelemetryTagCreate(BaseModel):
+    item: str
+    nodered_name: Optional[str] = None
+    nodered_aliases: Optional[List[str]] = None
+    tag_key: Optional[str] = None
+    modbus: Optional[str] = None
+    eip_pn: Optional[str] = None
+    type: Optional[str] = "W"
+    scale: Optional[float] = 1.0
+    unit: Optional[str] = ""
+    group: Optional[str] = "live"  # live | result | other
+    note: Optional[str] = ""
+    sort_order: Optional[int] = None
+    is_enabled: Optional[bool] = True
+    profile_id: Optional[str] = "servo_press"
+
+
+class TelemetryTagUpdate(BaseModel):
+    item: Optional[str] = None
+    nodered_name: Optional[str] = None
+    nodered_aliases: Optional[List[str]] = None
+    tag_key: Optional[str] = None
+    modbus: Optional[str] = None
+    eip_pn: Optional[str] = None
+    type: Optional[str] = None
+    scale: Optional[float] = None
+    unit: Optional[str] = None
+    group: Optional[str] = None
+    note: Optional[str] = None
+    sort_order: Optional[int] = None
+    is_enabled: Optional[bool] = None
+
+
+@router.get("/telemetry/tags")
+def list_telemetry_tags(
+    profile_id: str = Query("servo_press"),
+    db: Session = Depends(get_db),
+    _=Depends(get_current_user),
+):
+    """List editable Node-RED ↔ UI tag mappings (Modbus catalog rows)."""
+    from ..telemetry_tags_service import list_tags
+    tags = list_tags(db, profile_id=profile_id)
+    return {"profile_id": profile_id, "tags": tags, "count": len(tags)}
+
+
+@router.post("/telemetry/tags")
+def create_telemetry_tag(
+    data: TelemetryTagCreate,
+    db: Session = Depends(get_db),
+    _=Depends(require_role("admin", "superadmin")),
+):
+    """Add a tag (e.g. Emergency button press) mapped to Live or Pressing Result screen."""
+    from ..telemetry_tags_service import create_tag
+    payload = data.model_dump()
+    profile_id = payload.pop("profile_id", None) or "servo_press"
+    try:
+        return create_tag(db, payload, profile_id=profile_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+@router.put("/telemetry/tags/{tag_id}")
+def update_telemetry_tag(
+    tag_id: int,
+    data: TelemetryTagUpdate,
+    db: Session = Depends(get_db),
+    _=Depends(require_role("admin", "superadmin")),
+):
+    """Edit Item / Node-RED name / Modbus / group / scale / unit for a tag."""
+    from ..telemetry_tags_service import update_tag
+    try:
+        return update_tag(db, tag_id, data.model_dump(exclude_unset=True))
+    except ValueError as exc:
+        raise HTTPException(404 if "not found" in str(exc).lower() else 400, str(exc)) from exc
+
+
+@router.delete("/telemetry/tags/{tag_id}")
+def delete_telemetry_tag(
+    tag_id: int,
+    db: Session = Depends(get_db),
+    _=Depends(require_role("admin", "superadmin")),
+):
+    """Remove a tag from Live / Pressing Result mapping."""
+    from ..telemetry_tags_service import delete_tag
+    try:
+        delete_tag(db, tag_id)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"ok": True, "id": tag_id}
 
 
 @router.patch("/{machine_id}/status")

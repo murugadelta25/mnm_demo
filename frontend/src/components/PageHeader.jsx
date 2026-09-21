@@ -1,9 +1,121 @@
-import { useState, useEffect, useRef, useMemo, useId } from 'react';
+import { useState, useEffect, useRef, useMemo, useId, useCallback } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { useConfig, getCurrentShift } from '../context/ConfigContext';
 import { useTheme } from '../context/ThemeContext';
+import { useWebSocket } from '../api/useWebSocket';
+import api from '../api/client';
 import NotificationBell from './NotificationBell';
 
 const AUTO_REFRESH_SEC = 60;
+
+function PlcBreachStatusBar() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [items, setItems] = useState([]);
+  // Equipment overview draws its own live bar from telemetry — avoid a second strip.
+  const onEquipment = location.pathname.startsWith('/overview/equipment/');
+  const failStreak = useRef(0);
+
+  const load = useCallback(async () => {
+    if (!localStorage.getItem('token')) return;
+    if (location.pathname.startsWith('/overview/equipment/')) return;
+    try {
+      const { data } = await api.get('/api/notifications/');
+      setItems((data.items || []).filter((i) => i.kind === 'plc_threshold'));
+      failStreak.current = 0;
+    } catch {
+      failStreak.current += 1;
+    }
+  }, [location.pathname]);
+
+  useEffect(() => {
+    if (onEquipment) return undefined;
+    load();
+    const id = setInterval(() => {
+      // Back off while API is down so the UI does not hammer 502s
+      if (failStreak.current > 3 && failStreak.current % 4 !== 0) {
+        failStreak.current += 1;
+        return;
+      }
+      load();
+    }, 30000);
+    return () => clearInterval(id);
+  }, [load, onEquipment]);
+
+  useWebSocket(useCallback((msg) => {
+    if (onEquipment) return;
+    // Only on threshold events — not every Modbus tick
+    if (msg?.type === 'plc_threshold') load();
+  }, [load, onEquipment]), !onEquipment);
+
+  if (onEquipment || items.length === 0) return null;
+
+  return (
+    <>
+      <style>{`
+@keyframes plc-warn-blink{
+  0%,100%{
+    background:#fff7ed;
+    border-color:#f59e0b;
+    box-shadow:0 0 0 0 rgba(245,158,11,0.55);
+  }
+  50%{
+    background:#fecaca;
+    border-color:#ef4444;
+    box-shadow:0 0 14px 2px rgba(239,68,68,0.55);
+  }
+}
+@keyframes plc-warn-badge-blink{
+  0%,100%{ background:#f59e0b; color:#1c1917; transform:scale(1); }
+  50%{ background:#ef4444; color:#ffffff; transform:scale(1.06); }
+}
+.plc-warn-banner{ animation:plc-warn-blink 1.1s ease-in-out infinite; }
+.plc-warn-badge{ display:inline-block; animation:plc-warn-badge-blink 1.1s ease-in-out infinite; }
+`}
+      </style>
+      <button
+        type="button"
+        className="plc-warn-banner"
+        onClick={() => items[0]?.path && navigate(items[0].path)}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          width: '100%',
+          margin: '0 0 10px',
+          padding: '8px 12px',
+          borderRadius: 8,
+          border: '1px solid #f59e0b',
+          background: '#fff7ed',
+          color: '#9a3412',
+          fontWeight: 700,
+          fontSize: 13,
+          textAlign: 'left',
+          cursor: 'pointer',
+        }}
+      >
+        <span
+          className="plc-warn-badge"
+          style={{
+            flexShrink: 0,
+            background: '#f59e0b',
+            color: '#1c1917',
+            borderRadius: 6,
+            padding: '2px 8px',
+            fontSize: 11,
+            fontWeight: 800,
+            letterSpacing: 0.4,
+          }}
+        >
+          WARNING
+        </span>
+        <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+          {items.map((i) => `${i.title}: ${i.body}`).join('  ·  ')}
+        </span>
+      </button>
+    </>
+  );
+}
 
 /**
  * PageHeader
@@ -178,6 +290,8 @@ export default function PageHeader({ title, onRefresh, extra, compact = false })
   };
 
   return (
+    <>
+    <PlcBreachStatusBar />
     <div style={{ ...s.bar, borderBottom: `1px solid ${t.border}` }}>
       <h3 style={{ ...s.title, color: t.text }}>{title}</h3>
       <div style={s.center}>
@@ -388,5 +502,6 @@ export default function PageHeader({ title, onRefresh, extra, compact = false })
         </div>
       </div>
     </div>
+    </>
   );
 }
