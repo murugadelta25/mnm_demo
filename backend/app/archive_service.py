@@ -63,6 +63,7 @@ TABLES_TO_BACKUP = [
     "stations", "machines", "users", "site_config",
     "parts", "part_documents", "part_document_history", "part_qc_parameters",
     "tool_stocks", "tool_events", "tool_alerts",
+    "tool_groups", "tool_group_members",
     "work_orders", "production_plans", "oee_entries", "oee_defect_log",
     "model_change_requests", "breakdown_tickets",
     "machine_status_log", "machine_kpi_log",
@@ -70,6 +71,7 @@ TABLES_TO_BACKUP = [
     "email_groups", "email_recipients", "email_schedules",
     "email_smtp_config", "email_logs",
     "qc_inspection_reports",
+    "telemetry_tags", "machine_telemetry",
 ]
 
 

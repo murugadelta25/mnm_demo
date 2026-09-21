@@ -45,25 +45,40 @@ apply_database_migrations() {
   done
 }
 
+backend_python() {
+  if [ -x "$BACKEND_DIR/.venv/bin/python3" ]; then
+    echo "$BACKEND_DIR/.venv/bin/python3"
+  elif [ -x "$BACKEND_DIR/.venv/bin/python" ]; then
+    echo "$BACKEND_DIR/.venv/bin/python"
+  elif [ -x "$BACKEND_DIR/venv/bin/python3" ]; then
+    echo "$BACKEND_DIR/venv/bin/python3"
+  elif [ -x "$BACKEND_DIR/venv/bin/python" ]; then
+    echo "$BACKEND_DIR/venv/bin/python"
+  else
+    echo "python3"
+  fi
+}
+
 run_schema_guard() {
   local py
-  if [ -x "$BACKEND_DIR/.venv/bin/python3" ]; then
-    py="$BACKEND_DIR/.venv/bin/python3"
-  elif [ -x "$BACKEND_DIR/.venv/bin/python" ]; then
-    py="$BACKEND_DIR/.venv/bin/python"
-  elif [ -x "$BACKEND_DIR/venv/bin/python3" ]; then
-    py="$BACKEND_DIR/venv/bin/python3"
-  elif [ -x "$BACKEND_DIR/venv/bin/python" ]; then
-    py="$BACKEND_DIR/venv/bin/python"
-  else
-    py="python3"
-  fi
+  py="$(backend_python)"
   log_step "[db] Running schema guard (web + mobile integration)..."
   (
     cd "$BACKEND_DIR"
     "$py" ensure_schema.py
   )
   log_ok "Schema guard complete"
+}
+
+apply_demo_seed_and_branding() {
+  local py
+  py="$(backend_python)"
+  log_step "[db] Demo seed (machines / telemetry tags) + client branding..."
+  (
+    cd "$PROJECT_DIR"
+    CLIENT_NAME="${CLIENT_NAME}" "$py" "$SCRIPT_DIR/restore_demo_seed.py" || true
+    CLIENT_NAME="${CLIENT_NAME}" "$py" "$SCRIPT_DIR/apply_client_branding.py" || true
+  )
 }
 
 if database_exists; then
@@ -73,6 +88,7 @@ if database_exists; then
   apply_database_migrations
   unset MYSQL_PWD
   run_schema_guard
+  apply_demo_seed_and_branding
   log_ok "Database migrations complete (${DB_NAME})"
   exit 0
 fi
@@ -106,4 +122,5 @@ fi
 
 unset MYSQL_PWD
 run_schema_guard
+apply_demo_seed_and_branding
 log_ok "Database setup complete (${DB_NAME})"

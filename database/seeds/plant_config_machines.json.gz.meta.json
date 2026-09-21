@@ -1,0 +1,22 @@
+{
+  "filename": "plant_config_machines.json.gz",
+  "created_at": "2026-09-21T18:47:14.460491",
+  "kind": "config_machines_params",
+  "tables": {
+    "stations": 4,
+    "machines": 9,
+    "site_config": 1,
+    "telemetry_tags": 48,
+    "parts": 3,
+    "part_qc_parameters": 0,
+    "part_documents": 0,
+    "tool_stocks": 0,
+    "tool_groups": 0,
+    "tool_group_members": 0,
+    "email_groups": 1,
+    "email_smtp_config": 1,
+    "users": 7
+  },
+  "size_bytes": 6648,
+  "note": "Lean seed: stations, machines, site_config, telemetry_tags, parts, users. Branding applied from CLIENT_NAME on install."
+}

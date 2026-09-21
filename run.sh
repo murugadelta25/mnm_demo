@@ -94,9 +94,9 @@ cmd_preflight() {
   ensure_deploy_config
   print_banner
   log_step "[preflight] Running safe deployment checks..."
-  bash "$SCRIPTS_DIR/install-deps.sh"
   ensure_backend_env
   configure_frontend_env
+  bash "$SCRIPTS_DIR/install-deps.sh"
   bash "$SCRIPTS_DIR/setup-database.sh"
   log_ok "Preflight complete"
   log_info "Dependencies verified, DB backup created if needed, migrations/schema guard applied"
@@ -108,9 +108,9 @@ cmd_restart() {
   print_banner
   log_step "[config] Host mode (HTTP / HTTPS)..."
   prompt_host_mode
-  bash "$SCRIPTS_DIR/install-deps.sh"
   ensure_backend_env
   configure_frontend_env
+  bash "$SCRIPTS_DIR/install-deps.sh"
   bash "$SCRIPTS_DIR/setup-database.sh"
   bash "$SCRIPTS_DIR/install-systemd.sh"
   service_ctl restart
@@ -134,9 +134,9 @@ cmd_start() {
   log_step "[config] Host mode (HTTP / HTTPS)..."
   prompt_host_mode
 
-  bash "$SCRIPTS_DIR/install-deps.sh"
   ensure_backend_env
   configure_frontend_env
+  bash "$SCRIPTS_DIR/install-deps.sh"
   bash "$SCRIPTS_DIR/setup-database.sh"
 
   INSTALL_SYSTEMD="${INSTALL_SYSTEMD:-yes}"

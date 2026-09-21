@@ -511,13 +511,56 @@ PY
   log_ok "Backend DATABASE_URL synced to ${DB_NAME}"
 }
 
+pretty_client_app_name() {
+  local raw="${1:-}"
+  if [ -z "$raw" ]; then
+    echo "Production Monitoring System (PMS)"
+    return
+  fi
+  python3 - "$raw" <<'PY'
+import re, sys
+raw = sys.argv[1].strip()
+spaced = re.sub(r"[_\-]+", " ", raw)
+spaced = re.sub(r"\s+", " ", spaced).strip()
+keep = {"PMS", "EAP", "CNC", "SPM", "PLC", "OEE"}
+parts = [w.upper() if w.upper() in keep else w.capitalize() for w in spaced.split(" ")]
+title = " ".join(parts)
+if not title.upper().endswith("PMS"):
+    title = f"{title} (PMS)"
+print(title)
+PY
+}
+
 configure_frontend_env() {
+  read_db_creds
+  local app_name
+  app_name=$(pretty_client_app_name "${CLIENT_NAME:-}")
   cat > "$FRONTEND_DIR/.env" <<EOF
 # Auto-generated — Vite proxies /api and /ws to backend on port ${BACKEND_PORT}
 VITE_API_URL=
 VITE_WS_URL=
+VITE_APP_NAME=${app_name}
 EOF
-  log_ok "Frontend .env configured (Vite proxy mode)"
+  # Keep backend default title aligned with client (API still prefers SiteConfig)
+  if [ -f "$BACKEND_DIR/.env" ]; then
+    python3 - "$BACKEND_DIR/.env" "$app_name" <<'PY'
+from pathlib import Path
+import sys
+path, title = Path(sys.argv[1]), sys.argv[2]
+lines = path.read_text(encoding="utf-8").splitlines()
+out, found = [], False
+for line in lines:
+    if line.startswith("SITE_TITLE="):
+        out.append(f"SITE_TITLE={title}")
+        found = True
+    else:
+        out.append(line)
+if not found:
+    out.append(f"SITE_TITLE={title}")
+path.write_text("\n".join(out) + "\n", encoding="utf-8")
+PY
+  fi
+  log_ok "Frontend .env configured (Vite proxy mode, VITE_APP_NAME=${app_name})"
 }
 
 wait_for_url() {
