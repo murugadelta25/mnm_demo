@@ -379,7 +379,7 @@ def upsert_telemetry_from_node_red(db: Session, payload: dict, *, machine_id: Op
         db.commit()
 
     if pending_setpoint_email:
-        _dispatch_setpoint_email_async(m.id, "generic_plc", pending_setpoint_email)
+        _dispatch_setpoint_email_async(m.id, profile_id, pending_setpoint_email)
 
     if not is_plc:
         try:
@@ -728,7 +728,8 @@ def set_plc_thresholds(db: Session, machine_id: int, thresholds_in: dict) -> dic
     row.runtime_json = json.dumps(runtime)
     db.commit()
     if raised_new:
-        _dispatch_setpoint_email_async(machine_id, "generic_plc", raised_new)
+        profile_id = profile_id_for_machine_type(m.machine_type)
+        _dispatch_setpoint_email_async(machine_id, profile_id, raised_new)
     return {
         "machine_id": machine_id,
         "thresholds": thresholds,

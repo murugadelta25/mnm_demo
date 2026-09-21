@@ -70,6 +70,9 @@ def _normalize(modules: dict[str, Any] | None) -> dict[str, bool]:
 def _iter_registry_items() -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     for item in registry_standalone():
+        # alwaysEnabled pages (e.g. Dashboard) are not role-gated
+        if item.get("alwaysEnabled"):
+            continue
         items.append(item)
     for group in registry_groups():
         group_roles = group.get("roles")
@@ -162,6 +165,19 @@ def set_feature_modules(db: Session, modules: dict[str, bool]) -> dict[str, bool
 def get_feature_role_access(db: Session) -> dict[str, dict[str, bool]]:
     stored = _load_site_json(db).get("featureRoleAccess")
     return _normalize_role_access(stored, db)
+
+
+def capability_configured_in_role_access(db: Session, capability_id: str) -> bool:
+    """True only when this capability id was persisted in SiteConfig.featureRoleAccess.
+
+    Defaults from CAPABILITY_ROWS are not "configured" — callers may fall back to
+    legacy role lists until an admin saves the access matrix.
+    """
+    stored = _load_site_json(db).get("featureRoleAccess")
+    if not isinstance(stored, dict):
+        return False
+    entry = stored.get(capability_id)
+    return isinstance(entry, dict)
 
 
 def set_feature_role_access(

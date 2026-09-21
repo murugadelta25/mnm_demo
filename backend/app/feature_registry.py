@@ -32,6 +32,8 @@ def registry_standalone() -> list[dict[str, Any]]:
 def all_feature_item_ids() -> list[str]:
     ids: list[str] = []
     for item in registry_standalone():
+        if item.get("alwaysEnabled"):
+            continue
         ids.append(item["id"])
     for group in registry_groups():
         for item in group.get("items") or []:
@@ -47,7 +49,7 @@ def path_to_feature_id(path: str) -> str | None:
     normalized = path.rstrip("/") or "/"
     for item in registry_standalone():
         if item.get("path") == normalized:
-            return item.get("id")
+            return None if item.get("alwaysEnabled") else item.get("id")
     for group in registry_groups():
         for item in group.get("items") or []:
             item_path = item.get("path", "")

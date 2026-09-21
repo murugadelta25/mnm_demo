@@ -19,11 +19,11 @@ export function resolveNavIcon(key) {
 
 const TOGGLEABLE_ROLES = ['superadmin', 'admin', 'site_admin', 'supervisor', 'operator', 'maintenance', 'quality'];
 
-/** All feature item ids, including Dashboard, so role matrix can hide any page. */
+/** All toggleable feature item ids (excludes alwaysEnabled standalone). */
 export function getAllFeatureItemIds() {
   const ids = [];
   for (const item of FEATURE_REGISTRY.standalone || []) {
-    ids.push(item.id);
+    if (!item.alwaysEnabled) ids.push(item.id);
   }
   for (const group of FEATURE_REGISTRY.groups || []) {
     for (const item of group.items || []) {
@@ -54,6 +54,7 @@ function findRegistryItem(featureId) {
 export function getDefaultFeatureRoleAccess() {
   const out = {};
   for (const item of FEATURE_REGISTRY.standalone || []) {
+    if (item.alwaysEnabled) continue;
     const allowed = new Set(item.roles || TOGGLEABLE_ROLES);
     out[item.id] = Object.fromEntries(
       TOGGLEABLE_ROLES.map((r) => [r, allowed.has(r) || (r === 'site_admin' && allowed.has('admin'))]),
@@ -73,9 +74,12 @@ export function getDefaultFeatureRoleAccess() {
 /**
  * Whether a role may see a feature (module must also be enabled).
  * roleAccess overrides registry defaults when provided by the API.
+ * alwaysEnabled pages (e.g. Dashboard) are always allowed when the module is on.
  */
 export function canRoleAccessFeature(featureId, role, modules, roleAccess) {
   if (!featureId) return true;
+  const item = findRegistryItem(featureId);
+  if (item?.alwaysEnabled) return isFeatureEnabled(featureId, modules);
   if (!isFeatureEnabled(featureId, modules)) return false;
   if (!role) return false;
   const access = roleAccess?.[featureId];
@@ -85,18 +89,19 @@ export function canRoleAccessFeature(featureId, role, modules, roleAccess) {
     // Capability rows are not in the page registry. Missing key = not granted.
     if (String(featureId).startsWith('capability.')) return false;
   }
-  const item = findRegistryItem(featureId);
   if (!item?.roles) return role === 'superadmin' || role === 'admin' || role === 'site_admin';
   if (item.roles.includes(role)) return true;
   if (role === 'site_admin' && item.roles.includes('admin')) return true;
   return false;
 }
 
-/** Path → feature item id (longest match). */
+/** Path → feature item id (longest match). alwaysEnabled routes are not gated. */
 export function pathToFeatureId(pathname) {
   const path = pathname.replace(/\/$/, '') || '/';
   for (const item of FEATURE_REGISTRY.standalone || []) {
-    if (item.path === path) return item.id;
+    if (item.path === path) {
+      return item.alwaysEnabled ? null : item.id;
+    }
   }
   let best = null;
   let bestLen = -1;
@@ -149,6 +154,18 @@ export function buildNavigation(role, modules, roleAccess) {
 
   for (const item of FEATURE_REGISTRY.standalone || []) {
     if (item.hideFromNav) continue;
+    if (item.alwaysEnabled) {
+      sections.push({
+        group: null,
+        items: [{
+          path: item.path,
+          label: item.label,
+          icon: resolveNavIcon(item.navIcon),
+          featureId: item.id,
+        }],
+      });
+      continue;
+    }
     if (!itemVisible(item.id, item.roles)) continue;
     sections.push({
       group: null,

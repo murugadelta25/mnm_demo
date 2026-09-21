@@ -161,9 +161,19 @@ def ensure_roles_table_and_seed(db: Session) -> None:
         db.commit()
 
 
-def _all_feature_ids_for_access() -> set[str]:
+def _all_feature_ids_for_access(
+    db: Session | None = None,
+    role_slugs: list[str] | None = None,
+) -> set[str]:
+    """Feature / capability ids that appear in the access matrix.
+
+    Pass role_slugs (or db so they can be loaded) so defaults include dynamic
+    custom roles — not only built-in TOGGLEABLE_ROLES.
+    """
+    if role_slugs is None and db is not None:
+        role_slugs = list_role_slugs(db)
     ids = set(all_feature_item_ids())
-    ids.update(access_matrix_role_defaults().keys())
+    ids.update(access_matrix_role_defaults(role_slugs).keys())
     for cap in CAPABILITY_ROWS:
         ids.add(cap["id"])
     return ids
@@ -172,7 +182,8 @@ def _all_feature_ids_for_access() -> set[str]:
 def _extend_role_access_for_slug(db: Session, slug: str, default_on: bool = False) -> None:
     cfg = _load_site_json(db)
     access = cfg.get("featureRoleAccess") or {}
-    for fid in _all_feature_ids_for_access():
+    role_slugs = list_role_slugs(db)
+    for fid in _all_feature_ids_for_access(db, role_slugs):
         row = dict(access.get(fid) or {})
         if slug not in row:
             row[slug] = default_on
@@ -238,10 +249,11 @@ def create_role(
 
     # Copy inherit role access if specified, else default all pages off.
     if inherits_slug:
-        defaults = access_matrix_role_defaults()
+        role_slugs = list_role_slugs(db)
+        defaults = access_matrix_role_defaults(role_slugs)
         cfg = _load_site_json(db)
         access = cfg.get("featureRoleAccess") or {}
-        for fid in _all_feature_ids_for_access():
+        for fid in _all_feature_ids_for_access(db, role_slugs):
             src = access.get(fid) or {}
             if inherits_slug in src:
                 inherited = bool(src.get(inherits_slug))

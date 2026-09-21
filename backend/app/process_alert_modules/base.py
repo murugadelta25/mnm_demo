@@ -284,12 +284,12 @@ def send_process_setpoint_email(
             "recipients": [],
             "event_ids": [e.get("event_id") for e in raised_events if e.get("event_id")],
         }
-    if not (cfg.email_address or "").strip():
-        cfg.email_address = DEFAULT_SENDER
+    # Runtime default only — never mutate/persist EmailSmtpConfig
+    from_email = (cfg.email_address or "").strip() or DEFAULT_SENDER
     if not cfg.email_password:
         return {
             "status": "failed",
-            "message": f"SMTP password missing for {cfg.email_address}",
+            "message": f"SMTP password missing for {from_email}",
             "sent_at": now_ist().isoformat(timespec="seconds"),
             "module_id": module_id,
             "recipients": [],
@@ -339,8 +339,15 @@ def send_process_setpoint_email(
     db.flush()
 
     try:
+        from types import SimpleNamespace
         from ..routers.email_router import do_send
-        do_send(cfg, recipients, subject, body, body_html=body_html)
+        send_cfg = SimpleNamespace(
+            smtp_server=cfg.smtp_server,
+            smtp_port=cfg.smtp_port,
+            email_address=from_email,
+            email_password=cfg.email_password,
+        )
+        do_send(send_cfg, recipients, subject, body, body_html=body_html)
         log.status = "sent"
         delivery = "sent"
         message = f"[{module_id}] Setpoint alert sent to {', '.join(recipients)}"
@@ -367,6 +374,8 @@ def send_process_setpoint_email(
             escalation_level=0,
         ))
 
+    db.commit()
+
     return {
         "status": delivery,
         "message": message,
@@ -374,5 +383,5 @@ def send_process_setpoint_email(
         "module_id": module_id,
         "recipients": recipients,
         "event_ids": [eid for _e, _a, eid in fresh],
-        "from_email": cfg.email_address,
+        "from_email": from_email,
     }

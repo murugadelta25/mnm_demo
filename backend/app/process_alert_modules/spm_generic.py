@@ -15,9 +15,10 @@ class SpmGenericAlertModule(ProcessAlertModule):
     profile_ids = ("spm",)
     machine_type_hints = ("spm",)
 
-    def matches(self, *, profile_id: str = "", machine_type: str = "") -> bool:
+    def matches(self, *, profile_id: str = "", machine_type: str = "", machine_name: str = "") -> bool:
         mtype = (machine_type or "").strip().upper()
-        if "SPM_AH" in mtype or "AH_PLC" in mtype:
+        mname = (machine_name or "").strip().upper()
+        if "SPM_AH" in mtype or "AH_PLC" in mtype or "SPM_AH" in mname or "AH_PLC" in mname:
             return False
         return "SPM" in mtype or (profile_id or "").lower() == "spm"
 

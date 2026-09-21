@@ -143,6 +143,8 @@ def _page_rows_from_registry(role_slugs: list[str] | None = None) -> list[dict[s
     slugs = list(role_slugs or TOGGLEABLE_ROLES)
     rows: list[dict[str, Any]] = []
     for item in registry_standalone():
+        if item.get("alwaysEnabled"):
+            continue
         allowed = item.get("roles")
         rows.append({
             "id": item["id"],

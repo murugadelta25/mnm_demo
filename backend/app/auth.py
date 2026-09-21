@@ -93,24 +93,37 @@ def require_role(*roles):
 def require_capability(capability_id: str, *fallback_roles: str):
     """Allow if Feature Access Matrix grants this capability to the user's role.
 
-    fallback_roles apply only when the capability is missing from the stored map
-    (so existing deployments keep working until the matrix is saved).
+    fallback_roles apply only when the capability is missing from the *stored*
+    SiteConfig map (so existing deployments keep working until the matrix is saved).
+    Normalized defaults alone do not count as configured — otherwise False defaults
+    would always 403 before fallback could run.
+
+    Once the capability is configured, a role that is absent or False is denied —
+    legacy fallback_roles are not consulted.
     """
     def checker(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-        from .feature_modules import get_feature_role_access
+        from .feature_modules import (
+            capability_configured_in_role_access,
+            get_feature_role_access,
+        )
 
         role = getattr(current_user, "role", None)
         try:
+            configured = capability_configured_in_role_access(db, capability_id)
             access = (get_feature_role_access(db) or {}).get(capability_id) or {}
         except Exception as exc:
             print(f"[auth] capability lookup failed for {capability_id}: {exc}")
+            configured = False
             access = {}
-        if role and isinstance(access, dict) and role in access:
-            if access[role]:
+
+        # Configured capability: matrix is authoritative (missing role == denied).
+        if configured and isinstance(access, dict):
+            if role and access.get(role):
+                return current_user
+            if role == "site_admin" and access.get("admin"):
                 return current_user
             raise HTTPException(status_code=403, detail="Insufficient permissions")
-        if role == "site_admin" and access.get("admin"):
-            return current_user
+
         allowed = set(fallback_roles)
         if "admin" in allowed:
             allowed.add("superadmin")

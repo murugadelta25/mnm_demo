@@ -179,12 +179,12 @@ def send_plc_threshold_deviation_emails(
             "recipients": [],
             "event_ids": [e.get("event_id") for e in raised_events if e.get("event_id")],
         }
-    if not (cfg.email_address or "").strip():
-        cfg.email_address = DEFAULT_PLC_SENDER
+    # Runtime default only — never mutate/persist EmailSmtpConfig
+    from_email = (cfg.email_address or "").strip() or DEFAULT_PLC_SENDER
     if not cfg.email_password:
         return {
             "status": "failed",
-            "message": f"SMTP password missing for {cfg.email_address or DEFAULT_PLC_SENDER}",
+            "message": f"SMTP password missing for {from_email}",
             "sent_at": now_ist().isoformat(timespec="seconds"),
             "recipients": [],
             "event_ids": [e.get("event_id") for e in raised_events if e.get("event_id")],
@@ -192,7 +192,7 @@ def send_plc_threshold_deviation_emails(
 
     recipients = get_deviation_recipient_emails(db)
     if not recipients:
-        recipients = [cfg.email_address or DEFAULT_PLC_SENDER]
+        recipients = [from_email]
 
     ctx = _machine_context(db, machine.id)
     mname = ctx.get("machine_name") or machine.name or f"Machine #{machine.id}"
@@ -233,7 +233,7 @@ def send_plc_threshold_deviation_emails(
         f"Machine : {mname}\n"
         f"Station : {station}\n"
         f"Time    : {_fmt_ist(now_ist())}\n"
-        f"Sender  : {cfg.email_address}\n\n"
+        f"Sender  : {from_email}\n\n"
         f"Breaches:\n" + "\n".join(lines) + "\n\n"
         f"Open equipment overview: /overview/equipment/{machine.id}\n"
     )
@@ -249,8 +249,15 @@ def send_plc_threshold_deviation_emails(
     db.flush()
 
     try:
+        from types import SimpleNamespace
         from .routers.email_router import do_send
-        do_send(cfg, recipients, subject, body)
+        send_cfg = SimpleNamespace(
+            smtp_server=cfg.smtp_server,
+            smtp_port=cfg.smtp_port,
+            email_address=from_email,
+            email_password=cfg.email_password,
+        )
+        do_send(send_cfg, recipients, subject, body)
         log.status = "sent"
         delivery = "sent"
         message = f"Deviation alert email sent to {', '.join(recipients)}"
@@ -277,13 +284,15 @@ def send_plc_threshold_deviation_emails(
             escalation_level=0,
         ))
 
+    db.commit()
+
     return {
         "status": delivery,
         "message": message,
         "sent_at": now_ist().isoformat(timespec="seconds"),
         "recipients": recipients,
         "event_ids": [eid for _ev, _at, eid in fresh],
-        "from_email": cfg.email_address,
+        "from_email": from_email,
     }
 
 

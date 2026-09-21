@@ -88,3 +88,8 @@ backend/static/factory/*
 # Operator session photos uploaded via mobile API
 backend/static/operator-sessions/*
 !backend/static/operator-sessions/.gitkeep
+
+# Local one-off translation scratch (personal paths / caches — not product code)
+_translate_manual.py
+_trans_cache.json
+_tmp_manual_extract.txt

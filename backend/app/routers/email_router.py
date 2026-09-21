@@ -1237,35 +1237,35 @@ def do_send(cfg, to_list: List[str], subject: str, body: str,
     """attachments = {filename: bytes}. Optional body_html for rich (colored) mail."""
     if not to_list:
         return
-    msg = MIMEMultipart('alternative' if body_html else 'mixed')
-    msg['From']    = cfg.email_address
-    msg['To']      = ", ".join(to_list)
-    msg['Subject'] = subject
-    msg.attach(MIMEText(body, 'plain', 'utf-8'))
-    if body_html:
-        msg.attach(MIMEText(body_html, 'html', 'utf-8'))
+    files = attachments or {}
 
-    # If attachments needed with HTML, wrap in outer mixed
-    if attachments:
-        outer = MIMEMultipart('mixed')
-        outer['From'] = msg['From']
-        outer['To'] = msg['To']
-        outer['Subject'] = msg['Subject']
-        outer.attach(msg)
-        for fname, data in attachments.items():
-            part = MIMEBase('application', 'octet-stream')
-            part.set_payload(data)
-            encoders.encode_base64(part)
-            part.add_header('Content-Disposition', f'attachment; filename="{fname}"')
-            outer.attach(part)
-        msg = outer
-    elif not body_html:
-        for fname, data in (attachments or {}).items():
+    # Body part: plain only, or multipart/alternative (plain + html)
+    if body_html:
+        body_part = MIMEMultipart('alternative')
+        body_part.attach(MIMEText(body, 'plain', 'utf-8'))
+        body_part.attach(MIMEText(body_html, 'html', 'utf-8'))
+    else:
+        body_part = MIMEText(body, 'plain', 'utf-8')
+
+    # Attachments always go on a multipart/mixed root (works for plain and HTML)
+    if files:
+        msg = MIMEMultipart('mixed')
+        msg.attach(body_part)
+        for fname, data in files.items():
             part = MIMEBase('application', 'octet-stream')
             part.set_payload(data)
             encoders.encode_base64(part)
             part.add_header('Content-Disposition', f'attachment; filename="{fname}"')
             msg.attach(part)
+    elif body_html:
+        msg = body_part
+    else:
+        msg = MIMEMultipart('mixed')
+        msg.attach(body_part)
+
+    msg['From'] = cfg.email_address
+    msg['To'] = ", ".join(to_list)
+    msg['Subject'] = subject
 
     server = smtplib.SMTP(cfg.smtp_server, cfg.smtp_port, timeout=15)
     server.starttls()
