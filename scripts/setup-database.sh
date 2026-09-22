@@ -13,6 +13,10 @@ if ! sudo systemctl is-active --quiet mysql 2>/dev/null; then
 fi
 log_ok "MySQL running"
 
+log_step "[db] Ensuring MySQL app user and DATABASE_URL..."
+ensure_mysql_app_user || true
+sync_backend_database_url
+
 log_step "[db] Checking database '${DB_NAME}'..."
 
 backup_database_if_exists() {
@@ -77,7 +81,8 @@ apply_demo_seed_and_branding() {
   (
     cd "$PROJECT_DIR"
     CLIENT_NAME="${CLIENT_NAME}" "$py" "$SCRIPT_DIR/restore_demo_seed.py" || true
-    CLIENT_NAME="${CLIENT_NAME}" "$py" "$SCRIPT_DIR/apply_client_branding.py" || true
+    # --force aligns portal title to CLIENT_NAME (fixes leftover Groz titles)
+    CLIENT_NAME="${CLIENT_NAME}" "$py" "$SCRIPT_DIR/apply_client_branding.py" --force || true
   )
 }
 

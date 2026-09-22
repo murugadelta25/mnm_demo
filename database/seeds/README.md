@@ -16,6 +16,18 @@ After `git pull`, re-run:
 sudo ./run.sh restart
 ```
 
+If MySQL still fails with the old `root:YourPassword` / example URL, set the app user in `deploy.env`:
+
+```bash
+# deploy.env
+CLIENT_NAME=MAHINDRA_HYD
+DB_USER=mnm_user
+DB_PASS=mnm_pass123
+DB_NAME=mahindra_hyd
+```
+
+Then `sudo ./run.sh restart` — the installer creates/updates that MySQL user and syncs `backend/.env`.
+
 Then hard-refresh the browser (Ctrl+F5). Confirm branding:
 
 ```bash

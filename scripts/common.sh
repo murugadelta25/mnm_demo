@@ -436,6 +436,35 @@ mysql_cmd() {
   return 1
 }
 
+# Create DB + app user via sudo mysql when password auth as DB_USER fails.
+# Avoids leaving backend/.env on root:YourPassword / example credentials.
+ensure_mysql_app_user() {
+  read_db_creds
+  if [ -z "${DB_NAME:-}" ] || [ -z "${DB_USER:-}" ]; then
+    log_warn "DB_NAME/DB_USER missing — skip MySQL user ensure"
+    return 0
+  fi
+
+  if MYSQL_PWD="${DB_PASS}" mysql -u "$DB_USER" -h localhost -N -e "SELECT 1" >/dev/null 2>&1; then
+    log_ok "MySQL login OK (${DB_USER}@localhost)"
+    return 0
+  fi
+
+  log_warn "Cannot login as ${DB_USER} — creating/updating user via sudo mysql"
+  sudo mysql -e "CREATE DATABASE IF NOT EXISTS \`${DB_NAME}\`;" 2>/dev/null || true
+  # IDENTIFIED BY works for create; ALTER for existing users with wrong password
+  sudo mysql -e "CREATE USER IF NOT EXISTS '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';" 2>/dev/null || true
+  sudo mysql -e "ALTER USER '${DB_USER}'@'localhost' IDENTIFIED BY '${DB_PASS}';" 2>/dev/null || true
+  sudo mysql -e "GRANT ALL PRIVILEGES ON \`${DB_NAME}\`.* TO '${DB_USER}'@'localhost'; FLUSH PRIVILEGES;" 2>/dev/null || true
+
+  if MYSQL_PWD="${DB_PASS}" mysql -u "$DB_USER" -h localhost -N -e "SELECT 1" >/dev/null 2>&1; then
+    log_ok "MySQL user ready (${DB_USER} → ${DB_NAME})"
+    return 0
+  fi
+  log_fail "MySQL user '${DB_USER}' still cannot connect — check sudo mysql / password"
+  return 1
+}
+
 database_exists() {
   local result
   result=$(MYSQL_PWD="${DB_PASS}" mysql -u "$DB_USER" -h localhost -N -e \

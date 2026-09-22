@@ -72,12 +72,11 @@ def _stale_title(title: str, client_title: str) -> bool:
     }
     if low in defaults:
         return True
-    # Different client slug already baked as title → refresh
+    # Title does not include this client name → treat as stale (other customer leftover)
     client_key = re.sub(r"[^a-z0-9]+", "", client_title.lower())
     title_key = re.sub(r"[^a-z0-9]+", "", low)
-    if client_key and client_key not in title_key and "pms" in title_key:
-        # e.g. title still "Groz..." already caught; leave custom titles alone
-        return False
+    if client_key and client_key not in title_key:
+        return True
     return False
 
 

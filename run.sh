@@ -32,32 +32,44 @@ prompt_first_deploy() {
   echo -e "  Enter client and database details (saved to deploy.env and database/db.config.json):"
   echo ""
 
-  local input_client input_pass input_db default_db
+  local input_client input_user input_pass input_db default_db default_user
 
   while [ -z "${input_client:-}" ]; do
-    read -p "  Client name (used for systemd services): " input_client
+    read -p "  Client name (used for systemd services + portal title): " input_client
     input_client=$(echo "$input_client" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     if [ -z "$input_client" ]; then
       log_warn "Client name is required"
     fi
   done
 
-  read -s -p "  MySQL password: " input_pass
-  echo ""
+  default_user="mnm_user"
+  read -p "  MySQL username [${default_user}]: " input_user
+  input_user="${input_user:-$default_user}"
+  input_user=$(echo "$input_user" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
-  default_db="eap_pms_$(sanitize_client_slug "$input_client" | tr '-' '_')"
+  while [ -z "${input_pass:-}" ]; do
+    read -s -p "  MySQL password for '${input_user}': " input_pass
+    echo ""
+    if [ -z "$input_pass" ]; then
+      log_warn "MySQL password is required (will create the user if missing)"
+    fi
+  done
+
+  default_db="$(sanitize_client_slug "$input_client" | tr '-' '_')"
   read -p "  Database name [${default_db}]: " input_db
   input_db="${input_db:-$default_db}"
 
-  write_deploy_files "$input_client" "$input_pass" "$input_db" "root"
+  write_deploy_files "$input_client" "$input_pass" "$input_db" "$input_user"
   load_deploy_env
   read_db_creds
   resolve_service_names
 
   log_ok "Saved deploy.env and database/db.config.json"
   log_info "Client: ${CLIENT_NAME}"
+  log_info "MySQL user: ${DB_USER}"
   log_info "Database: ${DB_NAME}"
   log_info "Services: ${BACKEND_SERVICE}, ${FRONTEND_SERVICE}"
+  log_info "Portal title will be derived from client name (e.g. Mahindra Hyd (PMS))"
 }
 
 ensure_deploy_config() {
