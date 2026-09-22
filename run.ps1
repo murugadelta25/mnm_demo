@@ -498,7 +498,9 @@ if ($networkIPs.Count -eq 0) {
 # [5/8] Backend - always use this project's backend\venv
 Write-StepHeader 5 "Starting backend on port $BackendPort..."
 
-# Free port 8010/5174 from stale uvicorn/vite orphans (common cause of 502 / hang)
+# Free port 8010/5174 from stale uvicorn/vite orphans (common cause of 502 / hang).
+# IMPORTANT: only kill uvicorn when clearing the backend port. Clearing the frontend
+# port after the backend is already up used to kill the fresh uvicorn (ECONNREFUSED).
 function Clear-PortListeners {
     param([int]$Port)
     $killed = @()
@@ -514,22 +516,27 @@ function Clear-PortListeners {
             $killed += $procId
         }
     } catch { }
-    # Orphaned --reload workers whose parent already died
-    Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue | Where-Object {
-        $_.CommandLine -match "uvicorn app\.main:app|--multiprocessing-fork"
-    } | ForEach-Object {
-        if ($killed -contains $_.ProcessId) { return }
-        Write-Host "  Stopping leftover uvicorn/python (PID $($_.ProcessId))..." -ForegroundColor Yellow
-        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-        $killed += $_.ProcessId
+    # Orphaned --reload workers whose parent already died (backend port only)
+    if ($Port -eq $BackendPort) {
+        Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" -ErrorAction SilentlyContinue | Where-Object {
+            $_.CommandLine -match "uvicorn app\.main:app|--multiprocessing-fork"
+        } | ForEach-Object {
+            if ($killed -contains $_.ProcessId) { return }
+            Write-Host "  Stopping leftover uvicorn/python (PID $($_.ProcessId))..." -ForegroundColor Yellow
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            $killed += $_.ProcessId
+        }
     }
-    Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue | Where-Object {
-        $_.CommandLine -match "vite|5174"
-    } | ForEach-Object {
-        if ($killed -contains $_.ProcessId) { return }
-        Write-Host "  Stopping leftover Vite/node (PID $($_.ProcessId))..." -ForegroundColor Yellow
-        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-        $killed += $_.ProcessId
+    # Stale Vite/node only when clearing the frontend port
+    if ($Port -eq $FrontendPort) {
+        Get-CimInstance Win32_Process -Filter "Name = 'node.exe'" -ErrorAction SilentlyContinue | Where-Object {
+            $_.CommandLine -match "vite|5174"
+        } | ForEach-Object {
+            if ($killed -contains $_.ProcessId) { return }
+            Write-Host "  Stopping leftover Vite/node (PID $($_.ProcessId))..." -ForegroundColor Yellow
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            $killed += $_.ProcessId
+        }
     }
     if ($killed.Count -gt 0) { Start-Sleep -Seconds 2 }
     # Windows lets a second socket bind an already-bound port, and requests then land on

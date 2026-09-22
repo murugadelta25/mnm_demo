@@ -1,14 +1,37 @@
-# Plant seed (machines, telemetry tags, site config)
+# Plant seed (machines, telemetry tags, site config, factory assets)
 
 `plant_config_machines.json.gz` is a lean export of stations, machines, site
-configuration, telemetry tags, parts, and users from the development plant DB.
+configuration, telemetry tags, parts, users, and email groups from the
+development plant DB.
+
+Packaged images live under `static/` (machines, factory logos, parts,
+work-instructions) and are copied into `backend/static/` on restore.
+
+SMTP password is **not** stored in the seed (public repo). Re-enter it under
+Email Settings on the target IPC.
+
+## Refresh from a configured Windows/dev PC
+
+With MySQL running and `backend/.env` pointing at the plant DB:
+
+```bash
+# Windows
+backend\.venv\Scripts\python.exe scripts\export_plant_seed.py
+
+# Ubuntu
+source backend/venv/bin/activate   # or backend/.venv
+python3 scripts/export_plant_seed.py
+```
+
+Then commit and push `database/seeds/` to GitHub.
 
 ## Ubuntu / `run.sh`
 
 On database setup the installer:
 
-1. Restores this seed **only if** the `machines` table is empty
-2. Sets portal **siteTitle** from `CLIENT_NAME` (e.g. `MAHINDRA_HYD` → `Mahindra Hyd (PMS)`), replacing stale titles such as Groz
+1. Copies seed static assets into `backend/static/`
+2. Restores this seed **only if** the `machines` table is empty
+3. Sets portal **siteTitle** from `CLIENT_NAME` (e.g. `MAHINDRA_HYD` → `Mahindra Hyd (PMS)`)
 
 After `git pull`, re-run:
 
@@ -34,7 +57,9 @@ Then hard-refresh the browser (Ctrl+F5). Confirm branding:
 curl -s http://localhost:8010/api/config/branding
 ```
 
-## Manual restore (force)
+## Manual restore (force overwrite machines / factory config)
+
+Use when the Ubuntu DB already has machines but you want this plant snapshot:
 
 ```bash
 cd /path/to/mnm_demo
