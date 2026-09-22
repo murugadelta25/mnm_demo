@@ -1,9 +1,9 @@
 {
-    "domain":  "din.eappms",
-    "sslCert":  "deploy/ssl/din.eappms.crt",
-    "lanIp":  "",
-    "sslKey":  "deploy/ssl/din.eappms.key",
-    "dnsEnabled":  true,
-    "autoGenerateSsl":  true,
-    "useHttps":  false
+  "domain": "din.eappms",
+  "lanIp": "",
+  "dnsEnabled": true,
+  "useHttps": false,
+  "autoGenerateSsl": true,
+  "sslCert": "deploy/ssl/din.eappms.crt",
+  "sslKey": "deploy/ssl/din.eappms.key"
 }
