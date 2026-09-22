@@ -93,3 +93,6 @@ backend/static/operator-sessions/*
 _translate_manual.py
 _trans_cache.json
 _tmp_manual_extract.txt
+
+# Runtime PMS telemetry backups
+backend/backups/
