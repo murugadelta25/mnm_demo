@@ -5,6 +5,8 @@ import {
 } from 'recharts';
 import api from '../../api/client';
 import { assetUrl } from '../../api/config';
+import ScrewDriver3D from './ScrewDriver3D';
+import screwDriverTorqueIcon from '../../assets/screw-driver-torque.svg';
 
 /**
  * Servo Press equipment overview.
@@ -15,13 +17,38 @@ const TREND_SERIES = [
   { key: 'position', name: 'Position (mm)', color: '#3b82f6', axis: 'left', unit: 'mm' },
   { key: 'load', name: 'Force (kgf)', color: '#f59e0b', axis: 'left', unit: 'kgf' },
   { key: 'velocity', name: 'Velocity (mm/s)', color: '#22c55e', axis: 'right', unit: 'mm/s' },
+  { key: 'torque', name: 'Torque (Nm)', color: '#f59e0b', axis: 'left', unit: 'Nm' },
+  { key: 'screw_position', name: 'Position (°)', color: '#3b82f6', axis: 'left', unit: '°' },
 ];
 
+/** Edge TorqueValue Int16 → Nm (raw milli-newton-metres). */
+function screwTorqueNm(raw) {
+  if (raw == null || raw === '') return null;
+  const n = Number(raw);
+  if (Number.isNaN(n)) return null;
+  return n / 1000;
+}
+
+function fmtScrewTorqueNm(raw) {
+  const v = screwTorqueNm(raw);
+  if (v == null) return null;
+  const rounded = Math.round(v * 1000) / 1000;
+  return String(rounded);
+}
+
+function fmtScrewPositionDeg(raw) {
+  if (raw == null || raw === '') return null;
+  const n = Number(raw);
+  if (Number.isNaN(n)) return null;
+  return String(n);
+}
 /** Trend series are fed by these catalog keys — a machine without them has no trend. */
 const TREND_REGISTER_BY_SERIES = {
   position: 'live_position',
   load: 'live_force',
   velocity: 'live_velocity',
+  torque: 'torque',
+  screw_position: 'position_value',
 };
 
 /** AH PLC process charts — replace Production tiles on the PLC overview. */
@@ -1460,40 +1487,67 @@ const AR_COLOR = '#4fc3f7';
 const PR_COLOR = '#fb7185';
 const QR_COLOR = '#34d399';
 
-function StatTile({ icon, label, value, unit, accent, t }) {
+function StatTile({ icon, iconSrc, label, value, unit, accent, t, large, centered }) {
+  const valueFs = large ? (centered ? 44 : 40) : 25;
+  const unitFs = large ? 22 : 15;
+  const labelFs = large ? (centered ? 20 : 18) : 15;
+  const iconBox = large ? (centered ? 64 : 56) : 44;
+  const iconFs = large ? 28 : 23;
   return (
     <div style={{
       background: t.surface || '#fff',
       border: `1px solid ${t.border || '#e5e7eb'}`,
       borderRadius: 12,
-      padding: '12px 14px',
+      padding: large ? (centered ? '18px 16px' : '16px 18px') : '12px 14px',
       display: 'flex',
+      flexDirection: centered ? 'column' : 'row',
       alignItems: 'center',
-      gap: 12,
-      minHeight: 72,
+      justifyContent: centered ? 'center' : 'flex-start',
+      textAlign: centered ? 'center' : 'left',
+      gap: large ? (centered ? 10 : 14) : 12,
+      minHeight: large ? (centered ? 120 : 96) : 72,
       height: '100%',
       boxSizing: 'border-box',
     }}
     >
       <div style={{
-        width: 44,
-        height: 44,
+        width: iconBox,
+        height: iconBox,
         borderRadius: 10,
-        background: `${accent}18`,
+        background: centered ? 'transparent' : `${accent}18`,
         color: accent,
         display: 'grid',
         placeItems: 'center',
-        fontSize: 23,
+        fontSize: iconFs,
         flexShrink: 0,
+        overflow: 'hidden',
       }}
       >
-        {icon}
+        {iconSrc ? (
+          <img
+            src={iconSrc}
+            alt=""
+            style={{
+              width: centered ? '100%' : '85%',
+              height: centered ? '100%' : '85%',
+              objectFit: 'contain',
+              display: 'block',
+            }}
+          />
+        ) : icon}
       </div>
-      <div style={{ minWidth: 0 }}>
-        <div style={{ fontSize: 15, color: t.textMuted || '#64748b', fontWeight: 700 }}>{label}</div>
-        <div style={{ fontSize: 25, fontWeight: 800, color: t.text, lineHeight: 1.15 }}>
+      <div style={{ minWidth: 0, width: centered ? '100%' : undefined }}>
+        <div style={{ fontSize: labelFs, color: t.textMuted || '#64748b', fontWeight: 700 }}>{label}</div>
+        <div style={{
+          fontSize: valueFs,
+          fontWeight: 800,
+          color: t.text,
+          lineHeight: 1.15,
+          marginTop: centered ? 4 : 0,
+        }}
+        >
           {value ?? '—'}
-          {unit ? <span style={{ fontSize: 15, fontWeight: 600, marginLeft: 4, color: t.textMuted }}>{unit}</span> : null}
+          {unit ? <span style={{ fontSize: unitFs, fontWeight: 600, marginLeft: 6, color: t.textMuted }}>{unit}</span> : null}
         </div>
       </div>
     </div>
@@ -1504,9 +1558,9 @@ function StatusRow({ label, value, ok, t, large, compact }) {
   // Neutral values use the theme text colour — muted slate is hard to read on light panels.
   const valueColor = ok === true ? '#16a34a' : ok === false ? '#dc2626' : (t.text || '#0f172a');
   const labelColor = t.text || '#0f172a';
-  const fs = compact ? 15 : (large ? 19 : 16);
-  const valFs = compact ? 17 : (large ? 22 : 16);
-  const pad = compact ? '6px 0' : (large ? '14px 0' : '12px 0');
+  const fs = large ? 20 : (compact ? 17 : 16);
+  const valFs = large ? 23 : (compact ? 19 : 16);
+  const pad = large ? '12px 0' : (compact ? '8px 0' : '12px 0');
   return (
     <div style={{
       display: 'flex',
@@ -1514,14 +1568,14 @@ function StatusRow({ label, value, ok, t, large, compact }) {
       justifyContent: 'space-between',
       padding: pad,
       borderBottom: `1px solid ${t.border || '#e5e7eb'}`,
-      flex: compact ? '0 0 auto' : '1 1 0',
+      flex: compact && !large ? '0 0 auto' : '1 1 0',
       minHeight: 0,
     }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: compact ? 8 : 10 }}>
         <span style={{
-          width: compact ? 10 : (large ? 14 : 12),
-          height: compact ? 10 : (large ? 14 : 12),
+          width: large ? 12 : (compact ? 11 : 12),
+          height: large ? 12 : (compact ? 11 : 12),
           borderRadius: '50%',
           background: ok == null ? (t.accent || '#3b82f6') : valueColor,
           boxShadow: ok == null ? 'none' : `0 0 8px ${valueColor}88`,
@@ -1559,8 +1613,16 @@ export default function ServoPressEquipmentView({
   const servoOee = detail?.servo_oee; // dedicated Servo Press Modbus OEE
   const tel = detail?.telemetry || {};
   const telOk = Boolean(tel.available);
-  // Servo Press screen uses servo_oee only; never overwrite Production Dashboard KPI math
-  const activeKpiPanel = servoOee || kpiPanel;
+  const profile = tel.profile || {};
+  const isServoPressProfile = (profile.id || 'servo_press') === 'servo_press';
+  const isPlcProfile = (profile.id || '') === 'generic_plc'
+    || String(machine.machine_type || info.type || '').trim().toUpperCase() === 'PLC';
+  const isSpmProfile = (profile.id || '') === 'spm'
+    || String(machine.machine_type || info.type || '').trim().toUpperCase() === 'SPM';
+  // Servo Press screen uses servo_oee; SPM Screw Driver prefers modbus_kpi from Result counters
+  const activeKpiPanel = isSpmProfile
+    ? (tel.modbus_kpi || servoOee || kpiPanel)
+    : (servoOee || kpiPanel);
   const k = activeKpiPanel?.kpi || {};
   const kpiSource = servoOee
     ? 'servo_press'
@@ -1624,29 +1686,39 @@ export default function ServoPressEquipmentView({
   const alarmsTableRows = useMemo(() => alarms.slice(0, 40), [alarms]);
 
   // Overview Production tiles follow device Modbus Total/Pass/NG (same as Pressing Result /
-  // HMI). Shift-delta counters stay on the OEE panel (servo_oee / shift_production).
+  // HMI). SPM Screw Driver: total = good + reject from Result OK/NG edge counts.
+  // Shift-delta counters stay on the OEE panel (servo_oee / shift_production).
+  const sdLive = (telOk && tel.screw_driver && typeof tel.screw_driver === 'object')
+    ? tel.screw_driver
+    : null;
   const production = {
-    total: telOk && tel.production?.total != null
-      ? tel.production.total
-      : (telOk && tel.scaled?.total_amount != null
-        ? tel.scaled.total_amount
-        : (servoOee?.actual_qty != null
-          ? servoOee.actual_qty
-          : (kpiPanel?.actual_qty ?? plan.actual_qty ?? null))),
-    good: telOk && tel.production?.good != null
-      ? tel.production.good
-      : (telOk && tel.scaled?.pass_amount != null
-        ? tel.scaled.pass_amount
-        : (servoOee?.good_qty != null
-          ? servoOee.good_qty
-          : (kpiPanel?.good_qty ?? null))),
-    reject: telOk && tel.production?.reject != null
-      ? tel.production.reject
-      : (telOk && tel.scaled?.ng_amount != null
-        ? tel.scaled.ng_amount
-        : (servoOee?.defect_qty != null
-          ? servoOee.defect_qty
-          : (kpiPanel?.defect_qty ?? null))),
+    total: sdLive?.total_count != null
+      ? sdLive.total_count
+      : (telOk && tel.production?.total != null
+        ? tel.production.total
+        : (telOk && tel.scaled?.total_amount != null
+          ? tel.scaled.total_amount
+          : (servoOee?.actual_qty != null
+            ? servoOee.actual_qty
+            : (kpiPanel?.actual_qty ?? plan.actual_qty ?? null)))),
+    good: sdLive?.good_count != null
+      ? sdLive.good_count
+      : (telOk && tel.production?.good != null
+        ? tel.production.good
+        : (telOk && tel.scaled?.pass_amount != null
+          ? tel.scaled.pass_amount
+          : (servoOee?.good_qty != null
+            ? servoOee.good_qty
+            : (kpiPanel?.good_qty ?? null)))),
+    reject: sdLive?.reject_count != null
+      ? sdLive.reject_count
+      : (telOk && tel.production?.reject != null
+        ? tel.production.reject
+        : (telOk && tel.scaled?.ng_amount != null
+          ? tel.scaled.ng_amount
+          : (servoOee?.defect_qty != null
+            ? servoOee.defect_qty
+            : (kpiPanel?.defect_qty ?? null)))),
   };
 
   // OK / NG bars follow the same device counters as the Production tiles.
@@ -1660,19 +1732,42 @@ export default function ServoPressEquipmentView({
   const hasQualityData = goodQty > 0 || rejectQty > 0;
 
   // The backend names these rows from the machine's own catalog; the press list is only
-  // used when it sends nothing at all. Hide PLC Status here — it is not a Machine Status row.
+  // used for Servo Press when it sends nothing at all. Hide PLC Status here — it is not a Machine Status row.
   const ioStatusRaw = (Array.isArray(tel.io_status) && tel.io_status.length)
     ? tel.io_status
-    : [
-      { label: 'Press Status', value: null, ok: null },
-      { label: 'Live Mode', value: null, ok: null },
-      { label: 'Live Step', value: null, ok: null },
-      { label: 'Pressing Result', value: null, ok: null },
-      { label: 'Alarm', value: running ? 'No Alarm' : null, ok: running ? true : null },
-    ];
-  const ioStatus = ioStatusRaw.filter(
-    (row) => String(row.label || '').trim().toLowerCase() !== 'plc status',
-  );
+    : (isServoPressProfile
+      ? [
+        { label: 'Press Status', value: null, ok: null },
+        { label: 'Live Mode', value: null, ok: null },
+        { label: 'Live Step', value: null, ok: null },
+        { label: 'Pressing Result', value: null, ok: null },
+        { label: 'Alarm', value: running ? 'No Alarm' : null, ok: running ? true : null },
+      ]
+      : isSpmProfile
+        ? [
+          { label: 'Torque', value: null, ok: null },
+          { label: 'Position', value: null, ok: null },
+          { label: 'Result', value: null, ok: null },
+          { label: 'Device Type', value: null, ok: null },
+        ]
+        : []);
+  const ioStatus = ioStatusRaw
+    .filter((row) => String(row.label || '').trim().toLowerCase() !== 'plc status')
+    .map((row) => {
+      if (!isSpmProfile) return row;
+      const label = String(row.label || '').trim().toLowerCase();
+      if (label === 'torque') {
+        const raw = tel.scaled?.torque ?? sdLive?.torque ?? row.value;
+        const nm = fmtScrewTorqueNm(raw);
+        return { ...row, value: nm != null ? `${nm} Nm` : row.value };
+      }
+      if (label === 'position') {
+        const raw = tel.scaled?.position_value ?? sdLive?.position_value ?? row.value;
+        const deg = fmtScrewPositionDeg(raw);
+        return { ...row, value: deg != null ? `${deg} °` : row.value };
+      }
+      return row;
+    });
 
   const pressingResultInfo = tel.pressing_result || {};
   // Prefer live Edge Pressed Pos / Force from this snapshot (scaled → raw → param row)
@@ -1754,11 +1849,18 @@ export default function ServoPressEquipmentView({
         flow: p.flow,
         tank_level: p.tank_level,
         temperature: p.temperature,
+        // SPM: Edge torque is milli-Nm → chart in Nm
+        torque: p.torque == null || p.torque === '' ? p.torque : (Number(p.torque) / 1000),
+        screw_position: p.screw_position,
       }));
     }
     return buildPreviewTrend();
   }, [telOk, tel.trend, machine.id]);
 
+  const sdTorqueRaw = tel.scaled?.torque ?? sdLive?.torque ?? null;
+  const sdPositionRaw = tel.scaled?.position_value ?? sdLive?.position_value ?? null;
+  const sdTorqueNm = fmtScrewTorqueNm(sdTorqueRaw);
+  const sdPositionDeg = fmtScrewPositionDeg(sdPositionRaw);
   const rateItems = [
     { label: 'Availability Rate', value: k.ar, color: AR_COLOR, icon: '⏱' },
     { label: 'Performance Rate', value: k.pr, color: PR_COLOR, icon: '⚡' },
@@ -1801,11 +1903,6 @@ export default function ServoPressEquipmentView({
     () => ((telOk && Array.isArray(tel.param_rows)) ? tel.param_rows : []),
     [telOk, tel.param_rows],
   );
-
-  const profile = tel.profile || {};
-  const isServoPressProfile = (profile.id || 'servo_press') === 'servo_press';
-  const isPlcProfile = (profile.id || '') === 'generic_plc'
-    || String(machine.machine_type || info.type || '').trim().toUpperCase() === 'PLC';
 
   const thresholdBreaches = useMemo(
     () => ((telOk && tel.threshold_breaches && typeof tel.threshold_breaches === 'object')
@@ -2009,20 +2106,30 @@ export default function ServoPressEquipmentView({
   };
 
   /**
-   * The trend charts position / force / velocity, so a series is offered only when the
-   * catalog maps that register, and it is named after the configured tag (a linear motor
-   * charts "Current Position", not "Position (mm)").
+   * Trend series are strictly family-scoped:
+   *   Servo Press  → position / force / velocity
+   *   SPM          → torque / screw_position
+   *   Linear/other → only registers present in that machine's Config Tags catalog
+   * Never mix SPM torque series onto a press, or press force onto a screwdriver.
    */
   const trendDefs = useMemo(() => {
     const regs = tel.registers || {};
-    return TREND_SERIES.filter((sr) => isServoPressProfile || regs[TREND_REGISTER_BY_SERIES[sr.key]])
-      .map((sr) => {
-        const meta = regs[TREND_REGISTER_BY_SERIES[sr.key]];
-        if (!meta?.item) return sr;
-        const unit = meta.unit || sr.unit;
-        return { ...sr, name: `${meta.item}${unit ? ` (${unit})` : ''}`, unit };
-      });
-  }, [tel.registers, isServoPressProfile]);
+    const PRESS_KEYS = new Set(['position', 'load', 'velocity']);
+    const SPM_KEYS = new Set(['torque', 'screw_position']);
+    return TREND_SERIES.filter((sr) => {
+      if (isServoPressProfile) return PRESS_KEYS.has(sr.key);
+      if (isSpmProfile) {
+        return SPM_KEYS.has(sr.key) && Boolean(regs[TREND_REGISTER_BY_SERIES[sr.key]]);
+      }
+      if (SPM_KEYS.has(sr.key)) return false;
+      return Boolean(regs[TREND_REGISTER_BY_SERIES[sr.key]]);
+    }).map((sr) => {
+      const meta = regs[TREND_REGISTER_BY_SERIES[sr.key]];
+      if (!meta?.item) return sr;
+      const unit = meta.unit || sr.unit;
+      return { ...sr, name: `${meta.item}${unit ? ` (${unit})` : ''}`, unit };
+    });
+  }, [tel.registers, isServoPressProfile, isSpmProfile]);
 
   const visibleTrend = trendDefs.filter((sr) => trendSeries === 'all' || trendSeries === sr.key);
   const leftTrend = visibleTrend.filter((sr) => sr.axis === 'left');
@@ -2034,6 +2141,9 @@ export default function ServoPressEquipmentView({
   const currentTiles = (Array.isArray(tel.current_tiles) && tel.current_tiles.length)
     ? tel.current_tiles
     : null;
+  const showPressCurrentTiles = isServoPressProfile && !currentTiles;
+  // Screw Driver tiles only on SPM profile — never infer from stray scaled keys on other families
+  const showScrewDriverTiles = isSpmProfile && !currentTiles && !showPressCurrentTiles;
 
   return (
     <div style={{
@@ -2761,11 +2871,28 @@ export default function ServoPressEquipmentView({
                 justifyContent: 'center',
                 overflow: 'hidden',
                 marginBottom: 8,
-                padding: 10,
+                padding: isSpmProfile ? 0 : 10,
                 boxSizing: 'border-box',
               }}
               >
-                {img ? (
+                {isSpmProfile ? (
+                  <ScrewDriver3D
+                    positionValue={sdPositionRaw}
+                    torque={sdTorqueNm}
+                    runningStatus={tel.scaled?.running_status ?? sdLive?.running_status}
+                    resultLabel={
+                      (tel.pressing_result && tel.pressing_result.label)
+                      || sdLive?.result_label
+                      || null
+                    }
+                    resultOk={
+                      tel.pressing_result?.ok != null
+                        ? tel.pressing_result.ok
+                        : sdLive?.result_ok
+                    }
+                    height={210}
+                  />
+                ) : img ? (
                   <img
                     src={img}
                     alt={info.name || 'Servo Press'}
@@ -2939,74 +3066,142 @@ export default function ServoPressEquipmentView({
                 flexShrink: 0,
               }}
               >
-                Parameters
+                {isSpmProfile ? 'Current Values' : 'Parameters'}
               </div>
-              <div style={{
-                flex: 1,
-                minHeight: 0,
-                display: 'flex',
-                flexDirection: 'column',
-                overflow: 'hidden',
-              }}
-              >
-                {paramRows.map((row, idx) => (
-                  <div
-                    key={row.label}
-                    style={{
-                      flex: '1 1 0',
-                      minHeight: 0,
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      gap: 8,
-                      padding: '0 12px',
-                      borderBottom: idx < paramRows.length - 1
-                        ? `1px solid ${t.border || '#eef2f7'}`
-                        : 'none',
-                      fontSize: 17,
-                      lineHeight: 1.2,
-                    }}
-                  >
-                    <span style={{
-                      color: t.textMuted,
-                      fontWeight: 700,
-                      flexShrink: 0,
-                      whiteSpace: 'nowrap',
-                    }}
+              {isSpmProfile ? (
+                <div style={{
+                  flex: 1,
+                  minHeight: 0,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'stretch',
+                  justifyContent: 'center',
+                  gap: 14,
+                  padding: 14,
+                  boxSizing: 'border-box',
+                }}
+                >
+                  <StatTile
+                    iconSrc={screwDriverTorqueIcon}
+                    label="Torque"
+                    value={sdTorqueNm}
+                    unit="Nm"
+                    accent="#f59e0b"
+                    t={t}
+                    large
+                    centered
+                  />
+                  <StatTile
+                    icon="↕"
+                    label="Position in degree"
+                    value={sdPositionDeg}
+                    unit="°"
+                    accent="#3b82f6"
+                    t={t}
+                    large
+                    centered
+                  />
+                </div>
+              ) : (
+                <div style={{
+                  flex: 1,
+                  minHeight: 0,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  overflow: 'hidden',
+                }}
+                >
+                  {paramRows.map((row, idx) => (
+                    <div
+                      key={row.label}
+                      style={{
+                        flex: '1 1 0',
+                        minHeight: 0,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        gap: 8,
+                        padding: '0 12px',
+                        borderBottom: idx < paramRows.length - 1
+                          ? `1px solid ${t.border || '#eef2f7'}`
+                          : 'none',
+                        fontSize: 17,
+                        lineHeight: 1.2,
+                      }}
                     >
-                      {row.label}
-                    </span>
-                    <span style={{
-                      color: t.text,
-                      fontWeight: 800,
-                      textAlign: 'right',
-                      overflow: 'hidden',
-                      textOverflow: 'ellipsis',
-                      whiteSpace: 'nowrap',
-                      minWidth: 0,
-                    }}
-                    title={String(row.title || row.value || '')}
-                    >
-                      {row.value}
-                    </span>
-                  </div>
-                ))}
-              </div>
+                      <span style={{
+                        color: t.textMuted,
+                        fontWeight: 700,
+                        flexShrink: 0,
+                        whiteSpace: 'nowrap',
+                      }}
+                      >
+                        {row.label}
+                      </span>
+                      <span style={{
+                        color: t.text,
+                        fontWeight: 800,
+                        textAlign: 'right',
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                        minWidth: 0,
+                      }}
+                      title={String(row.title || row.value || '')}
+                      >
+                        {row.value}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </section>
           </div>
         )}
 
         {activeTab === 'overview' && !isPlcProfile && (
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 12 }}>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0 }}>
-              <section style={{ ...card, padding: 14, minHeight: 260 }}>
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: isSpmProfile
+              ? 'minmax(0, 1.35fr) minmax(280px, 1fr)'
+              : 'repeat(auto-fit, minmax(320px, 1fr))',
+            gap: 12,
+            alignItems: 'stretch',
+            ...(isSpmProfile ? {
+              height: 'clamp(260px, calc(100vh - 520px), 420px)',
+              minHeight: 260,
+            } : {}),
+          }}
+          >
+            <div style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 12,
+              minWidth: 0,
+              minHeight: 0,
+              height: isSpmProfile ? '100%' : undefined,
+            }}
+            >
+              <section style={{
+                ...card,
+                padding: isSpmProfile ? 12 : 14,
+                minHeight: isSpmProfile ? 0 : 260,
+                flex: isSpmProfile ? '1 1 auto' : undefined,
+                height: isSpmProfile ? '100%' : undefined,
+                display: 'flex',
+                flexDirection: 'column',
+                boxSizing: 'border-box',
+                overflow: 'hidden',
+              }}
+              >
                 <div style={{
                   display: 'flex',
                   justifyContent: 'space-between',
                   alignItems: 'center',
                   gap: 10,
-                  marginBottom: 8,
+                  marginBottom: isSpmProfile ? 4 : 8,
                   flexWrap: 'wrap',
+                  flexShrink: 0,
                 }}
                 >
                   <div style={{ fontSize: 17, fontWeight: 800, color: t.text }}>Live Trend</div>
@@ -3025,8 +3220,8 @@ export default function ServoPressEquipmentView({
                           style={{
                             cursor: 'pointer',
                             borderRadius: 999,
-                            padding: '6px 12px',
-                            fontSize: 14,
+                            padding: isSpmProfile ? '4px 10px' : '6px 12px',
+                            fontSize: isSpmProfile ? 12 : 14,
                             fontWeight: 700,
                             border: `1px solid ${active ? sr.color : (t.border || '#e2e8f0')}`,
                             background: active ? `${sr.color}1f` : 'transparent',
@@ -3039,16 +3234,20 @@ export default function ServoPressEquipmentView({
                     })}
                   </div>
                 </div>
-                <div style={{ fontSize: 14, color: t.textMuted, marginBottom: 6 }}>
+                {!isSpmProfile && (
+                <div style={{ fontSize: 14, color: t.textMuted, marginBottom: 6, flexShrink: 0 }}>
                   {trendDefs.length === 0
-                    ? `${machineTypeLabel} has no trend tags — map a tag to live position, force or velocity in Machine Config → ⚙ Config Tags to chart it`
+                    ? `${machineTypeLabel} has no trend tags — map Torque / Position (or live position, force, velocity) in Machine Config → ⚙ Config Tags to chart it`
                     : telOk
                       ? 'Pick a parameter (or a legend entry) to show it alone · Velocity uses the right axis'
                       : `${trendNames} — waiting for Modbus feed`}
                 </div>
+                )}
                 {trendDefs.length === 0 ? (
                   <div style={{
-                    height: 200,
+                    flex: isSpmProfile ? 1 : undefined,
+                    height: isSpmProfile ? undefined : 200,
+                    minHeight: isSpmProfile ? 0 : 200,
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'center',
@@ -3063,8 +3262,23 @@ export default function ServoPressEquipmentView({
                     The {liveScreenLabel} table below carries this machine&apos;s live values
                   </div>
                 ) : (
-                <div className="plc-trend-chart" style={{ width: '100%', height: 240, minWidth: 0, minHeight: 240, position: 'relative' }}>
-                  <ResponsiveContainer width="100%" height={240} minWidth={0} debounce={50}>
+                <div
+                  className="plc-trend-chart"
+                  style={{
+                    width: '100%',
+                    flex: isSpmProfile ? '1 1 auto' : undefined,
+                    height: isSpmProfile ? undefined : 240,
+                    minWidth: 0,
+                    minHeight: isSpmProfile ? 0 : 240,
+                    position: 'relative',
+                  }}
+                >
+                  <ResponsiveContainer
+                    width="100%"
+                    height="100%"
+                    minWidth={0}
+                    debounce={50}
+                  >
                     <LineChart data={trendData} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke={t.border || '#e5e7eb'} />
                       <XAxis dataKey="t" tick={{ fontSize: 12, fill: t.textMuted }} />
@@ -3118,20 +3332,56 @@ export default function ServoPressEquipmentView({
                 )}
               </section>
 
+              {!isSpmProfile && (
               <section style={{ ...card, padding: 14 }}>
                 <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 10, color: t.text }}>Current Values</div>
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0, 1fr))', gap: 10 }}>
                   {currentTiles ? currentTiles.map((tile) => (
                     <StatTile
                       key={tile.key || tile.label}
-                      icon="◎"
+                      icon={tile.key === 'torque' ? '⚖' : tile.key === 'position_value' ? '↕' : tile.key === 'pressing_result' ? '◎' : '◎'}
                       label={tile.label}
                       value={tile.value}
                       unit={tile.unit || ''}
                       accent={tile.accent || '#3b82f6'}
                       t={t}
                     />
-                  )) : (
+                  )) : showPressCurrentTiles ? (
+                    <>
+                      <StatTile
+                        icon="↕"
+                        label="Position"
+                        value={current.position_mm != null ? Number(current.position_mm).toFixed(3) : null}
+                        unit="mm"
+                        accent="#3b82f6"
+                        t={t}
+                      />
+                      <StatTile
+                        icon="⚖"
+                        label="Force"
+                        value={current.force_kgf != null ? Number(current.force_kgf).toFixed(1) : null}
+                        unit="kgf"
+                        accent="#f59e0b"
+                        t={t}
+                      />
+                      <StatTile
+                        icon="⇢"
+                        label="Velocity"
+                        value={current.velocity_mm_s != null ? Number(current.velocity_mm_s).toFixed(3) : null}
+                        unit="mm/s"
+                        accent="#22c55e"
+                        t={t}
+                      />
+                      <StatTile
+                        icon="⏱"
+                        label="Cycle Time"
+                        value={current.cycle_time_sec != null ? Number(current.cycle_time_sec).toFixed(2) : null}
+                        unit="sec"
+                        accent="#8b5cf6"
+                        t={t}
+                      />
+                    </>
+                  ) : (
                     <>
                       <StatTile
                         icon="↕"
@@ -3169,25 +3419,49 @@ export default function ServoPressEquipmentView({
                   )}
                 </div>
               </section>
+              )}
             </div>
 
-            <section style={{ ...card, padding: 14, height: '100%', display: 'flex', flexDirection: 'column', boxSizing: 'border-box' }}>
-              <div style={{ fontSize: 17, fontWeight: 800, marginBottom: 6, color: t.text }}>Machine Status</div>
-              <div style={{ fontSize: 14, color: t.textMuted, marginBottom: 4 }}>
+            <section style={{
+              ...card,
+              padding: isSpmProfile ? 12 : 14,
+              height: '100%',
+              minHeight: 0,
+              overflow: isSpmProfile ? 'hidden' : undefined,
+              display: 'flex',
+              flexDirection: 'column',
+              boxSizing: 'border-box',
+            }}
+            >
+              <div style={{ fontSize: isSpmProfile ? 20 : 17, fontWeight: 800, marginBottom: 6, color: t.text, flexShrink: 0 }}>Machine Status</div>
+              <div style={{ fontSize: isSpmProfile ? 15 : 14, color: t.textMuted, marginBottom: 4, flexShrink: 0 }}>
                 {telOk
                   ? `Modbus live · ${tel.updated_at || 'just now'}`
                   : `Awaiting Node-RED Modbus readings (${ioStatus.map((r) => r.label).join(' / ') || 'no status tags configured'})`}
               </div>
-              <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+              <div style={{
+                flex: 1,
+                display: 'flex',
+                flexDirection: 'column',
+                minHeight: 0,
+                overflow: isSpmProfile ? 'auto' : undefined,
+              }}
+              >
                 {ioStatus.map((row) => (
-                  <StatusRow key={row.label} label={row.label} value={row.value} ok={row.ok} t={t} />
+                  <StatusRow
+                    key={row.label}
+                    label={row.label}
+                    value={row.value}
+                    ok={row.ok}
+                    t={t}
+                    large={isSpmProfile}
+                    compact={isSpmProfile}
+                  />
                 ))}
               </div>
             </section>
           </div>
-        )}
-
-        {(activeTab === 'live' || activeTab === 'result') && (
+        )}        {(activeTab === 'live' || activeTab === 'result') && (
           <section style={{
             ...card,
             padding: 0,

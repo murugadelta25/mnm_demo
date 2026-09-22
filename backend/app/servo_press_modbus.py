@@ -336,49 +336,12 @@ _NAME_ALIASES = {
     "pressed pos5": "pressed_position_step5",
     "pressed_pos5": "pressed_position_step5",
     "device type": "device_type",
-    # AH PLC kit (Node-RED plcdata + coils M301–M316)
-    "pressure": "pressure",
-    "flow": "flow",
-    "tank level": "tank_level",
-    "tank_level": "tank_level",
-    "tanklevel": "tank_level",
-    "temperature": "temperature",
-    "plc status": "plc_status",
-    "plc_status": "plc_status",
-    "plcstatus": "plc_status",
-    "digital input status": "digital_input_status",
-    "digital_input_status": "digital_input_status",
-    "digitalinput": "digital_input_status",
-    "digital output status": "digital_output_status",
-    "digital_output_status": "digital_output_status",
-    "digitaloutput": "digital_output_status",
-    "pump": "do_pump",
-    "blower": "do_blower",
-    "chiller": "do_chiller",
-    "motor": "do_motor",
-    "boiler": "do_boiler",
-    "furnace": "do_furnace",
-    "conveyor": "do_conveyor",
-    "electric_generators": "do_generators",
-    "electric generators": "do_generators",
-    "generators": "do_generators",
-    "digital_input1": "di_1",
-    "digital_input2": "di_2",
-    "digital_input3": "di_3",
-    "digital_input4": "di_4",
-    "digital_input5": "di_5",
-    "digital_input6": "di_6",
-    "digital_input7": "di_7",
-    "digital_input8": "di_8",
-    "digital_input_1": "di_1",
-    "digital_input_2": "di_2",
-    "digital_input_3": "di_3",
-    "digital_input_4": "di_4",
-    "digital_input_5": "di_5",
-    "digital_input_6": "di_6",
-    "digital_input_7": "di_7",
-    "digital_input_8": "di_8",
+    "device_type": "device_type",
+    "devicetype": "device_type",
 }
+# NOTE: PLC / Linear Motor / SPM Screw Driver aliases live in
+# ``app.telemetry_modules.*`` and are applied only for that profile.
+# Do not add TorqueValue / Pressure / etc. here — it would clash across dashboards.
 
 
 def _strip_type_suffix(name: str) -> str:
@@ -775,10 +738,13 @@ def map_node_red_readings(
     """
     Convert Node-RED readings[{name,value}] into scaled canonical fields + UI blocks.
     Optional registers/aliases override the built-in §8.4.2 catalog (DB-backed tags).
+
+    Callers must pass profile-scoped aliases (see ``telemetry_modules.aliases_for_profile``).
+    When aliases is None, Servo Press built-ins are used for legacy callers only.
     """
     regs = registers if registers is not None else SERVO_PRESS_REGISTERS
-    # DB aliases override built-ins, but PLC camelCase / coil names stay available.
-    alias_map = {**_NAME_ALIASES, **(aliases or {})} if aliases is not None else dict(_NAME_ALIASES)
+    # Do NOT merge every family's aliases — that caused Press/PLC/SPM dashboards to clash.
+    alias_map = dict(aliases) if aliases is not None else dict(_NAME_ALIASES)
     raw_by_key: dict[str, Any] = {}
     scaled: dict[str, Any] = {}
     unknown: list[dict] = []
@@ -837,13 +803,14 @@ def map_node_red_readings(
     }
 
     # Current Values keeps the press tiles when the catalog has motion registers; other
-    # catalogs (AH PLC: pressure, flow, tank level, temperature) name their own four.
+    # catalogs (AH PLC / SPM) name their own tiles from the tag list. Family-specific
+    # fallbacks (e.g. Screw Driver) run in telemetry_modules.enrich_for_profile.
     current_tiles: list[dict] = []
     if not any(k in regs for k in _PRESS_TILE_KEYS):
         candidates = [
             (key, meta) for key, meta in regs.items()
             if (meta.get("group") or "other") != "result"
-            and key not in ("digital_input_status", "digital_output_status", "plc_status")
+            and key not in ("digital_input_status", "digital_output_status", "plc_status", "device_type")
             and not str(key).startswith(("di_", "do_"))
         ]
         # Measurements read better as tiles than condition words, so they come first
@@ -1272,6 +1239,13 @@ def append_trend_point(history: list, mapped: dict, *, max_points: int = 60) -> 
     for key in ("pressure", "flow", "tank_level", "temperature"):
         if key in scaled:
             point[key] = scaled.get(key)
+    # Delta Screw Driver SPM
+    if scaled.get("torque") is not None:
+        point["torque"] = scaled.get("torque")
+    if scaled.get("position_value") is not None:
+        point["screw_position"] = scaled.get("position_value")
+        if point.get("position") is None:
+            point["position"] = scaled.get("position_value")
     out = list(history or [])
     out.append(point)
     if len(out) > max_points:

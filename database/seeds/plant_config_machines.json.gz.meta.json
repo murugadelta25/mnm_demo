@@ -1,6 +1,6 @@
 {
   "filename": "plant_config_machines.json.gz",
-  "created_at": "2026-09-22T17:22:33.135047",
+  "created_at": "2026-09-22T19:55:55.993107",
   "kind": "config_machines_params",
   "tables": {
     "users": 7,
@@ -10,7 +10,7 @@
     "parts": 3,
     "part_qc_parameters": 0,
     "part_documents": 0,
-    "telemetry_tags": 48,
+    "telemetry_tags": 53,
     "tool_groups": 0,
     "tool_group_members": 0,
     "tool_stocks": 0,
@@ -20,6 +20,7 @@
   },
   "static_assets": [
     "factory/factory_logo_36c18cda.png",
+    "machines/machine_10_screw_driver.svg",
     "machines/machine_1_518084ae.PNG",
     "machines/machine_2_b64c8bad.PNG",
     "machines/machine_3_c3972792.PNG",
@@ -34,6 +35,6 @@
     "parts/TEST_part_8321c3bb.png",
     "parts/TEST_sketch_46d1886c.png"
   ],
-  "size_bytes": 6650,
+  "size_bytes": 6962,
   "note": "Lean seed: stations, machines, site_config, telemetry_tags, parts, users, email. SMTP password cleared \u2014 set Email Settings on target IPC. Static assets under database/seeds/static/ are copied by restore_demo_seed.py."
 }

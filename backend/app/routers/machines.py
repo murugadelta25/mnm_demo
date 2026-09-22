@@ -61,6 +61,7 @@ def _telemetry_ws_payload(machine_id: int, result: dict) -> dict:
             "shift_production": result.get("shift_production"),
             "status": result.get("status"),
             "pressing_result": result.get("pressing_result"),
+            "screw_driver": result.get("screw_driver"),
             "result_ready": result.get("result_ready"),
             "io_status": result.get("io_status"),
             "profile": result.get("profile"),
@@ -71,6 +72,7 @@ def _telemetry_ws_payload(machine_id: int, result: dict) -> dict:
             "trend": result.get("trend"),
             "email_alert_status": result.get("email_alert_status"),
             "modbus_kpi": result.get("modbus_kpi"),
+            "telemetry_module": result.get("telemetry_module"),
         },
     }
 

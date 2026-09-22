@@ -32,7 +32,7 @@ const PROFILE_META = {
   },
   spm: {
     title: 'Telemetry Tags — SPM',
-    hint: 'Map Node-RED readings[].name to Live Status / Cycle Result parameters for Special Purpose Machines.',
+    hint: 'Map Node-RED readings[].name to Live Status / Cycle Result. Screw Driver defaults: TorqueValue, PositionValue, Result (1=OK, 2=NG).',
     groups: { live: 'Live Status', result: 'Cycle Result' },
   },
   generic_plc: {

@@ -43,7 +43,7 @@ const TELEMETRY_PROFILE_HINTS = {
   'Servo Press': 'Telemetry profile: Modbus §8.4.2. Use Config Tags to map Node-RED readings to Live / Result screens. Equipment Overview shows the Machine Dashboard.',
   'Servo Linear Motor': 'Telemetry profile available. Use Config Tags to map Node-RED readings. Equipment Overview shows the Machine Dashboard.',
   PLC: 'Telemetry profile available. Use Config Tags to map Node-RED readings to Live / Result screens. Equipment Overview shows the Machine Dashboard.',
-  SPM: 'Special Purpose Machine. Use Config Tags to map Node-RED readings to Live / Result screens. Equipment Overview shows the Machine Dashboard.',
+  SPM: 'Special Purpose Machine (e.g. Delta Screw Driver). Config Tags map Node-RED TorqueValue / PositionValue / Result to Live / Cycle Result. Equipment Overview shows the Machine Dashboard.',
 };
 
 function supportsTagConfig(machineType) {

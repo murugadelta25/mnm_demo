@@ -1,0 +1,314 @@
+[
+  {
+    "id": "8f4faa404e6b791f",
+    "type": "tab",
+    "label": "Live_screw_driver",
+    "disabled": false,
+    "info": "SIE Screw Driver → POST PMS /api/machines/telemetry.\n\nECONNREFUSED = Node-RED host cannot TCP-connect to PMS_BASE.\nFix: on the Node-RED/Edge box run:\n  curl http://192.168.1.216:8010/health\nIf that fails, PMS IP is wrong from Edge, or firewall/routing blocks :8010.\n\nSame PC as PMS → use http://127.0.0.1:8010\nEdge on LAN   → use http://<PMS-Ethernet-IP>:8010",
+    "env": []
+  },
+  {
+    "id": "97bd6de1d4e68b1c",
+    "type": "sie-device-data",
+    "z": "8f4faa404e6b791f",
+    "name": "Screw_Driver",
+    "broker": "be0bd145e8a8a8f9",
+    "prefetch": 0,
+    "noAck": true,
+    "exchangeName": "message-bus",
+    "exchangeType": "topic",
+    "exchangeRoutingKey": "eda.data.edgexevent.#.7c2fde7c-48b6-475a-98df-bafcc71c6d0d.#",
+    "exchangeDurable": true,
+    "queueName": "",
+    "queueExclusive": true,
+    "queueDurable": false,
+    "queueAutoDelete": true,
+    "headers": "{}",
+    "device": "7c2fde7c-48b6-475a-98df-bafcc71c6d0d",
+    "x": 110,
+    "y": 420,
+    "wires": [
+      [
+        "ca2113a22493336a",
+        "ae29c95b153e3b8a"
+      ]
+    ]
+  },
+  {
+    "id": "ca2113a22493336a",
+    "type": "debug",
+    "z": "8f4faa404e6b791f",
+    "name": "screw_driver raw",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 330,
+    "y": 360,
+    "wires": []
+  },
+  {
+    "id": "ae29c95b153e3b8a",
+    "type": "function",
+    "z": "8f4faa404e6b791f",
+    "name": "cfg PMS URL + device",
+    "func": "// ===== EDIT THESE FOR YOUR LAN =====\n// Must be reachable FROM THIS NODE-RED HOST (Edge), not only your browser.\n// Test on Edge:  curl http://<PMS_IP>:8010/health\n// ECONNREFUSED → wrong IP, PMS down, or firewall blocking :8010\n//\n// Same PC as PMS:  http://127.0.0.1:8010\n// PMS LAN PC:      http://192.168.1.216:8010\nconst PMS_BASE = 'http://192.168.1.216:8010';\nconst DEVICE_NAME = 'Screw Driver';\nconst DEVICE_UUID = '7c2fde7c-48b6-475a-98df-bafcc71c6d0d';\nconst MACHINE_ID = null; // set to number to force match, else null\n// ====================================\n\nmsg.pmsBase = String(PMS_BASE).replace(/\\/$/, '');\nmsg.deviceName = DEVICE_NAME;\nmsg.deviceUuid = DEVICE_UUID;\nif (MACHINE_ID !== null && MACHINE_ID !== undefined) msg.machineId = MACHINE_ID;\nnode.status({ fill: 'blue', shape: 'dot', text: msg.pmsBase });\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 320,
+    "y": 440,
+    "wires": [
+      [
+        "afc4015669e17b22"
+      ]
+    ]
+  },
+  {
+    "id": "afc4015669e17b22",
+    "type": "function",
+    "z": "8f4faa404e6b791f",
+    "name": "map live → PMS telemetry",
+    "func": "// Forward LIVE SIE/EdgeX Screw Driver readings to PMS (no simulation).\nconst src = msg.payload || {};\nconst incoming = Array.isArray(src.readings) ? src.readings : [];\nif (!incoming.length) {\n    node.status({ fill: 'yellow', shape: 'ring', text: 'no readings' });\n    return null;\n}\n\nfunction stripType(name) {\n    let s = String(name || '').trim();\n    for (const sep of [';', ':']) {\n        if (s.indexOf(sep) >= 0) {\n            s = s.split(sep, 1)[0].trim();\n            break;\n        }\n    }\n    return s;\n}\n\nconst origin = Number(src.origin) || Date.now();\nconst byName = {};\nlet torque = null;\nlet position = null;\nlet result = null;\nlet runningStatus = null;\n\nfor (const r of incoming) {\n    if (!r || r.name == null) continue;\n    const name = String(r.name);\n    let value = r.value;\n    if (value === undefined || value === null) value = '';\n    value = String(value);\n    byName[name] = {\n        name: name,\n        value: value,\n        origin: Number(r.origin) || origin\n    };\n    const base = stripType(name).toLowerCase().replace(/[\\s_]+/g, '');\n    if (base === 'torquevalue' || base === 'torque') torque = value;\n    if (base === 'positionvalue' || base === 'position') position = value;\n    if (base === 'result') result = value;\n    if (base === 'runningstatus' || base === 'runstatus') runningStatus = value;\n}\n\nif (!byName['device_type;String'] && !byName['device_type'] && !byName['device type;String']) {\n    byName['device_type;String'] = {\n        name: 'device_type;String',\n        value: 'ScrewDriver',\n        origin: origin\n    };\n}\n\nconst readings = Object.keys(byName).map(k => byName[k]);\n\nconst body = {\n    id: src.id || ('screw-' + origin),\n    syncBy: src.syncBy || 'MODBUS',\n    deviceName: msg.deviceName || src.deviceName || 'Screw_Driver',\n    device: msg.deviceUuid || src.device,\n    origin: origin,\n    readings: readings,\n    replaceReadings: true\n};\nif (msg.machineId) body.machine_id = msg.machineId;\n\nmsg.payload = body;\nmsg.headers = { 'Content-Type': 'application/json' };\nmsg.url = msg.pmsBase + '/api/machines/telemetry';\nmsg.method = 'POST';\n\nnode.status({\n    fill: 'green',\n    shape: 'dot',\n    text: 'T=' + (torque != null ? torque : '?') +\n        ' P=' + (position != null ? position : '?') +\n        ' R=' + (result != null ? result : '?') +\n        ' S=' + (runningStatus != null ? runningStatus : '?') + ' -> PMS'\n});\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 510,
+    "y": 520,
+    "wires": [
+      [
+        "9658a21bcd347511"
+      ]
+    ]
+  },
+  {
+    "id": "9658a21bcd347511",
+    "type": "delay",
+    "z": "8f4faa404e6b791f",
+    "name": "max 1 POST / sec",
+    "pauseType": "rate",
+    "timeout": "5",
+    "timeoutUnits": "seconds",
+    "rate": "1",
+    "nbRateUnits": "1",
+    "rateUnits": "second",
+    "randomFirst": "1",
+    "randomLast": "5",
+    "randomUnits": "seconds",
+    "drop": true,
+    "allowrate": false,
+    "outputs": 1,
+    "x": 750,
+    "y": 520,
+    "wires": [
+      [
+        "082d4626021baeb9",
+        "4d239399b1039ca0"
+      ]
+    ]
+  },
+  {
+    "id": "4d239399b1039ca0",
+    "type": "debug",
+    "z": "8f4faa404e6b791f",
+    "name": "payload out",
+    "active": false,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 970,
+    "y": 440,
+    "wires": []
+  },
+  {
+    "id": "082d4626021baeb9",
+    "type": "http request",
+    "z": "8f4faa404e6b791f",
+    "name": "POST /api/machines/telemetry",
+    "method": "use",
+    "ret": "obj",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": true,
+    "headers": [],
+    "x": 1020,
+    "y": 520,
+    "wires": [
+      [
+        "cfd43844aa2af506"
+      ]
+    ]
+  },
+  {
+    "id": "cfd43844aa2af506",
+    "type": "function",
+    "z": "8f4faa404e6b791f",
+    "name": "POST result",
+    "func": "const code = msg.statusCode || 0;\nconst body = msg.payload;\nconst url = msg.url || '';\nconst errStr = String((msg.error && (msg.error.message || msg.error)) || body || '');\nconst refused = /ECONNREFUSED/i.test(errStr) || /ECONNREFUSED/i.test(JSON.stringify(body || {}));\n\nif (code >= 200 && code < 300 && body && typeof body === 'object') {\n    const scaled = body.scaled || {};\n    node.status({\n        fill: 'green',\n        shape: 'dot',\n        text: 'ok T=' + (scaled.torque != null ? scaled.torque : '-') +\n            ' P=' + (scaled.position_value != null ? scaled.position_value : '-')\n    });\n} else if (refused) {\n    node.status({\n        fill: 'red',\n        shape: 'ring',\n        text: ('ECONNREFUSED ' + url).slice(0, 60)\n    });\n} else {\n    const detail = (body && body.detail) ? String(body.detail).slice(0, 36) : errStr.slice(0, 36);\n    node.status({ fill: 'red', shape: 'ring', text: ('fail ' + code + ' ' + detail).slice(0, 60) });\n}\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 1280,
+    "y": 520,
+    "wires": [
+      [
+        "305a88f4601f9e55"
+      ]
+    ]
+  },
+  {
+    "id": "305a88f4601f9e55",
+    "type": "debug",
+    "z": "8f4faa404e6b791f",
+    "name": "PMS ACK",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "true",
+    "targetType": "full",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 1460,
+    "y": 520,
+    "wires": []
+  },
+  {
+    "id": "sdhealthinj001",
+    "type": "inject",
+    "z": "8f4faa404e6b791f",
+    "name": "test PMS health",
+    "props": [
+      {
+        "p": "payload"
+      }
+    ],
+    "repeat": "",
+    "crontab": "",
+    "once": false,
+    "onceDelay": 0.1,
+    "topic": "",
+    "payload": "",
+    "payloadType": "date",
+    "x": 150,
+    "y": 220,
+    "wires": [
+      [
+        "sdhealthcfg001"
+      ]
+    ]
+  },
+  {
+    "id": "sdhealthcfg001",
+    "type": "function",
+    "z": "8f4faa404e6b791f",
+    "name": "GET /health",
+    "func": "// Same PMS_BASE as cfg node — keep in sync\nconst PMS_BASE = 'http://192.168.1.216:8010';\nmsg.method = 'GET';\nmsg.url = String(PMS_BASE).replace(/\\/$/, '') + '/health';\nmsg.headers = {};\nmsg.payload = {};\nnode.status({ fill: 'blue', shape: 'ring', text: msg.url });\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 370,
+    "y": 220,
+    "wires": [
+      [
+        "sdhealthhttp001"
+      ]
+    ]
+  },
+  {
+    "id": "sdhealthhttp001",
+    "type": "http request",
+    "z": "8f4faa404e6b791f",
+    "name": "GET health",
+    "method": "use",
+    "ret": "obj",
+    "paytoqs": "ignore",
+    "url": "",
+    "tls": "",
+    "persist": false,
+    "proxy": "",
+    "insecureHTTPParser": false,
+    "authType": "",
+    "senderr": true,
+    "headers": [],
+    "x": 560,
+    "y": 220,
+    "wires": [
+      [
+        "sdhealthres001"
+      ]
+    ]
+  },
+  {
+    "id": "sdhealthres001",
+    "type": "function",
+    "z": "8f4faa404e6b791f",
+    "name": "health result",
+    "func": "const code = msg.statusCode || 0;\nconst body = msg.payload;\nconst errStr = String((msg.error && (msg.error.message || msg.error)) || '');\nif (code >= 200 && code < 300) {\n    node.status({ fill: 'green', shape: 'dot', text: 'PMS reachable ' + code });\n} else if (/ECONNREFUSED/i.test(errStr) || /ECONNREFUSED/i.test(String(body))) {\n    node.status({ fill: 'red', shape: 'ring', text: 'ECONNREFUSED — Edge cannot reach PMS_BASE' });\n} else {\n    node.status({ fill: 'red', shape: 'ring', text: ('fail ' + code + ' ' + errStr).slice(0, 50) });\n}\nreturn msg;",
+    "outputs": 1,
+    "timeout": 0,
+    "noerr": 0,
+    "initialize": "",
+    "finalize": "",
+    "libs": [],
+    "x": 760,
+    "y": 220,
+    "wires": [
+      [
+        "sdhealthdbg001"
+      ]
+    ]
+  },
+  {
+    "id": "sdhealthdbg001",
+    "type": "debug",
+    "z": "8f4faa404e6b791f",
+    "name": "health ACK",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "tostatus": false,
+    "complete": "true",
+    "targetType": "full",
+    "statusVal": "",
+    "statusType": "auto",
+    "x": 950,
+    "y": 220,
+    "wires": []
+  },
+  {
+    "id": "be0bd145e8a8a8f9",
+    "type": "broker-config",
+    "name": "",
+    "host": "rabbitmq.eda",
+    "port": "5672",
+    "vhost": "",
+    "tls": false,
+    "credsFromSettings": false
+  }
+]

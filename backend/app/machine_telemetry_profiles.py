@@ -117,7 +117,8 @@ TELEMETRY_PROFILES: dict[str, dict[str, Any]] = {
         ],
         "registers": {},
         "how_to_extend": (
-            "Machine Config → select type SPM → Config Tags."
+            "Machine Config → select type SPM → Config Tags. "
+            "Screw Driver Edge tags: TorqueValue, PositionValue, Result, device_type."
         ),
     },
     "generic_plc": {

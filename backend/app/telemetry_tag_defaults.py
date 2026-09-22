@@ -145,9 +145,60 @@ LINEAR_SERVO_MOTOR_TAGS: list[dict[str, Any]] = [
      "group": "live", "note": "Read · accumulated run time"},
 ]
 
+# -------------------------------------------------------------- Delta Screw Driver (SPM)
+# EdgeX / Node-RED publishes TorqueValue, PositionValue, Result, device_type=ScrewDriver.
+# Keys deliberately avoid live_position / live_force so Current Values builds SPM tiles
+# (Torque / Position / Result) instead of the Servo Press Position–Force–Velocity layout.
+SCREW_DRIVER_SPM_TAGS: list[dict[str, Any]] = [
+    {
+        "key": "torque",
+        "item": "Torque",
+        "nodered_name": "TorqueValue",
+        "modbus": None,
+        "eip_pn": None,
+        "group": "live",
+        "unit": "Nm",
+        "aliases": ["TorqueValue", "torque_value", "Torque Value", "torque"],
+        "note": "Delta ECM screwdriver torque — Edge Int16 milli-Nm; UI divides by 1000 for Nm",
+    },
+    {
+        "key": "position_value",
+        "item": "Position",
+        "nodered_name": "PositionValue",
+        "modbus": None,
+        "eip_pn": None,
+        "group": "live",
+        "unit": "°",
+        "aliases": ["PositionValue", "position_value", "Position Value"],
+        "note": "Delta ECM screwdriver live position / angle in degrees (raw Int16 from Edge)",
+    },    {
+        "key": "running_status",
+        "item": "Running Status",
+        "nodered_name": "RunningStatus",
+        "modbus": None,
+        "eip_pn": None,
+        "group": "live",
+        "unit": "",
+        "aliases": ["RunningStatus", "running_status", "Running Status"],
+        "note": "4=Ready · 8=Running · 5=Ready and OK — spin animation only when 8",
+    },
+    {
+        "key": "pressing_result",
+        "item": "Result",
+        "nodered_name": "Result",
+        "modbus": None,
+        "eip_pn": None,
+        "group": "result",
+        "unit": "",
+        "aliases": ["Result", "Screw Result", "Tightening Result"],
+        "note": "Cycle result · 1 = OK · 2 = NG (same codes as press Pressing Result)",
+    },
+]
+
 PROFILE_DEFAULT_TAGS: dict[str, list[dict[str, Any]]] = {
     "generic_plc": AH_PLC_KIT_TAGS,
     "servo_linear_motor": LINEAR_SERVO_MOTOR_TAGS,
+    "spm": SCREW_DRIVER_SPM_TAGS,
 }
 
 

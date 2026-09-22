@@ -4,6 +4,7 @@ Persist / serve machine telemetry snapshots (Node-RED Modbus → Servo Press UI)
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
@@ -126,6 +127,11 @@ def _loads(raw, default):
         return default
 
 
+def _norm_device_token(value: Any) -> str:
+    """Collapse name noise so Screw_Driver matches 'Screw Driver'."""
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
 def _resolve_machine(db: Session, *, machine_id: Optional[int], device_name: Optional[str], device_uuid: Optional[str]) -> Optional[Machine]:
     if machine_id:
         m = db.query(Machine).filter(Machine.id == int(machine_id)).first()
@@ -152,29 +158,59 @@ def _resolve_machine(db: Session, *, machine_id: Optional[int], device_name: Opt
         m = db.query(Machine).filter(Machine.name == name).first()
         if m:
             return m
-        # Case-insensitive / partial for "Servo press"
+        name_norm = _norm_device_token(name)
+        # Case-insensitive / underscore-vs-space for "Screw_Driver" ↔ "Screw Driver"
         for cand in db.query(Machine).all():
-            if (cand.name or "").strip().lower() == name.lower():
+            cand_name = (cand.name or "").strip()
+            if cand_name.lower() == name.lower():
                 return cand
-            if name.lower() in (cand.name or "").lower() or (cand.name or "").lower() in name.lower():
-                if (cand.machine_type or "").lower().find("servo") >= 0 or "press" in (cand.name or "").lower():
-                    return cand
-        # Last resort: any Servo Press typed machine when deviceName mentions press
-        if "press" in name.lower():
+            if name_norm and _norm_device_token(cand_name) == name_norm:
+                return cand
+        # Partial match only within the same machine family (never Press ↔ PLC ↔ SPM)
+        for cand in db.query(Machine).all():
+            cand_name = (cand.name or "").strip()
+            if not (name.lower() in cand_name.lower() or cand_name.lower() in name.lower()):
+                continue
+            mtype = (cand.machine_type or "").lower()
+            if "press" in name.lower() and ("servo" in mtype and "press" in mtype):
+                return cand
+            if "screw" in name.lower() and ("spm" in mtype or "screw" in cand_name.lower()):
+                return cand
+            if ("plc" in name.lower() or "ah" in name.lower()) and "plc" in mtype:
+                return cand
+            if "linear" in name.lower() and "linear" in mtype:
+                return cand
+        # Last resort by deviceName hint — still family-scoped
+        if "press" in name.lower() and "screw" not in name.lower():
             return (
                 db.query(Machine)
                 .filter(Machine.machine_type.ilike("%Servo Press%"))
+                .first()
+            )
+        if "screw" in name.lower():
+            return (
+                db.query(Machine)
+                .filter(Machine.machine_type.ilike("%SPM%"))
                 .first()
             )
     return None
 
 
 def _map_readings_for_machine(db: Session, readings: list, machine: Optional[Machine] = None) -> dict:
+    """
+    Map Node-RED readings using only the machine's telemetry family module
+    (Servo Press | AH/PLC | Linear Motor | SPM Screw Driver) — never merge families.
+    """
     profile_id = profile_id_for_machine_type(machine.machine_type if machine else None)
     try:
-        registers, aliases = get_registers_and_aliases(db, profile_id=profile_id)
-        return map_node_red_readings(readings, registers=registers, aliases=aliases)
+        from .telemetry_modules import aliases_for_profile, enrich_for_profile
+
+        registers, db_aliases = get_registers_and_aliases(db, profile_id=profile_id)
+        aliases = aliases_for_profile(profile_id, db_aliases)
+        mapped = map_node_red_readings(readings, registers=registers, aliases=aliases)
+        return enrich_for_profile(profile_id, mapped)
     except Exception:
+        # Legacy fallback: Servo Press built-ins only (no PLC/SPM alias merge)
         return map_node_red_readings(readings)
 
 
@@ -186,6 +222,8 @@ def derive_pms_status_from_modbus(mapped: dict) -> Optional[str]:
       Status* = 4..8     → running (Result ready — cycle active/finished)
       Status* = 0        → idle
       other non-zero     → running
+
+    SPM Screw Driver (telemetry_module=spm): |PositionValue|>0 or Result latched → running.
     """
     if not isinstance(mapped, dict):
         return None
@@ -196,6 +234,21 @@ def derive_pms_status_from_modbus(mapped: dict) -> Optional[str]:
             return "alarm"
     except (TypeError, ValueError):
         pass
+
+    # SPM Screw Driver — RunningStatus 8 = running; 4/5 = idle/ready
+    if mapped.get("telemetry_module") == "spm" or mapped.get("screw_driver"):
+        sd = mapped.get("screw_driver") if isinstance(mapped.get("screw_driver"), dict) else {}
+        if sd.get("is_running") or scaled.get("running_status") == 8:
+            try:
+                if float(scaled.get("running_status") or sd.get("running_status") or 0) == 8:
+                    return "running"
+            except (TypeError, ValueError):
+                if sd.get("is_running"):
+                    return "running"
+        result_info = mapped.get("pressing_result") or {}
+        if result_info.get("ok") is not None:
+            return "idle"
+        return "idle"
 
     status_info = mapped.get("status") or {}
     phase = status_info.get("phase")
@@ -344,27 +397,54 @@ def upsert_telemetry_from_node_red(db: Session, payload: dict, *, machine_id: Op
             mapped["email_alert_status"] = runtime.get("plc_email_status")
         history = append_history_snapshot(prev_history, mapped)
     else:
-        mapped = apply_sticky_production(mapped, prev_mapped=prev_mapped, runtime=prev_runtime)
-        entry_date = None
-        shift_id = None
-        try:
-            from .routers.config import _load_config
-            from .routers.machines import _resolve_shift_at_ts
-            cfg = _load_config(db)
-            shift_id, ed = _resolve_shift_at_ts(now_ist(), cfg)
-            entry_date = str(ed)
-        except Exception:
-            pass
-        runtime_seed = ensure_shift_production_baseline(
-            prev_runtime, mapped, entry_date=entry_date, shift_id=shift_id,
-        )
-        trend = append_trend_point(prev_trend, mapped)
-        alarms = append_alarm_events(prev_alarms, mapped, prev_alarm=prev_alarm)
-        history = append_history_snapshot(prev_history, mapped)
-        runtime = update_runtime_stats(runtime_seed, mapped)
-        runtime = ensure_shift_production_baseline(runtime, mapped, entry_date=entry_date, shift_id=shift_id)
-        mapped["shift_production"] = shift_production_from_runtime(mapped, runtime)
-        mapped["modbus_kpi"] = compute_modbus_kpi(mapped, runtime)
+        # SPM Screw Driver: Result OK/NG counters + OEE phases (isolated from press sticky path)
+        if profile_id == "spm":
+            from .telemetry_modules import (
+                apply_screw_driver_production,
+                update_screw_driver_runtime,
+            )
+            entry_date = None
+            shift_id = None
+            try:
+                from .routers.config import _load_config
+                from .routers.machines import _resolve_shift_at_ts
+                cfg = _load_config(db)
+                shift_id, ed = _resolve_shift_at_ts(now_ist(), cfg)
+                entry_date = str(ed)
+            except Exception:
+                pass
+            runtime = update_screw_driver_runtime(prev_runtime, mapped)
+            mapped = apply_screw_driver_production(mapped, runtime)
+            runtime = ensure_shift_production_baseline(
+                runtime, mapped, entry_date=entry_date, shift_id=shift_id,
+            )
+            trend = append_trend_point(prev_trend, mapped)
+            alarms = append_alarm_events(prev_alarms, mapped, prev_alarm=prev_alarm)
+            history = append_history_snapshot(prev_history, mapped)
+            mapped["shift_production"] = shift_production_from_runtime(mapped, runtime)
+            mapped["modbus_kpi"] = compute_modbus_kpi(mapped, runtime)
+        else:
+            mapped = apply_sticky_production(mapped, prev_mapped=prev_mapped, runtime=prev_runtime)
+            entry_date = None
+            shift_id = None
+            try:
+                from .routers.config import _load_config
+                from .routers.machines import _resolve_shift_at_ts
+                cfg = _load_config(db)
+                shift_id, ed = _resolve_shift_at_ts(now_ist(), cfg)
+                entry_date = str(ed)
+            except Exception:
+                pass
+            runtime_seed = ensure_shift_production_baseline(
+                prev_runtime, mapped, entry_date=entry_date, shift_id=shift_id,
+            )
+            trend = append_trend_point(prev_trend, mapped)
+            alarms = append_alarm_events(prev_alarms, mapped, prev_alarm=prev_alarm)
+            history = append_history_snapshot(prev_history, mapped)
+            runtime = update_runtime_stats(runtime_seed, mapped)
+            runtime = ensure_shift_production_baseline(runtime, mapped, entry_date=entry_date, shift_id=shift_id)
+            mapped["shift_production"] = shift_production_from_runtime(mapped, runtime)
+            mapped["modbus_kpi"] = compute_modbus_kpi(mapped, runtime)
 
     if len(history) > 80:
         history = history[-80:]
@@ -513,7 +593,14 @@ def public_telemetry(
     is_plc = profile_id == "generic_plc"
 
     if not row:
-        skeleton = map_node_red_readings([], registers=profile["registers"] or {}, aliases={})
+        from .telemetry_modules import aliases_for_profile, enrich_for_profile
+
+        skeleton = map_node_red_readings(
+            [],
+            registers=profile["registers"] or {},
+            aliases=aliases_for_profile(profile_id or "", {}),
+        )
+        skeleton = enrich_for_profile(profile_id or "", skeleton)
         if is_plc:
             return {
                 "machine_id": machine.id if machine else None,
@@ -563,7 +650,11 @@ def public_telemetry(
             if isinstance(readings, list):
                 fresh = _map_readings_for_machine(db, readings, machine)
                 if not is_plc:
-                    fresh = apply_sticky_production(fresh, prev_mapped=mapped, runtime=runtime)
+                    if profile_id == "spm":
+                        from .telemetry_modules import apply_screw_driver_production
+                        fresh = apply_screw_driver_production(fresh, runtime)
+                    else:
+                        fresh = apply_sticky_production(fresh, prev_mapped=mapped, runtime=runtime)
                     try:
                         from .routers.config import _load_config
                         from .routers.machines import _resolve_shift_at_ts
@@ -652,6 +743,7 @@ def public_telemetry(
         "param_rows": mapped.get("param_rows") or [],
         "status": mapped.get("status") or {},
         "pressing_result": mapped.get("pressing_result") or {},
+        "screw_driver": mapped.get("screw_driver"),
         "scaled": mapped.get("scaled") or {},
         "raw": mapped.get("raw") or {},
         "result_ready": mapped.get("result_ready"),
@@ -661,6 +753,7 @@ def public_telemetry(
         "modbus_kpi": modbus_kpi,
         "registers": mapped.get("registers") or profile["registers"],
         "profile": profile["profile"],
+        "telemetry_module": mapped.get("telemetry_module") or profile_id,
     }
 
 
