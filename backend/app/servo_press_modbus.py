@@ -55,7 +55,10 @@ SERVO_PRESS_REGISTERS = {
         "scale": 1,
         "unit": "",
         "group": "live",
-        "note": "Status of machine (3=Pressing; 4-8=Result ready - read Pressing Result)",
+        "note": (
+            "0 Not Activated · 1 Activating · 2 Waiting · 3 Pressing · "
+            "4 OK · 5–8 NG (force/position limits)"
+        ),
     },
     "live_mode": {
         "item": "Live Mode",
@@ -176,7 +179,27 @@ SERVO_PRESS_REGISTERS = {
         "scale": 1,
         "unit": "",
         "group": "result",
-        "note": "OK or NG based on the recipe setting",
+        "note": "OK/NG latch; Status* 4–8 also encodes the outcome",
+    },
+    "pressed_position": {
+        "item": "Pressed Pos",
+        "modbus": "0x0258",
+        "eip_pn": "D600",
+        "type": "DW",
+        "scale": 0.001,
+        "unit": "mm",
+        "group": "result",
+        "note": "Last pressed position (HMI Pressed Result)",
+    },
+    "pressed_force": {
+        "item": "Pressed Force",
+        "modbus": "0x025C",
+        "eip_pn": "D604",
+        "type": "DW",
+        "scale": 0.1,
+        "unit": "kgf",
+        "group": "result",
+        "note": "Last pressed force (HMI Pressed Result)",
     },
     "pressed_position_step1": {
         "item": "Pressed position (Step 1)",
@@ -207,6 +230,26 @@ SERVO_PRESS_REGISTERS = {
         "unit": "mm",
         "group": "result",
         "note": "Pressed position of step 3 process",
+    },
+    "pressed_position_step4": {
+        "item": "Pressed position (Step 4)",
+        "modbus": "0x025E",
+        "eip_pn": "D606",
+        "type": "DW",
+        "scale": 0.001,
+        "unit": "mm",
+        "group": "result",
+        "note": "Pressed position of step 4 process",
+    },
+    "pressed_position_step5": {
+        "item": "Pressed position (Step 5)",
+        "modbus": "0x0260",
+        "eip_pn": "D608",
+        "type": "DW",
+        "scale": 0.001,
+        "unit": "mm",
+        "group": "result",
+        "note": "Pressed position of step 5 process",
     },
 }
 
@@ -262,12 +305,36 @@ _NAME_ALIASES = {
     "pressed position (step 1)": "pressed_position_step1",
     "pressed position step 1": "pressed_position_step1",
     "pressed_position_step1": "pressed_position_step1",
+    "pressed pos1": "pressed_position_step1",
+    "pressed_pos1": "pressed_position_step1",
+    "pressed pos": "pressed_position",
+    "pressed_pos": "pressed_position",
+    "pressed force": "pressed_force",
+    "pressed_force": "pressed_force",
+    "pressed force1": "pressed_force",
+    "pressed_force1": "pressed_force",
     "pressed position (step 2)": "pressed_position_step2",
     "pressed position step 2": "pressed_position_step2",
     "pressed_position_step2": "pressed_position_step2",
+    "pressed pos2": "pressed_position_step2",
+    "pressed_pos2": "pressed_position_step2",
     "pressed position (step 3)": "pressed_position_step3",
     "pressed position step 3": "pressed_position_step3",
     "pressed_position_step3": "pressed_position_step3",
+    "pressed pos3": "pressed_position_step3",
+    "pressed_pos3": "pressed_position_step3",
+    "pressed position (step 4)": "pressed_position_step4",
+    "pressed position step 4": "pressed_position_step4",
+    "pressed_position_step4": "pressed_position_step4",
+    "pressed_position_step_4": "pressed_position_step4",
+    "pressed pos4": "pressed_position_step4",
+    "pressed_pos4": "pressed_position_step4",
+    "pressed position (step 5)": "pressed_position_step5",
+    "pressed position step 5": "pressed_position_step5",
+    "pressed_position_step5": "pressed_position_step5",
+    "pressed_position_step_5": "pressed_position_step5",
+    "pressed pos5": "pressed_position_step5",
+    "pressed_pos5": "pressed_position_step5",
     "device type": "device_type",
     # AH PLC kit (Node-RED plcdata + coils M301–M316)
     "pressure": "pressure",
@@ -480,12 +547,101 @@ def build_plc_digital_io(readings: list, scaled: dict, raw_by_key: dict) -> dict
 
 def decode_status(code: Optional[float]) -> dict:
     """
-    Decode Status*1 (0x00CE).
-    Split display into phase + raw code so 'Result ready · code 5' is unambiguous:
-      3     → Pressing (in cycle; previous results clearing)
-      4–8   → Result ready (cycle finished; Pressing Result registers valid)
-      0     → Idle / Standby
+    Decode Servo Press Status* (0x00CE / Edge Status;Int32):
+
+      0 : Not Activated
+      1 : Activating
+      2 : Activation Complete and Waiting
+      3 : Pressing
+      4 : Pressing - OK
+      5 : NG , force is greater than Max limit
+      6 : NG , force is less than Min Limit
+      7 : NG , position is greater than the maximum limit
+      8 : NG , Position is less than the minimum limit
     """
+    table = {
+        0: {
+            "phase_label": "Not Activated",
+            "label": "Not Activated",
+            "phase": "idle",
+            "result_ready": False,
+            "ok": None,
+            "prompt": "Not activated",
+            "note": "Machine not activated.",
+        },
+        1: {
+            "phase_label": "Activating",
+            "label": "Activating",
+            "phase": "idle",
+            "result_ready": False,
+            "ok": None,
+            "prompt": "Activating…",
+            "note": "Activation in progress.",
+        },
+        2: {
+            "phase_label": "Activation Complete and Waiting",
+            "label": "Activation Complete and Waiting",
+            "phase": "idle",
+            "result_ready": False,
+            "ok": None,
+            "prompt": "Ready, please press the button",
+            "note": "Activation complete — waiting for press.",
+        },
+        3: {
+            "phase_label": "Pressing",
+            "label": "Pressing",
+            "phase": "pressing",
+            "result_ready": False,
+            "ok": None,
+            "prompt": "Pressing…",
+            "note": "Cycle in progress. Previous Pressing Result values may clear.",
+        },
+        4: {
+            "phase_label": "Pressing - OK",
+            "label": "Pressing - OK",
+            "phase": "result",
+            "result_ready": True,
+            "ok": True,
+            "prompt": "Pressing - OK",
+            "note": "Cycle finished OK. Pressing Result registers are valid.",
+        },
+        5: {
+            "phase_label": "NG, force > Max limit",
+            "label": "NG, force is greater than Max limit",
+            "phase": "result",
+            "result_ready": True,
+            "ok": False,
+            "prompt": "NG — force greater than Max limit",
+            "note": "NG: force exceeded Max Force limit.",
+        },
+        6: {
+            "phase_label": "NG, force < Min limit",
+            "label": "NG, force is less than Min Limit",
+            "phase": "result",
+            "result_ready": True,
+            "ok": False,
+            "prompt": "NG — force less than Min limit",
+            "note": "NG: force below Min Force limit.",
+        },
+        7: {
+            "phase_label": "NG, position > Max limit",
+            "label": "NG, position is greater than the maximum limit",
+            "phase": "result",
+            "result_ready": True,
+            "ok": False,
+            "prompt": "NG — position greater than maximum limit",
+            "note": "NG: pressed position above maximum limit.",
+        },
+        8: {
+            "phase_label": "NG, position < Min limit",
+            "label": "NG, Position is less than the minimum limit",
+            "phase": "result",
+            "result_ready": True,
+            "ok": False,
+            "prompt": "NG — position less than minimum limit",
+            "note": "NG: pressed position below minimum limit.",
+        },
+    }
     if code is None:
         return {
             "code": None,
@@ -494,66 +650,99 @@ def decode_status(code: Optional[float]) -> dict:
             "display": "—",
             "phase": "unknown",
             "result_ready": False,
+            "ok": None,
+            "prompt": None,
             "note": None,
         }
     c = int(code)
-    if c == 3:
+    row = table.get(c)
+    if not row:
         return {
             "code": c,
-            "phase_label": "Pressing",
-            "label": "Pressing",
-            "display": "Pressing | code 3",
-            "phase": "pressing",
+            "phase_label": f"Status {c}",
+            "label": f"Status {c}",
+            "display": f"Status | code {c}",
+            "phase": "other",
             "result_ready": False,
-            "note": "Cycle in progress. Previous Pressing Result values are cleared.",
-        }
-    if 4 <= c <= 8:
-        return {
-            "code": c,
-            "phase_label": "Result ready",
-            "label": "Result ready",
-            "display": f"Result ready | code {c}",
-            "phase": "result",
-            "result_ready": True,
-            "note": (
-                "Press finished (Status* is 4-8). "
-                "Read Total/Pass/NG, times, Alarm Code, Pressing result, pressed positions now. "
-                "Values clear when Status* returns to 3 (next press)."
-            ),
-        }
-    if c == 0:
-        return {
-            "code": c,
-            "phase_label": "Idle / Standby",
-            "label": "Idle / Standby",
-            "display": "Idle / Standby | code 0",
-            "phase": "idle",
-            "result_ready": False,
-            "note": "Machine idle. Live Status can be read anytime.",
+            "ok": None,
+            "prompt": f"Status {c}",
+            "note": None,
         }
     return {
         "code": c,
-        "phase_label": f"Status {c}",
-        "label": f"Status {c}",
-        "display": f"Status | code {c}",
-        "phase": "other",
-        "result_ready": False,
-        "note": None,
+        "phase_label": row["phase_label"],
+        "label": row["label"],
+        "display": f"{row['phase_label']} | code {c}",
+        "phase": row["phase"],
+        "result_ready": row["result_ready"],
+        "ok": row["ok"],
+        "prompt": row["prompt"],
+        "note": row["note"],
     }
 
 
 def decode_pressing_result(code: Optional[float]) -> dict:
+    """
+    Modbus Pressing result (0x0107) — and some Edge tags that reuse Status* codes:
+      0     → cleared / not latched
+      1     → OK
+      2     → NG
+      4–8   → same OK/NG meanings as Status* (never show the raw digit as Result)
+    Alarm Code is a separate register (004 = Emergency Stop) and must not appear here.
+    """
     if code is None:
-        return {"code": None, "label": "—", "ok": None}
+        return {"code": None, "label": "—", "ok": None, "reason": None}
     c = int(code)
-    # Common convention: 0/1 or 1=OK 2=NG — expose raw + heuristic
-    if c in (0, 1):
-        # Prefer 1=OK, 0=NG when binary; keep label explicit
-        ok = c == 1
-        return {"code": c, "label": "OK" if ok else "NG", "ok": ok}
+    if c == 0:
+        return {"code": 0, "label": "—", "ok": None, "reason": None}
+    if c == 1:
+        return {"code": 1, "label": "OK", "ok": True, "reason": None}
     if c == 2:
-        return {"code": c, "label": "NG", "ok": False}
-    return {"code": c, "label": str(c), "ok": None}
+        return {"code": 2, "label": "NG", "ok": False, "reason": None}
+    # Edge / HMI sometimes latch Status* 4–8 into the Pressing result word
+    from_status = decode_result_from_status(c)
+    if from_status:
+        return from_status
+    # Unknown codes: keep numeric code internally, never paint it as the Result label
+    return {"code": c, "label": "—", "ok": None, "reason": None}
+
+
+def decode_result_from_status(status_code: Optional[float]) -> Optional[dict]:
+    """Map Status* 4–8 onto an OK/NG pressing result for the HMI."""
+    if status_code is None:
+        return None
+    c = int(status_code)
+    if c == 4:
+        return {"code": 4, "label": "OK", "ok": True, "reason": "Pressing - OK"}
+    if c == 5:
+        return {
+            "code": 5,
+            "label": "NG",
+            "ok": False,
+            "reason": "Force greater than Max limit",
+        }
+    if c == 6:
+        return {
+            "code": 6,
+            "label": "NG",
+            "ok": False,
+            "reason": "Force less than Min limit",
+        }
+    if c == 7:
+        return {
+            "code": 7,
+            "label": "NG",
+            "ok": False,
+            "reason": "Position greater than maximum limit",
+        }
+    if c == 8:
+        return {
+            "code": 8,
+            "label": "NG",
+            "ok": False,
+            "reason": "Position less than minimum limit",
+        }
+    return None
 
 
 # Press keys that Machine Status renders with decoded phase / result labels
@@ -612,6 +801,9 @@ def map_node_red_readings(
             raw_by_key[key] = value
             continue
         meta = regs.get(key)
+        # DB tag catalogs may omit newer Edge names (Pressed Pos / Force) — keep built-in scale
+        if meta is None and key in SERVO_PRESS_REGISTERS:
+            meta = SERVO_PRESS_REGISTERS[key]
         raw_by_key[key] = value
         num = _to_number(value)
         if meta and num is not None:
@@ -623,6 +815,10 @@ def map_node_red_readings(
 
     status_info = decode_status(_to_number(raw_by_key.get("status")))
     result_info = decode_pressing_result(_to_number(raw_by_key.get("pressing_result")))
+    # Status* 4–8 encode OK/NG on this press — prefer that when the result register is cleared
+    from_status = decode_result_from_status(status_info.get("code"))
+    if from_status and (result_info.get("code") in (None, 0) or status_info.get("result_ready")):
+        result_info = from_status
     alarm = scaled.get("alarm_code")
     alarm_active = alarm is not None and float(alarm) != 0
 
@@ -667,13 +863,17 @@ def map_node_red_readings(
     # are omitted when the digital_io indicator panels are used instead.
     io_status: list[dict] = []
     if "status" in regs:
+        status_ok = status_info.get("ok")
+        if status_ok is None:
+            status_ok = status_info["phase"] in ("pressing", "result", "idle")
         io_status.append({
             "label": (regs["status"].get("item") or "Press Status"),
             "value": status_info.get("display") or status_info.get("label"),
             "phase_label": status_info.get("phase_label"),
             "code": status_info.get("code"),
-            "ok": status_info["phase"] in ("pressing", "result", "idle"),
+            "ok": status_ok,
             "note": status_info.get("note"),
+            "prompt": status_info.get("prompt"),
         })
     if "live_mode" in regs:
         io_status.append({
@@ -692,16 +892,30 @@ def map_node_red_readings(
             "ok": scaled.get("live_step") is not None,
         })
     if "pressing_result" in regs:
+        result_label = result_info.get("label") or "—"
+        if result_info.get("reason") and result_info.get("ok") is False:
+            result_label = f"{result_label} · {result_info['reason']}"
         io_status.append({
             "label": (regs["pressing_result"].get("item") or "Pressing Result"),
-            "value": result_info["label"],
-            "ok": result_info["ok"],
+            "value": result_label,
+            "ok": result_info.get("ok"),
         })
     if "alarm_code" in regs:
+        alarm_info = servo_press_alarm_info(alarm if alarm_active else 0)
+        if alarm_active:
+            alarm_value = f"{alarm_info.get('code_label')} · {alarm_info.get('message')}"
+        elif alarm is not None:
+            alarm_value = "No Alarm"
+        else:
+            alarm_value = None
         io_status.append({
             "label": (regs["alarm_code"].get("item") or "Alarm"),
-            "value": f"Code {int(alarm)}" if alarm_active else ("No Alarm" if alarm is not None else None),
+            "value": alarm_value,
             "ok": False if alarm_active else (True if alarm is not None else None),
+            "code": alarm_info.get("code") if alarm_active else 0,
+            "code_label": alarm_info.get("code_label") if alarm_active else "000",
+            "message": alarm_info.get("message") if alarm_active else "No Alarm",
+            "handling": alarm_info.get("handling") if alarm_active else None,
         })
     for key, meta in regs.items():
         if len(io_status) >= 5:
@@ -739,6 +953,14 @@ def map_node_red_readings(
                 display = status_info.get("display") or status_info.get("label")
             elif key == "pressing_result":
                 display = result_info["label"]
+            elif key == "alarm_code":
+                ainfo = servo_press_alarm_info(_to_number(raw_by_key.get("alarm_code")))
+                if ainfo.get("code") and ainfo.get("code") != 0:
+                    display = f"{ainfo.get('code_label')} · {ainfo.get('message')}"
+                elif ainfo.get("code") == 0:
+                    display = "No Alarm"
+                else:
+                    display = f"{val:g}" if isinstance(val, float) else str(val)
             else:
                 display = f"{val:g}" if isinstance(val, float) else str(val)
         param_rows.append({
@@ -849,6 +1071,51 @@ def apply_sticky_production(mapped: dict, prev_mapped: Optional[dict] = None, ru
                 break
     mapped["current"] = current
 
+    # Hold last Pressed Result only when this snapshot omitted the tag entirely.
+    # If Edge sent Pressed Pos / Force (even 0), always use the live scaled value.
+    prev_scaled = ((prev_mapped or {}).get("scaled") or {}) if isinstance(prev_mapped, dict) else {}
+    raw_now = mapped.get("raw") if isinstance(mapped.get("raw"), dict) else {}
+    result_info = dict(mapped.get("pressing_result") or {})
+    prev_result = ((prev_mapped or {}).get("pressing_result") or {}) if isinstance(prev_mapped, dict) else {}
+    def _result_latched(info: dict) -> bool:
+        """True when info is a real OK/NG latch (not cleared / not a raw digit)."""
+        if not isinstance(info, dict):
+            return False
+        if info.get("ok") is not None:
+            return True
+        label = str(info.get("label") or "").strip().upper()
+        return label in ("OK", "NG")
+
+    if phase == "pressing":
+        for clear_key in ("standby_time", "pressing_time", "production_time"):
+            cur_v = _num(scaled.get(clear_key))
+            if cur_v is None or cur_v == 0:
+                scaled[clear_key] = 0
+        if result_info.get("code") in (None, 0) or result_info.get("ok") is None:
+            mapped["pressing_result"] = {"code": 0, "label": "-", "ok": None, "reason": None}
+            result_info = mapped["pressing_result"]
+    elif not result_ready:
+        # Hold last OK/NG after Status returns to idle (HMI Pressed Result stays latched).
+        # Never treat Alarm Code as Result — only restore a prior OK/NG latch.
+        if not _result_latched(result_info) and _result_latched(prev_result):
+            mapped["pressing_result"] = dict(prev_result)
+            result_info = mapped["pressing_result"]
+        for hold_key in (
+            "pressed_position", "pressed_force",
+            "pressed_position_step1", "pressed_position_step2", "pressed_position_step3",
+            "pressed_position_step4", "pressed_position_step5",
+            "standby_time", "pressing_time", "production_time",
+        ):
+            # Live Edge snapshot included this register → never freeze prior cycle
+            if hold_key in raw_now:
+                continue
+            cur_v = _num(scaled.get(hold_key))
+            prev_v = _num(prev_scaled.get(hold_key))
+            if (cur_v is None or cur_v == 0) and prev_v is not None and prev_v != 0:
+                scaled[hold_key] = prev_v
+
+    mapped["scaled"] = scaled
+
     # Keep Parameters / Pressing Result table in sync with sticky counters
     for row in mapped.get("param_rows") or []:
         key = row.get("key")
@@ -865,6 +1132,25 @@ def apply_sticky_production(mapped: dict, prev_mapped: Optional[dict] = None, ru
             ctv = current["cycle_time_sec"]
             row["scaled"] = ctv
             row["value"] = f"{ctv:g} s"
+        elif key == "pressing_result" and result_info.get("label"):
+            label = result_info.get("label")
+            if result_info.get("reason") and result_info.get("ok") is False:
+                label = f"{label} · {result_info['reason']}"
+            row["scaled"] = result_info.get("code")
+            row["value"] = label
+        elif key in (
+            "pressed_position", "pressed_force",
+            "pressed_position_step1", "pressed_position_step2", "pressed_position_step3",
+            "pressed_position_step4", "pressed_position_step5",
+            "standby_time", "pressing_time",
+        ) and scaled.get(key) is not None:
+            val = scaled.get(key)
+            unit = row.get("unit") or ""
+            row["scaled"] = val
+            if isinstance(val, (int, float)):
+                row["value"] = f"{val:g} {unit}".strip()
+            else:
+                row["value"] = str(val)
     return mapped
 
 
@@ -993,13 +1279,134 @@ def append_trend_point(history: list, mapped: dict, *, max_points: int = 60) -> 
     return out
 
 
-def _alarm_label(code: Optional[float]) -> str:
+# Manufacturer alarm table §9.1 (Servo Press Alarm Code 001–012)
+SERVO_PRESS_ALARM_CATALOG = {
+    1: {
+        "message": "Light Curtain or Safety Signal Alarm",
+        "handling": (
+            "1. Remove any obstructions blocking the light curtain. After resetting, resume the pressing operation.\n"
+            "2. The safety signal must be under external control. After resetting the safety system, resume the pressing operation."
+        ),
+    },
+    2: {
+        "message": "Negative Limit Error",
+        "handling": "Initialize the machine after resetting.",
+    },
+    3: {
+        "message": "Positive Limit Error",
+        "handling": "Initialize the machine after resetting.",
+    },
+    4: {
+        "message": "Emergency Stop",
+        "handling": "Release the emergency stop and initialize the machine after resetting.",
+    },
+    5: {
+        "message": "Overloaded, please check the velocity or abnormal collision",
+        "handling": "Reconfirm the pressing parameters to prevent the pressing force from exceeding the limit.",
+    },
+    6: {
+        "message": "Please release ON when switching mode",
+        "handling": "Switch off the internal/external control knob after deactivation.",
+    },
+    7: {
+        "message": "Hits workpiece in High-speed section",
+        "handling": (
+            "When moving to the ready position, the pressure exceeds the machine's protection threshold "
+            "(default is 10% of the maximum pressure):\n"
+            "1. Check if the pressing parameter [Ready Position] is set appropriately.\n"
+            "2. Check for any material stacking issues.\n"
+            "3. Check the mechanism beneath the press load cell for linearity and ensure there is no "
+            "damping or resistance during vertical movement."
+        ),
+    },
+    8: {
+        "message": "Currency overloaded, please check the velocity or abnormal collision",
+        "handling": (
+            "Motor Current Exceeds 100%:\n"
+            "1. Reconfirm the pressing parameters to avoid excessive pressing force.\n"
+            "2. Ensure the motor brake is released.\n"
+            "3. Check for foreign objects when moving to the working position.\n"
+            "4. Verify the lower fixture is not too heavy; after an emergency stop or light curtain "
+            "trigger, inertial force may cause motor overload."
+        ),
+    },
+    9: {
+        "message": "Motor Alarm. If reset is not working, please restart the servo press",
+        "handling": "Refer to Chapter 9.2 Motor Alarm.",
+    },
+    10: {
+        "message": "Servo Communication Error",
+        "handling": (
+            "RS485 Communication Interrupted Between Servo and PLC:\n"
+            "1. Power cycle the system. If the issue persists, contact the distributor.\n"
+            "2. For electric cylinder types, check whether the wiring between the PLC and the driver "
+            "is loose or incorrectly connected."
+        ),
+    },
+    11: {
+        "message": "Light curtain alarm, please reset then go home",
+        "handling": (
+            "The light curtain was triggered accidentally. After resetting, the spindle returns to "
+            "the working origin and waits for the pressing signal again."
+        ),
+    },
+    12: {
+        "message": "Two hand buttons released, please reset then go home",
+        "handling": (
+            "Release the two-hand switch. After resetting, the spindle returns to the working origin "
+            "and waits for the pressing signal again."
+        ),
+    },
+}
+
+
+def servo_press_alarm_info(code: Optional[float]) -> dict:
+    """Return {code, code_label, message, handling} for Alarm Code 1–12."""
     if code is None:
-        return "—"
-    c = int(code)
+        return {
+            "code": None,
+            "code_label": "-",
+            "message": "No Alarm",
+            "handling": None,
+        }
+    try:
+        c = int(float(code))
+    except (TypeError, ValueError):
+        return {
+            "code": None,
+            "code_label": "-",
+            "message": "No Alarm",
+            "handling": None,
+        }
     if c == 0:
+        return {
+            "code": 0,
+            "code_label": "000",
+            "message": "No Alarm",
+            "handling": None,
+        }
+    row = SERVO_PRESS_ALARM_CATALOG.get(c)
+    code_label = f"{c:03d}"
+    if not row:
+        return {
+            "code": c,
+            "code_label": code_label,
+            "message": f"Alarm Code {code_label}",
+            "handling": None,
+        }
+    return {
+        "code": c,
+        "code_label": code_label,
+        "message": row["message"],
+        "handling": row["handling"],
+    }
+
+
+def _alarm_label(code: Optional[float]) -> str:
+    info = servo_press_alarm_info(code)
+    if info.get("code") in (None, 0):
         return "No Alarm"
-    return f"Alarm Code {c}"
+    return f"{info['code_label']} · {info['message']}"
 
 
 PLC_THRESHOLD_TAGS = (
@@ -1201,11 +1608,15 @@ def append_alarm_events(
 
     if prev is None:
         if code != 0:
+            info = servo_press_alarm_info(code)
             out.append({
                 "ts": ts,
                 "t": now.strftime("%H:%M:%S"),
                 "code": int(code),
-                "label": _alarm_label(code),
+                "code_label": info.get("code_label"),
+                "label": info.get("message") or _alarm_label(code),
+                "message": info.get("message"),
+                "handling": info.get("handling"),
                 "event": "active",
                 "status": status,
                 "pressing_result": result,
@@ -1213,22 +1624,30 @@ def append_alarm_events(
             })
     elif code != prev:
         if code != 0:
+            info = servo_press_alarm_info(code)
             out.append({
                 "ts": ts,
                 "t": now.strftime("%H:%M:%S"),
                 "code": int(code),
-                "label": _alarm_label(code),
+                "code_label": info.get("code_label"),
+                "label": info.get("message") or _alarm_label(code),
+                "message": info.get("message"),
+                "handling": info.get("handling"),
                 "event": "raised",
                 "status": status,
                 "pressing_result": result,
                 "active": True,
             })
         else:
+            info = servo_press_alarm_info(prev)
             out.append({
                 "ts": ts,
                 "t": now.strftime("%H:%M:%S"),
                 "code": int(prev),
-                "label": _alarm_label(prev),
+                "code_label": info.get("code_label"),
+                "label": info.get("message") or _alarm_label(prev),
+                "message": info.get("message"),
+                "handling": info.get("handling"),
                 "event": "cleared",
                 "status": status,
                 "pressing_result": result,

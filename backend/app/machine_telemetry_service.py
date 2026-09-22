@@ -246,6 +246,14 @@ def upsert_telemetry_from_node_red(db: Session, payload: dict, *, machine_id: Op
         incoming = []
     device_name = payload.get("deviceName") or payload.get("device_name")
     device_uuid = payload.get("device") or payload.get("device_uuid")
+    replace_readings = bool(
+        payload.get("replaceReadings")
+        or payload.get("replace_readings")
+    )
+    reset_log = bool(
+        payload.get("resetLog")
+        or payload.get("reset_log")
+    )
     m = _resolve_machine(
         db,
         machine_id=machine_id or payload.get("machine_id"),
@@ -273,7 +281,12 @@ def upsert_telemetry_from_node_red(db: Session, payload: dict, *, machine_id: Op
     prev_readings = _loads(row.readings_json if row else None, [])
     if not isinstance(prev_readings, list):
         prev_readings = []
-    readings = merge_readings_by_name(prev_readings, incoming)
+    # Live Edge full snapshots must replace sticky merge residue (old simulator tags).
+    # AH PLC still merges partial analog / DI / DO posts unless replaceReadings is set.
+    if replace_readings:
+        readings = list(incoming)
+    else:
+        readings = merge_readings_by_name(prev_readings, incoming)
 
     mapped = _map_readings_for_machine(db, readings, m)
 
@@ -281,10 +294,18 @@ def upsert_telemetry_from_node_red(db: Session, payload: dict, *, machine_id: Op
     prev_scaled = (prev_mapped.get("scaled") or {}) if isinstance(prev_mapped, dict) else {}
     prev_alarm = prev_scaled.get("alarm_code")
 
-    prev_trend = _loads(row.trend_json if row else None, [])
-    prev_alarms = (_loads(row.alarms_json if row else None, []) or [])[-80:]
-    prev_history = (_loads(row.history_json if row else None, []) or [])[-80:]
-    prev_runtime = _loads(row.runtime_json if row else None, {})
+    if reset_log:
+        prev_trend = []
+        prev_alarms = []
+        prev_history = []
+        prev_runtime = {}
+        prev_mapped = {}
+        prev_alarm = None
+    else:
+        prev_trend = _loads(row.trend_json if row else None, [])
+        prev_alarms = (_loads(row.alarms_json if row else None, []) or [])[-80:]
+        prev_history = (_loads(row.history_json if row else None, []) or [])[-80:]
+        prev_runtime = _loads(row.runtime_json if row else None, {})
 
     incoming_has_analogs = _incoming_has_process_analogs(incoming)
 
@@ -524,7 +545,6 @@ def public_telemetry(
             "current": {},
             "current_tiles": skeleton.get("current_tiles") or [],
             "io_status": skeleton.get("io_status") or [],
-            "digital_io": skeleton.get("digital_io") or {"inputs": [], "outputs": []},
             "param_rows": [],
             "status": {},
             "trend": [],
@@ -628,11 +648,12 @@ def public_telemetry(
         "current": mapped.get("current") or {},
         "current_tiles": mapped.get("current_tiles") or [],
         "io_status": mapped.get("io_status") or [],
-        "digital_io": mapped.get("digital_io") or {"inputs": [], "outputs": []},
+        # digital_io is AH PLC kit only — omit from Servo Press responses
         "param_rows": mapped.get("param_rows") or [],
         "status": mapped.get("status") or {},
         "pressing_result": mapped.get("pressing_result") or {},
         "scaled": mapped.get("scaled") or {},
+        "raw": mapped.get("raw") or {},
         "result_ready": mapped.get("result_ready"),
         "trend": trend,
         "alarms": alarms_view,

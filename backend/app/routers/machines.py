@@ -50,17 +50,27 @@ def _telemetry_ws_payload(machine_id: int, result: dict) -> dict:
             "sync_by": result.get("sync_by"),
             "device_name": result.get("device_name"),
             "device_uuid": result.get("device_uuid"),
+            "origin": result.get("origin"),
             "digital_io": result.get("digital_io"),
             "scaled": result.get("scaled"),
+            "raw": result.get("raw"),
             "param_rows": result.get("param_rows"),
+            "current": result.get("current"),
             "current_tiles": result.get("current_tiles"),
+            "production": result.get("production"),
+            "shift_production": result.get("shift_production"),
+            "status": result.get("status"),
+            "pressing_result": result.get("pressing_result"),
+            "result_ready": result.get("result_ready"),
             "io_status": result.get("io_status"),
             "profile": result.get("profile"),
             "registers": result.get("registers"),
             "thresholds": result.get("thresholds"),
             "threshold_breaches": result.get("threshold_breaches"),
             "alarms": result.get("alarms"),
+            "trend": result.get("trend"),
             "email_alert_status": result.get("email_alert_status"),
+            "modbus_kpi": result.get("modbus_kpi"),
         },
     }
 
@@ -123,6 +133,26 @@ class NodeRedTelemetryPush(BaseModel):
     origin: Optional[Any] = None
     readings: Optional[List[TelemetryReading]] = None
     machine_id: Optional[int] = None
+    # Live Edge snapshots: replace sticky merge instead of merging with prior sim/partial tags
+    replaceReadings: Optional[bool] = None
+    replace_readings: Optional[bool] = None
+    # One-shot: wipe alarm/history/trend/runtime residue left by a previous simulator
+    resetLog: Optional[bool] = None
+    reset_log: Optional[bool] = None
+
+
+class CncLivePush(BaseModel):
+    """
+    Node-RED → CNC live tags (Delta NC510 / Edge LO). Separate from Servo Press /telemetry.
+    Pass the raw LO tags array as `tags`, plus machine_id (or use /{machine_id}/cnc-live).
+    """
+    tags: Optional[List[Any]] = None
+    machine_id: Optional[int] = None
+    device_id: Optional[int] = None
+    deviceId: Optional[int] = None
+    device_name: Optional[str] = None
+    deviceName: Optional[str] = None
+    source: Optional[str] = "nodered"
 
 
 def _compute_status(machine: Machine, db: Session) -> str:
@@ -529,6 +559,73 @@ async def upload_image(machine_id: int, file: UploadFile = File(...),
     m.image_url = f"/static/machines/{fname}"
     db.commit()
     return {"image_url": m.image_url}
+
+
+@router.post("/cnc-live")
+async def push_cnc_live_body(data: CncLivePush, db: Session = Depends(get_db)):
+    """
+    Node-RED → CNC live tags (preferred URL — same pattern as POST /telemetry).
+    Body: { machine_id: 1, tags: [...], device_id: 10, device_name: "CN01" }
+    Does NOT touch Servo Press /api/machines/telemetry.
+    """
+    from ..cnc_live_service import ensure_cnc_live_schema, upsert_cnc_live
+    ensure_cnc_live_schema()
+    mid = data.machine_id
+    if mid is None:
+        raise HTTPException(400, "machine_id is required")
+    tags = data.tags if isinstance(data.tags, list) else []
+    try:
+        result = upsert_cnc_live(
+            db,
+            machine_id=int(mid),
+            tags=tags,
+            device_id=data.device_id if data.device_id is not None else data.deviceId,
+            device_name=data.device_name or data.deviceName,
+            source=data.source or "nodered",
+        )
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    await manager.broadcast({
+        "type": "machine_cnc_live_updated",
+        "id": int(mid),
+        "cnc_live": result,
+    })
+    return result
+
+
+@router.post("/{machine_id}/cnc-live")
+async def push_cnc_live(machine_id: int, data: CncLivePush, db: Session = Depends(get_db)):
+    """
+    Node-RED → CNC live tags for CN01 etc. (no JWT; same pattern as status push).
+    Does NOT touch Servo Press /api/machines/telemetry.
+    """
+    from ..cnc_live_service import ensure_cnc_live_schema, upsert_cnc_live
+    ensure_cnc_live_schema()
+    tags = data.tags if isinstance(data.tags, list) else []
+    try:
+        result = upsert_cnc_live(
+            db,
+            machine_id=machine_id,
+            tags=tags,
+            device_id=data.device_id if data.device_id is not None else data.deviceId,
+            device_name=data.device_name or data.deviceName,
+            source=data.source or "nodered",
+        )
+    except ValueError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    await manager.broadcast({
+        "type": "machine_cnc_live_updated",
+        "id": machine_id,
+        "cnc_live": result,
+    })
+    return result
+
+
+@router.get("/{machine_id}/cnc-live")
+def get_cnc_live_endpoint(machine_id: int, db: Session = Depends(get_db), _=Depends(get_current_user)):
+    from ..cnc_live_service import ensure_cnc_live_schema, get_cnc_live
+    ensure_cnc_live_schema()
+    return get_cnc_live(db, machine_id)
 
 
 @router.post("/telemetry")

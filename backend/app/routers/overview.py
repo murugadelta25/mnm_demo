@@ -1187,11 +1187,23 @@ def equipment_detail(machine_id: int, db: Session = Depends(get_db), _=Depends(g
         "kpi_panel": kpi_panel,
         "hourly_output": hourly_output,
         "telemetry": None,
+        "cnc_live": None,
         "all_machines": [
             {"id": m["id"], "name": m["name"], "status": m["status"], "station_name": m.get("station_name")}
             for m in data["machines"]
         ],
     }
+
+    # CNC live tags (Delta NC510) — independent of Servo Press Modbus telemetry
+    try:
+        from ..machine_telemetry_profiles import is_telemetry_dashboard_type
+        from ..cnc_live_service import ensure_cnc_live_schema, get_cnc_live
+        if not is_telemetry_dashboard_type(m_orm.machine_type):
+            ensure_cnc_live_schema()
+            result["cnc_live"] = get_cnc_live(db, machine_id)
+    except Exception as exc:
+        print(f"[WARN] equipment_detail cnc_live: {exc}")
+        result["cnc_live"] = {"available": False, "error": str(exc), "tags": [], "groups": []}
 
     # Servo Press / Node-RED Modbus live snapshot + dedicated Servo OEE (does not mutate PMS KPI)
     try:

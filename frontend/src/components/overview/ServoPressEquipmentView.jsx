@@ -312,6 +312,492 @@ const SUB_NAV = [
   { id: 'history', label: 'History', icon: '◷' },
 ];
 
+/** Format a scaled Modbus number for the HMI-style Pressing Result panel. */
+function fmtHmi(value, digits = 3) {
+  if (value == null || value === '') return '-';
+  const n = Number(value);
+  if (Number.isNaN(n)) return String(value);
+  return n.toFixed(digits);
+}
+
+/** If backend returned raw Modbus integers, apply HMI scales for display. */
+function hmiPositionMm(rawOrScaled) {
+  if (rawOrScaled == null || rawOrScaled === '') return null;
+  const n = Number(rawOrScaled);
+  if (Number.isNaN(n)) return null;
+  // Raw Int32 is typically thousands (e.g. 25000 → 25.000 mm)
+  return Math.abs(n) >= 500 ? n * 0.001 : n;
+}
+
+function hmiForceKgf(rawOrScaled) {
+  if (rawOrScaled == null || rawOrScaled === '') return null;
+  const n = Number(rawOrScaled);
+  if (Number.isNaN(n)) return null;
+  // Raw Int32 force often hundreds (e.g. 206 → 20.6 kgf)
+  return Math.abs(n) >= 80 ? n * 0.1 : n;
+}
+
+/**
+ * HMI-like Pressing Result panel (Stats + Step positions + Pressed Result).
+ */
+function PressingResultHmi({
+  production,
+  stepPositions,
+  pressedPositionMm,
+  pressedForceKgf,
+  standbySec,
+  pressingSec,
+  productionSec,
+  resultLabel,
+  resultOk,
+  resultReason,
+  statusPrompt,
+  statusDisplay,
+  resultReady,
+  t,
+}) {
+  const okColor = '#16a34a';
+  const ngColor = '#dc2626';
+  const muted = t.textMuted || '#64748b';
+  const border = t.border || '#cbd5e1';
+  const surface = t.surface2 || t.surface || '#f1f5f9';
+  const resultColor = resultOk === true ? okColor : (resultOk === false ? ngColor : muted);
+  const promptBg = resultOk === false
+    ? 'rgba(220,38,38,0.12)'
+    : (resultReady ? 'rgba(22,163,74,0.12)' : surface);
+  const steps = Array.isArray(stepPositions) && stepPositions.length
+    ? stepPositions
+    : [1, 2, 3, 4, 5].map((n) => ({ step: n, mm: null }));
+
+  const cell = {
+    flex: 1,
+    minWidth: 0,
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    padding: '14px 10px',
+    borderRight: `1px solid ${border}`,
+    boxSizing: 'border-box',
+  };
+
+  const sideCol = {
+    border: `1px solid ${border}`,
+    borderRadius: 10,
+    background: surface,
+    display: 'flex',
+    flexDirection: 'column',
+    overflow: 'hidden',
+    minWidth: 0,
+  };
+
+  return (
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: 'minmax(120px, 160px) minmax(200px, 280px) 1fr',
+      gap: 12,
+      padding: 14,
+      flex: '1 1 auto',
+      minHeight: 0,
+      boxSizing: 'border-box',
+    }}
+    >
+      {/* Stats column */}
+      <div style={sideCol}>
+        <div style={{
+          padding: '10px 12px',
+          fontWeight: 800,
+          fontSize: 15,
+          borderBottom: `1px solid ${border}`,
+          color: t.text,
+          textAlign: 'center',
+        }}
+        >
+          Stats
+        </div>
+        {[
+          { label: 'Total', value: production?.total, color: '#2563eb' },
+          { label: 'Pass', value: production?.good, color: okColor },
+          { label: 'NG', value: production?.reject, color: ngColor },
+        ].map((row) => (
+          <div
+            key={row.label}
+            style={{
+              flex: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 4,
+              padding: '12px 8px',
+              borderBottom: `1px solid ${border}`,
+            }}
+          >
+            <div style={{ fontSize: 13, fontWeight: 700, color: muted }}>{row.label}</div>
+            <div style={{ fontSize: 32, fontWeight: 800, color: row.color, lineHeight: 1.05 }}>
+              {row.value ?? '—'}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Pressed position Step 1–5 — column next to Stats */}
+      <div style={sideCol}>
+        <div style={{
+          padding: '10px 12px',
+          fontWeight: 800,
+          fontSize: 14,
+          borderBottom: `1px solid ${border}`,
+          color: t.text,
+          textAlign: 'center',
+        }}
+        >
+          Pressed Position
+        </div>
+        {steps.map((row, idx) => (
+          <div
+            key={row.step || idx}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 8,
+              padding: '8px 12px',
+              borderBottom: idx === steps.length - 1 ? 'none' : `1px solid ${border}`,
+              flex: 1,
+              minHeight: 36,
+            }}
+          >
+            <div style={{ fontSize: 12, fontWeight: 700, color: muted, lineHeight: 1.25 }}>
+              {`Step ${row.step}`}
+            </div>
+            <div style={{ fontSize: 18, fontWeight: 800, color: t.text, whiteSpace: 'nowrap' }}>
+              {row.mm == null || row.mm === '' ? '—' : `${fmtHmi(row.mm, 3)} mm`}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Pressed Result — HMI bottom panel */}
+      <div style={{
+        border: `1px solid ${border}`,
+        borderRadius: 10,
+        background: t.surface || '#fff',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        minWidth: 0,
+      }}
+      >
+        <div style={{
+          padding: '10px 14px',
+          fontWeight: 800,
+          fontSize: 15,
+          borderBottom: `1px solid ${border}`,
+          color: t.text,
+        }}
+        >
+          Pressed Result
+        </div>
+
+        <div style={{
+          display: 'flex',
+          flex: '1 1 auto',
+          borderBottom: `1px solid ${border}`,
+          minHeight: 120,
+        }}
+        >
+          <div style={cell}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: muted, textAlign: 'center' }}>
+              Pressed Position (mm)
+            </div>
+            <div style={{ fontSize: 40, fontWeight: 800, color: t.text, lineHeight: 1.05 }}>
+              {fmtHmi(pressedPositionMm, 3)}
+            </div>
+          </div>
+          <div style={{ ...cell, background: resultOk == null ? surface : (resultOk ? 'rgba(22,163,74,0.08)' : 'rgba(220,38,38,0.08)') }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: muted }}>Result</div>
+            <div style={{ fontSize: 48, fontWeight: 900, color: resultColor, lineHeight: 1 }}>
+              {resultLabel || '—'}
+            </div>
+            {resultReason ? (
+              <div style={{ fontSize: 12, fontWeight: 600, color: muted, textAlign: 'center', marginTop: 2 }}>
+                {resultReason}
+              </div>
+            ) : null}
+          </div>
+          <div style={{ ...cell, borderRight: 'none' }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: muted, textAlign: 'center' }}>
+              Pressed Force (kgf)
+            </div>
+            <div style={{ fontSize: 40, fontWeight: 800, color: t.text, lineHeight: 1.05 }}>
+              {fmtHmi(pressedForceKgf, 1)}
+            </div>
+          </div>
+        </div>
+
+        <div style={{
+          display: 'flex',
+          borderBottom: `1px solid ${border}`,
+          minHeight: 88,
+        }}
+        >
+          {[
+            { label: 'Standby Time (s)', value: fmtHmi(standbySec, 1) },
+            { label: 'Pressing Time (s)', value: fmtHmi(pressingSec, 1) },
+            { label: 'Production Time (s)', value: fmtHmi(productionSec, 2) },
+          ].map((row, idx, arr) => (
+            <div
+              key={row.label}
+              style={{
+                ...cell,
+                borderRight: idx === arr.length - 1 ? 'none' : `1px solid ${border}`,
+              }}
+            >
+              <div style={{ fontSize: 13, fontWeight: 700, color: muted, textAlign: 'center' }}>
+                {row.label}
+              </div>
+              <div style={{ fontSize: 28, fontWeight: 800, color: t.text }}>{row.value}</div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{
+          margin: 12,
+          padding: '12px 16px',
+          borderRadius: 8,
+          background: promptBg,
+          border: `1px solid ${border}`,
+          textAlign: 'center',
+          fontSize: 18,
+          fontWeight: 700,
+          color: resultOk === false ? ngColor : (t.text || '#0f172a'),
+        }}
+        >
+          {statusPrompt || statusDisplay || '—'}
+          {statusCodeHint(statusDisplay, resultReady)}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * HMI-like Live Status panel (mirrors Pressing Result layout) + register values.
+ */
+function LiveStatusHmi({
+  production,
+  livePositionMm,
+  liveForceKgf,
+  liveVelocity,
+  liveMode,
+  liveStep,
+  totalSteps,
+  recipeNumber,
+  statusPrompt,
+  statusDisplay,
+  statusOk,
+  t,
+}) {
+  const okColor = '#16a34a';
+  const ngColor = '#dc2626';
+  const muted = t.textMuted || '#64748b';
+  const border = t.border || '#cbd5e1';
+  const surface = t.surface2 || t.surface || '#f1f5f9';
+  const statusColor = statusOk === true ? okColor : (statusOk === false ? ngColor : (t.accent || '#2563eb'));
+
+  const cell = {
+    flex: 1,
+    minWidth: 0,
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    padding: '14px 10px',
+    borderRight: `1px solid ${border}`,
+    boxSizing: 'border-box',
+  };
+
+  const sideCol = {
+    border: `1px solid ${border}`,
+    borderRadius: 10,
+    background: surface,
+    display: 'flex',
+    flexDirection: 'column',
+    overflow: 'hidden',
+    minWidth: 0,
+  };
+
+  const stepText = liveStep != null
+    ? (totalSteps != null ? `${liveStep} / ${totalSteps}` : String(liveStep))
+    : '—';
+
+  return (
+    <div style={{
+      display: 'grid',
+      gridTemplateColumns: 'minmax(120px, 160px) 1fr',
+      gap: 12,
+      padding: 14,
+      flex: '1 1 auto',
+      minHeight: 0,
+      boxSizing: 'border-box',
+    }}
+    >
+      <div style={sideCol}>
+        <div style={{
+          padding: '10px 12px',
+          fontWeight: 800,
+          fontSize: 15,
+          borderBottom: `1px solid ${border}`,
+          color: t.text,
+          textAlign: 'center',
+        }}
+        >
+          Stats
+        </div>
+        {[
+          { label: 'Total', value: production?.total, color: '#2563eb' },
+          { label: 'Pass', value: production?.good, color: okColor },
+          { label: 'NG', value: production?.reject, color: ngColor },
+        ].map((row) => (
+          <div
+            key={row.label}
+            style={{
+              flex: 1,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 4,
+              padding: '12px 8px',
+              borderBottom: `1px solid ${border}`,
+            }}
+          >
+            <div style={{ fontSize: 13, fontWeight: 700, color: muted }}>{row.label}</div>
+            <div style={{ fontSize: 32, fontWeight: 800, color: row.color, lineHeight: 1.05 }}>
+              {row.value ?? '—'}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{
+        border: `1px solid ${border}`,
+        borderRadius: 10,
+        background: t.surface || '#fff',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        minWidth: 0,
+      }}
+      >
+        <div style={{
+          padding: '10px 14px',
+          fontWeight: 800,
+          fontSize: 15,
+          borderBottom: `1px solid ${border}`,
+          color: t.text,
+        }}
+        >
+          Live Status
+        </div>
+
+        <div style={{
+          display: 'flex',
+          flex: '1 1 auto',
+          borderBottom: `1px solid ${border}`,
+          minHeight: 110,
+        }}
+        >
+          <div style={cell}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: muted, textAlign: 'center' }}>
+              Live Position (mm)
+            </div>
+            <div style={{ fontSize: 36, fontWeight: 800, color: t.text, lineHeight: 1.05 }}>
+              {fmtHmi(livePositionMm, 3)}
+            </div>
+          </div>
+          <div style={cell}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: muted, textAlign: 'center' }}>
+              Live Force (kgf)
+            </div>
+            <div style={{ fontSize: 36, fontWeight: 800, color: t.text, lineHeight: 1.05 }}>
+              {fmtHmi(liveForceKgf, 1)}
+            </div>
+          </div>
+          <div style={{ ...cell, borderRight: 'none' }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: muted, textAlign: 'center' }}>
+              Live Velocity (mm/s)
+            </div>
+            <div style={{ fontSize: 36, fontWeight: 800, color: t.text, lineHeight: 1.05 }}>
+              {fmtHmi(liveVelocity, 1)}
+            </div>
+          </div>
+        </div>
+
+        <div style={{
+          display: 'flex',
+          borderBottom: `1px solid ${border}`,
+          minHeight: 88,
+        }}
+        >
+          {[
+            { label: 'Live Mode', value: liveMode != null && liveMode !== '' ? String(liveMode) : '—' },
+            { label: 'Live Step', value: stepText },
+            { label: 'Recipe', value: recipeNumber != null && recipeNumber !== '' ? String(recipeNumber) : '—' },
+          ].map((row, idx, arr) => (
+            <div
+              key={row.label}
+              style={{
+                ...cell,
+                borderRight: idx === arr.length - 1 ? 'none' : `1px solid ${border}`,
+              }}
+            >
+              <div style={{ fontSize: 13, fontWeight: 700, color: muted, textAlign: 'center' }}>
+                {row.label}
+              </div>
+              <div style={{ fontSize: 26, fontWeight: 800, color: t.text }}>{row.value}</div>
+            </div>
+          ))}
+        </div>
+
+        <div style={{
+          margin: 12,
+          padding: '12px 16px',
+          borderRadius: 8,
+          background: surface,
+          border: `1px solid ${border}`,
+          textAlign: 'center',
+          fontSize: 18,
+          fontWeight: 700,
+          color: statusColor,
+        }}
+        >
+          {statusPrompt || statusDisplay || '—'}
+          {statusDisplay ? (
+            <span style={{ display: 'block', fontSize: 12, fontWeight: 600, color: muted, marginTop: 4 }}>
+              {statusDisplay}
+            </span>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function statusCodeHint(statusDisplay, resultReady) {
+  if (!statusDisplay) return null;
+  return (
+    <span style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#64748b', marginTop: 4 }}>
+      {resultReady ? 'Pressing Result registers valid' : 'Awaiting Status 4–8 for a new cycle result'}
+      {' · '}
+      {statusDisplay}
+    </span>
+  );
+}
+
 /**
  * Fallback catalog order for the Servo Press profile only. Other profiles (PLC,
  * Servo Linear Motor, SPM) show the tags configured in Machine Config → Config Tags;
@@ -326,7 +812,9 @@ const DEFAULT_PROFILE_GROUPS = {
     'total_amount', 'pass_amount', 'ng_amount',
     'standby_time', 'pressing_time', 'production_time',
     'alarm_code', 'pressing_result',
+    'pressed_position', 'pressed_force',
     'pressed_position_step1', 'pressed_position_step2', 'pressed_position_step3',
+    'pressed_position_step4', 'pressed_position_step5',
   ],
 };
 
@@ -725,10 +1213,121 @@ function bumpCount(map, key, extra = {}) {
 }
 
 /**
- * Alarm type names per Modbus Alarm Code (manufacturer alarm table §9.1).
- * Codes that are not listed fall back to the Node-RED event label, then to "Code N".
+ * Alarm type names + handling per Modbus Alarm Code (manufacturer table §9.1, codes 001–012).
  */
-const ALARM_TYPE_LABELS = {};
+const SERVO_PRESS_ALARM_CATALOG = {
+  1: {
+    message: 'Light Curtain or Safety Signal Alarm',
+    handling: '1. Remove any obstructions blocking the light curtain. After resetting, resume the pressing operation.\n2. The safety signal must be under external control. After resetting the safety system, resume the pressing operation.',
+  },
+  2: {
+    message: 'Negative Limit Error',
+    handling: 'Initialize the machine after resetting.',
+  },
+  3: {
+    message: 'Positive Limit Error',
+    handling: 'Initialize the machine after resetting.',
+  },
+  4: {
+    message: 'Emergency Stop',
+    handling: 'Release the emergency stop and initialize the machine after resetting.',
+  },
+  5: {
+    message: 'Overloaded, please check the velocity or abnormal collision',
+    handling: 'Reconfirm the pressing parameters to prevent the pressing force from exceeding the limit.',
+  },
+  6: {
+    message: 'Please release ON when switching mode',
+    handling: 'Switch off the internal/external control knob after deactivation.',
+  },
+  7: {
+    message: 'Hits workpiece in High-speed section',
+    handling: 'When moving to the ready position, the pressure exceeds the machine\'s protection threshold (default is 10% of the maximum pressure):\n1. Check if the pressing parameter [Ready Position] is set appropriately.\n2. Check for any material stacking issues.\n3. Check the mechanism beneath the press load cell for linearity and ensure there is no damping or resistance during vertical movement.',
+  },
+  8: {
+    message: 'Currency overloaded, please check the velocity or abnormal collision',
+    handling: 'Motor Current Exceeds 100%:\n1. Reconfirm the pressing parameters to avoid excessive pressing force.\n2. Ensure the motor brake is released.\n3. Check for foreign objects when moving to the working position.\n4. Verify the lower fixture is not too heavy; after an emergency stop or light curtain trigger, inertial force may cause motor overload.',
+  },
+  9: {
+    message: 'Motor Alarm. If reset is not working, please restart the servo press',
+    handling: 'Refer to Chapter 9.2 Motor Alarm.',
+  },
+  10: {
+    message: 'Servo Communication Error',
+    handling: 'RS485 Communication Interrupted Between Servo and PLC:\n1. Power cycle the system. If the issue persists, contact the distributor.\n2. For electric cylinder types, check whether the wiring between the PLC and the driver is loose or incorrectly connected.',
+  },
+  11: {
+    message: 'Light curtain alarm, please reset then go home',
+    handling: 'The light curtain was triggered accidentally. After resetting, the spindle returns to the working origin and waits for the pressing signal again.',
+  },
+  12: {
+    message: 'Two hand buttons released, please reset then go home',
+    handling: 'Release the two-hand switch. After resetting, the spindle returns to the working origin and waits for the pressing signal again.',
+  },
+};
+
+const ALARM_TYPE_LABELS = Object.fromEntries(
+  Object.entries(SERVO_PRESS_ALARM_CATALOG).map(([code, row]) => [Number(code), row.message]),
+);
+
+function alarmCatalogEntry(code) {
+  const n = code != null && code !== '' && !Number.isNaN(Number(code)) ? Number(code) : null;
+  if (n == null || n === 0) return null;
+  const row = SERVO_PRESS_ALARM_CATALOG[n];
+  if (row) {
+    return {
+      code: n,
+      codeLabel: String(n).padStart(3, '0'),
+      message: row.message,
+      handling: row.handling,
+    };
+  }
+  return {
+    code: n,
+    codeLabel: String(n).padStart(3, '0'),
+    message: `Alarm Code ${String(n).padStart(3, '0')}`,
+    handling: null,
+  };
+}
+
+/**
+ * Normalize Pressed Result to OK / NG only.
+ * Never show Alarm Code digits (e.g. 4 / 004 Emergency Stop) in the Result cell.
+ */
+function normalizeHmiResult(pressingResultInfo, statusInfo) {
+  const info = pressingResultInfo || {};
+  const status = statusInfo || {};
+  const label = String(info.label || '').trim();
+  const isDigitOnly = /^\d+$/.test(label);
+  if (label && label !== '—' && label !== '-' && !isDigitOnly) {
+    const upper = label.toUpperCase();
+    if (upper === 'OK' || upper.startsWith('OK')) {
+      return { label: 'OK', ok: true, reason: info.reason || null };
+    }
+    if (upper === 'NG' || upper.startsWith('NG')) {
+      return { label: 'NG', ok: false, reason: info.reason || null };
+    }
+    return {
+      label,
+      ok: info.ok != null ? info.ok : null,
+      reason: info.reason || null,
+    };
+  }
+  if (info.ok === true) return { label: 'OK', ok: true, reason: info.reason || null };
+  if (info.ok === false) return { label: 'NG', ok: false, reason: info.reason || null };
+  if (status.ok === true || Number(status.code) === 4) {
+    return { label: 'OK', ok: true, reason: status.prompt || 'Pressing - OK' };
+  }
+  const sc = Number(status.code);
+  if (status.ok === false || (sc >= 5 && sc <= 8)) {
+    return {
+      label: 'NG',
+      ok: false,
+      reason: status.prompt || info.reason || null,
+    };
+  }
+  return { label: '—', ok: null, reason: null };
+}
 
 /** Pressing result tones: OK is green, NG is pink. */
 const RESULT_TONES = {
@@ -772,13 +1371,14 @@ function statusTone(label) {
   return SLATE_TONE;
 }
 
-/** Human alarm type for one Alarm Code, e.g. "Overload (101)" or "Code 101". */
+/** Human alarm type for one Alarm Code, e.g. "Emergency Stop (004)". */
 function alarmTypeLabel(code, eventLabel) {
-  const mapped = ALARM_TYPE_LABELS[code];
-  if (mapped) return `${mapped} (${code})`;
+  const cat = alarmCatalogEntry(code);
+  if (cat) return `${cat.message} (${cat.codeLabel})`;
   const raw = String(eventLabel || '').trim();
   const generic = !raw || /^no alarm$/i.test(raw) || /^alarm(\s*code)?\s*\d*$/i.test(raw);
-  return generic ? `Code ${code}` : `${raw} (${code})`;
+  const codeLabel = code != null ? String(code).padStart(3, '0') : '?';
+  return generic ? `Code ${codeLabel}` : `${raw} (${codeLabel})`;
 }
 
 /**
@@ -804,11 +1404,12 @@ function buildAlarmDistribution(alarms) {
     const event = String(a.event || '').toLowerCase() || 'unknown';
     const status = normalizeStatusLabel(a.status);
     const resultRaw = String(a.pressing_result || '').trim();
-    const result = /^(ok|pass|1)$/i.test(resultRaw)
+    // Result is OK/NG only — never map Alarm Code digits into the result chart
+    const result = /^(ok|pass|1|4)$/i.test(resultRaw)
       ? 'OK'
-      : /^(ng|fail|nok|2|0)$/i.test(resultRaw)
+      : /^(ng|fail|nok|2|[5-8])$/i.test(resultRaw)
         ? 'NG'
-        : (resultRaw || '—');
+        : (/^\d+$/.test(resultRaw) || !resultRaw ? '—' : resultRaw);
 
     if (a.kind === 'plc_threshold' || (typeof codeRaw === 'string' && String(codeRaw).startsWith('EVT-'))) {
       const key = a.label || a.tag_key || String(codeRaw);
@@ -947,6 +1548,7 @@ export default function ServoPressEquipmentView({
   const [thresholdSaving, setThresholdSaving] = useState(false);
   const [thresholdMsg, setThresholdMsg] = useState('');
   const [emailBanner, setEmailBanner] = useState(null);
+  const [selectedAlarm, setSelectedAlarm] = useState(null);
   const activeTab = (tab === 'production' || tab === 'parameters') ? 'overview' : tab;
   const info = detail?.equipment_info || {};
   const machine = detail?.machine || {};
@@ -974,23 +1576,31 @@ export default function ServoPressEquipmentView({
 
   // Prefer Modbus phase for badge when telemetry is live; fall back to PMS status
   const modbusPhase = String(statusInfo.phase || '').toLowerCase();
+  const statusCode = statusInfo.code != null ? Number(statusInfo.code) : null;
   const alarmScaled = tel.scaled?.alarm_code;
   const alarmActive = alarmScaled != null && Number(alarmScaled) !== 0;
+  const statusPrompt = statusInfo.prompt || statusDisplay;
   let displayStatusKey = info.status_key || info.status || 'idle';
   let displayStatusLabel = info.status || '—';
   if (telOk && (statusInfo.phase || statusInfo.code != null || alarmActive)) {
     if (alarmActive) {
       displayStatusKey = 'alarm';
-      displayStatusLabel = `Alarm | code ${Number(alarmScaled)}`;
+      const alarmCat = alarmCatalogEntry(alarmScaled);
+      displayStatusLabel = alarmCat
+        ? `Alarm ${alarmCat.codeLabel} · ${alarmCat.message}`
+        : `Alarm | code ${Number(alarmScaled)}`;
+    } else if (statusInfo.ok === false || (statusCode != null && statusCode >= 5 && statusCode <= 8)) {
+      displayStatusKey = 'alarm';
+      displayStatusLabel = statusDisplay || statusInfo.label || 'NG';
     } else if (modbusPhase === 'pressing') {
       displayStatusKey = 'running';
       displayStatusLabel = statusDisplay || 'Pressing';
     } else if (modbusPhase === 'result') {
       displayStatusKey = 'running';
-      displayStatusLabel = statusDisplay || 'Result ready';
+      displayStatusLabel = statusDisplay || 'Pressing - OK';
     } else if (modbusPhase === 'idle') {
       displayStatusKey = 'idle';
-      displayStatusLabel = statusDisplay || 'Idle / Standby';
+      displayStatusLabel = statusDisplay || statusInfo.label || 'Waiting';
     } else if (statusDisplay) {
       displayStatusLabel = statusDisplay;
     }
@@ -1013,33 +1623,34 @@ export default function ServoPressEquipmentView({
   const alarmTypeTotals = alarmDist.totals;
   const alarmsTableRows = useMemo(() => alarms.slice(0, 40), [alarms]);
 
+  // Overview Production tiles follow device Modbus Total/Pass/NG (same as Pressing Result /
+  // HMI). Shift-delta counters stay on the OEE panel (servo_oee / shift_production).
   const production = {
-    total: telOk && tel.shift_production?.total != null
-      ? tel.shift_production.total
-      : (servoOee?.actual_qty != null
-        ? servoOee.actual_qty
-        : (telOk && tel.production?.total != null
-          ? tel.production.total
+    total: telOk && tel.production?.total != null
+      ? tel.production.total
+      : (telOk && tel.scaled?.total_amount != null
+        ? tel.scaled.total_amount
+        : (servoOee?.actual_qty != null
+          ? servoOee.actual_qty
           : (kpiPanel?.actual_qty ?? plan.actual_qty ?? null))),
-    good: telOk && tel.shift_production?.good != null
-      ? tel.shift_production.good
-      : (servoOee?.good_qty != null
-        ? servoOee.good_qty
-        : (telOk && tel.production?.good != null
-          ? tel.production.good
+    good: telOk && tel.production?.good != null
+      ? tel.production.good
+      : (telOk && tel.scaled?.pass_amount != null
+        ? tel.scaled.pass_amount
+        : (servoOee?.good_qty != null
+          ? servoOee.good_qty
           : (kpiPanel?.good_qty ?? null))),
-    reject: telOk && tel.shift_production?.reject != null
-      ? tel.shift_production.reject
-      : (servoOee?.defect_qty != null
-        ? servoOee.defect_qty
-        : (telOk && tel.production?.reject != null
-          ? tel.production.reject
+    reject: telOk && tel.production?.reject != null
+      ? tel.production.reject
+      : (telOk && tel.scaled?.ng_amount != null
+        ? tel.scaled.ng_amount
+        : (servoOee?.defect_qty != null
+          ? servoOee.defect_qty
           : (kpiPanel?.defect_qty ?? null))),
   };
 
-  // OK / NG bars come from the shift production counters, so they always agree with
-  // the Production tiles. Counting the alarm event log here would over-report NG,
-  // because alarm events only exist around a fault.
+  // OK / NG bars follow the same device counters as the Production tiles.
+  // Counting the alarm event log here would over-report NG.
   const goodQty = Number(production.good) || 0;
   const rejectQty = Number(production.reject) || 0;
   const qualityResultData = [
@@ -1062,6 +1673,65 @@ export default function ServoPressEquipmentView({
   const ioStatus = ioStatusRaw.filter(
     (row) => String(row.label || '').trim().toLowerCase() !== 'plc status',
   );
+
+  const pressingResultInfo = tel.pressing_result || {};
+  // Prefer live Edge Pressed Pos / Force from this snapshot (scaled → raw → param row)
+  const hmiPressedPos = (() => {
+    const scaled = tel.scaled || {};
+    const raw = tel.raw || {};
+    if (scaled.pressed_position != null && scaled.pressed_position !== '') {
+      return scaled.pressed_position;
+    }
+    if (raw.pressed_position != null && raw.pressed_position !== '') {
+      return raw.pressed_position;
+    }
+    const fromRow = (tel.param_rows || []).find((r) => r.key === 'pressed_position');
+    if (fromRow?.scaled != null && fromRow.scaled !== '') return fromRow.scaled;
+    return scaled.pressed_position_step2 ?? scaled.pressed_position_step1 ?? null;
+  })();
+  const hmiPressedForce = (() => {
+    const scaled = tel.scaled || {};
+    const raw = tel.raw || {};
+    if (scaled.pressed_force != null && scaled.pressed_force !== '') {
+      return scaled.pressed_force;
+    }
+    if (raw.pressed_force != null && raw.pressed_force !== '') {
+      return raw.pressed_force;
+    }
+    const fromRow = (tel.param_rows || []).find((r) => r.key === 'pressed_force');
+    if (fromRow?.scaled != null && fromRow.scaled !== '') return fromRow.scaled;
+    return null;
+  })();
+  const hmiResultNorm = normalizeHmiResult(pressingResultInfo, statusInfo);
+  const hmiResultLabel = hmiResultNorm.label;
+  const hmiResultOk = hmiResultNorm.ok;
+  const hmiResultReason = hmiResultNorm.reason;
+  const hmiStepPositions = [1, 2, 3, 4, 5].map((step) => {
+    const key = `pressed_position_step${step}`;
+    const scaled = tel.scaled || {};
+    const raw = tel.raw || {};
+    let val = null;
+    if (scaled[key] != null && scaled[key] !== '') val = scaled[key];
+    else if (raw[key] != null && raw[key] !== '') val = raw[key];
+    else {
+      const fromRow = (tel.param_rows || []).find((r) => r.key === key);
+      if (fromRow?.scaled != null && fromRow.scaled !== '') val = fromRow.scaled;
+    }
+    return { step, mm: hmiPositionMm(val) };
+  });
+  const hmiLivePosition = hmiPositionMm(
+    tel.scaled?.live_position ?? tel.raw?.live_position ?? tel.current?.position_mm ?? null,
+  );
+  const hmiLiveForce = hmiForceKgf(
+    tel.scaled?.live_force ?? tel.raw?.live_force ?? tel.current?.force_kgf ?? null,
+  );
+  const hmiLiveVelocity = (() => {
+    const v = tel.scaled?.live_velocity ?? tel.raw?.live_velocity ?? tel.current?.velocity_mm_s ?? null;
+    if (v == null || v === '') return null;
+    const n = Number(v);
+    if (Number.isNaN(n)) return null;
+    return Math.abs(n) >= 500 ? n * 0.001 : n;
+  })();
 
   const current = {
     position_mm: tel.current?.position_mm ?? null,
@@ -2547,10 +3217,11 @@ export default function ServoPressEquipmentView({
                   : (!isServoPressProfile
                     ? (profile.label || 'Configured tags')
                     : (resultReady
-                      ? `Valid now · ${statusDisplay}`
-                      : `Wait for Status* 4–8 · now ${statusDisplay}`))}
+                      ? `Cycle result · ${statusDisplay}`
+                      : `${statusPrompt || statusDisplay}`))}
               </span>
             </div>
+            {!(isServoPressProfile && (activeTab === 'result' || activeTab === 'live')) && (
             <div style={{
               padding: '8px 14px',
               fontSize: 14,
@@ -2567,37 +3238,107 @@ export default function ServoPressEquipmentView({
                   <b style={{ color: t.text }}>Machine Config → Config Tags</b>
                   {` (${profile.label || 'this machine type'}), so editing a tag there changes this table.`}
                 </>
-              ) : activeTab === 'live' ? (
+              ) : (
                 <>
                   Live Status registers (position, force, velocity, Status*, mode, steps, recipe) can be read at any time.
                   {' '}
                   <b style={{ color: t.text }}>Status*</b>
-                  {' '}
-                  splits as
-                  {' '}
-                  <b style={{ color: t.text }}>phase</b>
-                  {' + '}
-                  <b style={{ color: t.text }}>code</b>
-                  {' — e.g. '}
-                  <b style={{ color: t.text }}>Result ready | code 5</b>
-                  {' '}
-                  means phase=Result ready, raw Status*=5 (valid range 4-8).
-                </>
-              ) : (
-                <>
-                  Pressing Result is valid only when Status* is
-                  {' '}
-                  <b style={{ color: t.text }}>4-8 (Result ready)</b>
-                  .
-                  When the next cycle starts, Status* becomes
-                  {' '}
-                  <b style={{ color: t.text }}>3 (Pressing)</b>
-                  {' '}
-                  and previous results clear.
-                  {statusInfo.note ? ` ${statusInfo.note}` : ''}
+                  {': 0 Not Activated · 1 Activating · 2 Waiting · 3 Pressing · 4 OK · 5–8 NG (force/position limits).'}
                 </>
               )}
             </div>
+            )}
+            {isServoPressProfile && (activeTab === 'result' || activeTab === 'live') ? (
+              <div style={{ overflow: 'auto', flex: '1 1 auto', minHeight: 0 }}>
+                {activeTab === 'result' ? (
+                  <PressingResultHmi
+                    production={production}
+                    stepPositions={hmiStepPositions}
+                    pressedPositionMm={hmiPositionMm(hmiPressedPos)}
+                    pressedForceKgf={hmiForceKgf(hmiPressedForce)}
+                    standbySec={tel.scaled?.standby_time}
+                    pressingSec={tel.scaled?.pressing_time}
+                    productionSec={tel.scaled?.production_time}
+                    resultLabel={hmiResultLabel}
+                    resultOk={hmiResultOk}
+                    resultReason={hmiResultReason}
+                    statusPrompt={statusPrompt}
+                    statusDisplay={statusDisplay}
+                    resultReady={resultReady}
+                    t={t}
+                  />
+                ) : (
+                  <LiveStatusHmi
+                    production={production}
+                    livePositionMm={hmiLivePosition}
+                    liveForceKgf={hmiLiveForce}
+                    liveVelocity={hmiLiveVelocity}
+                    liveMode={tel.scaled?.live_mode}
+                    liveStep={tel.scaled?.live_step}
+                    totalSteps={tel.scaled?.total_steps}
+                    recipeNumber={tel.scaled?.recipe_number}
+                    statusPrompt={statusPrompt}
+                    statusDisplay={statusDisplay}
+                    statusOk={statusInfo.ok}
+                    t={t}
+                  />
+                )}
+                <div style={{
+                  padding: '8px 14px 12px',
+                  borderTop: `1px solid ${t.border || '#eef2f7'}`,
+                  maxHeight: '36vh',
+                  overflow: 'auto',
+                }}
+                >
+                  <div style={{ fontSize: 13, fontWeight: 700, color: t.textMuted, marginBottom: 8 }}>
+                    Register detail
+                  </div>
+                  <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 14 }}>
+                    <thead style={{ position: 'sticky', top: 0, background: t.surface2 || t.surface || '#f8fafc', zIndex: 1 }}>
+                      <tr style={{ textAlign: 'left' }}>
+                        {['Item', 'Value', 'Modbus', 'EIP/PN', 'Type', 'Unit', 'Note'].map((h) => (
+                          <th key={h} style={{ padding: '6px 10px', color: t.textMuted, fontWeight: 700, whiteSpace: 'nowrap' }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {(activeTab === 'live' ? liveStatusRows : pressingResultRows).map((row) => (
+                        <tr
+                          key={row.key || row.label}
+                          style={{
+                            borderBottom: `1px solid ${t.border || '#eef2f7'}`,
+                            opacity: activeTab === 'result' && !resultReady && row.value !== '—' ? 0.75 : 1,
+                          }}
+                        >
+                          <td style={{ padding: '6px 10px', fontWeight: 700, color: t.text }}>{row.label}</td>
+                          <td style={{
+                            padding: '6px 10px',
+                            fontWeight: 800,
+                            color: row.key === 'status' ? (t.accent || '#38bdf8') : t.text,
+                            whiteSpace: 'nowrap',
+                          }}
+                          >
+                            {row.key === 'status' ? (statusDisplay || row.value || '—') : (row.value ?? '—')}
+                          </td>
+                          <td style={{ padding: '6px 10px', fontFamily: 'ui-monospace, monospace', fontSize: 13 }}>{row.modbus || '—'}</td>
+                          <td style={{ padding: '6px 10px', fontFamily: 'ui-monospace, monospace', fontSize: 13 }}>{row.eip_pn || '—'}</td>
+                          <td style={{ padding: '6px 10px' }}>{row.type || '—'}</td>
+                          <td style={{ padding: '6px 10px' }}>{row.unit || '—'}</td>
+                          <td style={{ padding: '6px 10px', color: t.textMuted, fontSize: 13 }}>{row.note || '—'}</td>
+                        </tr>
+                      ))}
+                      {!(activeTab === 'live' ? liveStatusRows : pressingResultRows).length && (
+                        <tr>
+                          <td colSpan={7} style={{ padding: '14px 10px', color: t.textMuted, fontSize: 14 }}>
+                            No tags configured for this group. Add them in Machine Config → Config Tags.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : (
             <div style={{ overflow: 'auto', flex: '1 1 auto', minHeight: 0, maxHeight: '60vh' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 15 }}>
                 <thead style={{ position: 'sticky', top: 0, background: t.surface2 || t.surface || '#f8fafc', zIndex: 1 }}>
@@ -2647,6 +3388,7 @@ export default function ServoPressEquipmentView({
                 </tbody>
               </table>
             </div>
+            )}
           </section>
         )}
 
@@ -2696,19 +3438,19 @@ export default function ServoPressEquipmentView({
                 >
                   <b style={{ color: t.text }}>Status* split</b>
                   {': '}
-                  <b style={{ color: t.text }}>{statusInfo.phase_label || 'Result ready'}</b>
+                  <b style={{ color: t.text }}>{statusInfo.phase_label || '—'}</b>
                   {' = phase | '}
-                  <b style={{ color: t.text }}>code {statusInfo.code ?? 5}</b>
+                  <b style={{ color: t.text }}>code {statusInfo.code ?? '—'}</b>
                   {' (shown as '}
                   <b style={{ color: t.text }}>{statusDisplay}</b>
                   ). Codes
                   {' '}
-                  <b style={{ color: t.text }}>4-8</b>
-                  {' '}
-                  mean the press cycle finished — Pressing Result registers are valid until Status* becomes
-                  {' '}
-                  <b style={{ color: t.text }}>3 (Pressing)</b>
-                  .
+                  <b style={{ color: t.text }}>4</b>
+                  {' = OK · '}
+                  <b style={{ color: t.text }}>5–8</b>
+                  {' = NG (force/position limits). Status '}
+                  <b style={{ color: t.text }}>3</b>
+                  {' = Pressing.'}
                 </div>
                 )}
 
@@ -2972,13 +3714,22 @@ export default function ServoPressEquipmentView({
                       : 'No alarm events yet. Events appear when Modbus Alarm Code changes (non-zero raise / clear to 0).'}
                   </div>
                 ) : (
-                  <div style={{ overflow: 'auto', flex: '1 1 auto', minHeight: 0, maxHeight: '60vh' }}>
+                  <div style={{
+                    display: 'grid',
+                    gridTemplateColumns: selectedAlarm && !isPlcProfile ? 'minmax(0, 1.2fr) minmax(280px, 0.8fr)' : '1fr',
+                    gap: 0,
+                    flex: '1 1 auto',
+                    minHeight: 0,
+                    maxHeight: '60vh',
+                  }}
+                  >
+                  <div style={{ overflow: 'auto', minHeight: 0 }}>
                     <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 15 }}>
                       <thead style={{ position: 'sticky', top: 0, background: t.surface2 || t.surface || '#f8fafc', zIndex: 1 }}>
                         <tr style={{ textAlign: 'left' }}>
                           {(isPlcProfile
                             ? ['Time', 'Event ID', 'Tag', 'Event', 'Value', 'LSL', 'USL', 'Started', 'Cleared']
-                            : ['Time', 'Code', 'Event', 'Status*', 'Result']
+                            : ['Time', 'Code', 'Alarm Message', 'Event', 'Status*']
                           ).map((h) => (
                             <th key={h} style={{ padding: '10px 14px', color: t.textMuted, fontWeight: 700 }}>{h}</th>
                           ))}
@@ -2988,7 +3739,7 @@ export default function ServoPressEquipmentView({
                         {alarmsTableRows.map((a, idx) => (
                           isPlcProfile ? (
                             <tr key={`${a.event_id || a.ts}-${idx}`} style={{ borderBottom: `1px solid ${t.border || '#eef2f7'}` }}>
-                              <td style={{ padding: '10px 14px', fontWeight: 700, whiteSpace: 'nowrap' }}>{a.t || a.ts || '—'}</td>
+                              <td style={{ padding: '10px 14px', fontWeight: 700, whiteSpace: 'nowrap' }}>{a.t || a.ts || '-'}</td>
                               <td style={{
                                 padding: '10px 14px',
                                 fontWeight: 800,
@@ -2997,10 +3748,10 @@ export default function ServoPressEquipmentView({
                                 fontSize: 12,
                               }}
                               >
-                                {a.event_id || a.code || '—'}
+                                {a.event_id || a.code || '-'}
                               </td>
                               <td style={{ padding: '10px 14px', fontWeight: 700 }}>
-                                {a.label || a.tag_key || '—'}
+                                {a.label || a.tag_key || '-'}
                               </td>
                               <td style={{
                                 padding: '10px 14px',
@@ -3009,30 +3760,52 @@ export default function ServoPressEquipmentView({
                                 color: a.event === 'cleared' ? '#16a34a' : '#dc2626',
                               }}
                               >
-                                {a.event || '—'}
+                                {a.event || '-'}
                                 {a.side ? ` (${a.side})` : ''}
                               </td>
                               <td style={{ padding: '10px 14px', fontWeight: 700 }}>
-                                {a.value != null ? `${a.value}${a.unit ? ` ${a.unit}` : ''}` : '—'}
+                                {a.value != null ? `${a.value}${a.unit ? ` ${a.unit}` : ''}` : '-'}
                               </td>
-                              <td style={{ padding: '10px 14px' }}>{a.lsl != null ? a.lsl : '—'}</td>
-                              <td style={{ padding: '10px 14px' }}>{a.usl != null ? a.usl : '—'}</td>
+                              <td style={{ padding: '10px 14px' }}>{a.lsl != null ? a.lsl : '-'}</td>
+                              <td style={{ padding: '10px 14px' }}>{a.usl != null ? a.usl : '-'}</td>
                               <td style={{ padding: '10px 14px', whiteSpace: 'nowrap', fontSize: 13 }}>
-                                {a.started_at || (a.event === 'raised' ? (a.ts || a.t) : '—') || '—'}
+                                {a.started_at || (a.event === 'raised' ? (a.ts || a.t) : '-') || '-'}
                               </td>
                               <td style={{ padding: '10px 14px', whiteSpace: 'nowrap', fontSize: 13 }}>
-                                {a.cleared_at || (a.event === 'cleared' ? (a.ts || a.t) : '—') || '—'}
+                                {a.cleared_at || (a.event === 'cleared' ? (a.ts || a.t) : '-') || '-'}
                               </td>
                             </tr>
                           ) : (
-                            <tr key={`${a.ts}-${idx}`} style={{ borderBottom: `1px solid ${t.border || '#eef2f7'}` }}>
-                              <td style={{ padding: '10px 14px', fontWeight: 700, whiteSpace: 'nowrap' }}>{a.t || a.ts || '—'}</td>
-                              <td style={{ padding: '10px 14px', fontWeight: 800, color: a.active ? '#ef4444' : '#22c55e' }}>
-                                {a.code ?? '—'}
+                            <tr
+                              key={`${a.ts}-${a.code}-${idx}`}
+                              onClick={() => {
+                                const cat = alarmCatalogEntry(a.code);
+                                setSelectedAlarm({
+                                  ...a,
+                                  codeLabel: a.code_label || cat?.codeLabel,
+                                  message: a.message || cat?.message || a.label,
+                                  handling: a.handling || cat?.handling,
+                                });
+                              }}
+                              style={{
+                                borderBottom: `1px solid ${t.border || '#eef2f7'}`,
+                                cursor: 'pointer',
+                                background: selectedAlarm
+                                  && selectedAlarm.code === a.code
+                                  && selectedAlarm.ts === a.ts
+                                  ? 'rgba(59,130,246,0.08)'
+                                  : 'transparent',
+                              }}
+                            >
+                              <td style={{ padding: '10px 14px', fontWeight: 700, whiteSpace: 'nowrap' }}>{a.t || a.ts || '-'}</td>
+                              <td style={{ padding: '10px 14px', fontWeight: 800, color: a.active || a.event === 'raised' ? '#ef4444' : '#22c55e' }}>
+                                {a.code_label || (a.code != null ? String(a.code).padStart(3, '0') : '-')}
                               </td>
-                              <td style={{ padding: '10px 14px', textTransform: 'capitalize' }}>{a.event || a.label || '—'}</td>
+                              <td style={{ padding: '10px 14px', fontWeight: 600, maxWidth: 280 }}>
+                                {a.message || a.label || alarmCatalogEntry(a.code)?.message || '-'}
+                              </td>
+                              <td style={{ padding: '10px 14px', textTransform: 'capitalize' }}>{a.event || '-'}</td>
                               <td style={{ padding: '10px 14px' }}>{normalizeStatusLabel(a.status)}</td>
-                              <td style={{ padding: '10px 14px' }}>{a.pressing_result || '—'}</td>
                             </tr>
                           )
                         ))}
@@ -3043,6 +3816,65 @@ export default function ServoPressEquipmentView({
                         Showing latest {alarmsTableRows.length} of {alarms.length} events
                       </div>
                     ) : null}
+                  </div>
+                  {selectedAlarm && !isPlcProfile ? (
+                    <div style={{
+                      borderLeft: `1px solid ${t.border || '#e5e7eb'}`,
+                      padding: 14,
+                      overflow: 'auto',
+                      background: t.surface2 || '#f8fafc',
+                    }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+                        <div style={{ fontSize: 16, fontWeight: 800, color: t.text }}>
+                          Alarm
+                          {' '}
+                          {selectedAlarm.codeLabel || (selectedAlarm.code != null ? String(selectedAlarm.code).padStart(3, '0') : '')}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedAlarm(null)}
+                          style={{
+                            border: `1px solid ${t.border || '#cbd5e1'}`,
+                            background: t.surface || '#fff',
+                            borderRadius: 6,
+                            padding: '4px 10px',
+                            cursor: 'pointer',
+                            fontWeight: 700,
+                            fontSize: 12,
+                          }}
+                        >
+                          Close
+                        </button>
+                      </div>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: t.textMuted, marginBottom: 4 }}>Alarm Message</div>
+                      <div style={{ fontSize: 15, fontWeight: 700, color: t.text, marginBottom: 14, lineHeight: 1.4 }}>
+                        {selectedAlarm.message || '-'}
+                      </div>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: t.textMuted, marginBottom: 4 }}>Handling Approach</div>
+                      <div style={{
+                        fontSize: 14,
+                        fontWeight: 600,
+                        color: t.text,
+                        whiteSpace: 'pre-wrap',
+                        lineHeight: 1.5,
+                        padding: 12,
+                        borderRadius: 8,
+                        border: `1px solid ${t.border || '#e5e7eb'}`,
+                        background: t.surface || '#fff',
+                      }}
+                      >
+                        {selectedAlarm.handling || 'No handling guidance for this code.'}
+                      </div>
+                      <div style={{ marginTop: 12, fontSize: 12, color: t.textMuted }}>
+                        Event:
+                        {' '}
+                        <b style={{ color: t.text }}>{selectedAlarm.event || '-'}</b>
+                        {' · '}
+                        {selectedAlarm.t || selectedAlarm.ts || '-'}
+                      </div>
+                    </div>
+                  ) : null}
                   </div>
                 )}
               </>

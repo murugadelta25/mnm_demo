@@ -223,6 +223,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[WARN] machine_telemetry schema: {e}")
     try:
+        from .cnc_live_service import ensure_cnc_live_schema
+        ensure_cnc_live_schema()
+        print("[OK] machine_cnc_live schema ensured")
+    except Exception as e:
+        print(f"[WARN] machine_cnc_live schema: {e}")
+    try:
         from .telemetry_tags_service import ensure_tags_ready
         db_tags = next(get_db())
         try:

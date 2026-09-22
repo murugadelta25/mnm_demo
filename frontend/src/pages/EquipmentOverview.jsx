@@ -6,6 +6,7 @@ import PageHeader from '../components/PageHeader';
 import OverviewSelector, { FactoryTitleBanner } from '../components/OverviewSelector';
 import DonutGauge from '../components/charts/DonutGauge';
 import ServoPressEquipmentView, { usesTelemetryDashboard } from '../components/overview/ServoPressEquipmentView';
+import CncLiveTagsPanel from '../components/overview/CncLiveTagsPanel';
 import { useTheme } from '../context/ThemeContext';
 import { pageClass, surfaceClass } from '../themes/tileHelpers';
 import { statusPalette, STATUS_ROWS } from '../utils/overviewStatus';
@@ -83,46 +84,84 @@ export default function EquipmentOverview() {
     return () => clearInterval(id);
   }, [load, machineId]);
 
-  // Node-RED / SIE telemetry → immediate UI patch (was waiting up to 5s on poll)
+  // Node-RED: Servo Press uses machine_telemetry_updated; CNC uses machine_cnc_live_updated.
+  // Paths stay independent — CNC never goes through ServoPressEquipmentView.
+  // Throttle telemetry patches — Node-RED can post multiple times/sec and Recharts
+  // re-renders on every setDetail would hang the tab (RESULT_CODE_HUNG).
   const telPatchTimer = useRef(null);
+  const pendingTelPatch = useRef(null);
+  const flushTelPatch = useCallback(() => {
+    const patch = pendingTelPatch.current;
+    pendingTelPatch.current = null;
+    if (!patch || typeof patch !== 'object') return;
+      setDetail((prev) => {
+      if (!prev) return prev;
+      const prevTel = prev.telemetry || {};
+      return {
+        ...prev,
+        telemetry: {
+          ...prevTel,
+          ...patch,
+          // Always take newest scaled/raw/status blocks from the live push
+          scaled: patch.scaled != null ? patch.scaled : prevTel.scaled,
+          raw: patch.raw != null ? patch.raw : prevTel.raw,
+          status: patch.status != null ? patch.status : prevTel.status,
+          pressing_result: patch.pressing_result != null ? patch.pressing_result : prevTel.pressing_result,
+          production: patch.production != null ? patch.production : prevTel.production,
+          current: patch.current != null ? patch.current : prevTel.current,
+          param_rows: patch.param_rows != null ? patch.param_rows : prevTel.param_rows,
+          io_status: patch.io_status != null ? patch.io_status : prevTel.io_status,
+          trend: patch.trend != null ? patch.trend : prevTel.trend,
+          alarms: patch.alarms != null ? patch.alarms : prevTel.alarms,
+          history: patch.history != null ? patch.history : prevTel.history,
+          thresholds: patch.thresholds != null ? patch.thresholds : prevTel.thresholds,
+          threshold_breaches: patch.threshold_breaches != null
+            ? patch.threshold_breaches
+            : prevTel.threshold_breaches,
+          email_alert_status: patch.email_alert_status != null
+            ? patch.email_alert_status
+            : prevTel.email_alert_status,
+          available: true,
+        },
+      };
+    });
+  }, []);
+
   useWebSocket(useCallback((msg) => {
-    if (!msg || msg.type !== 'machine_telemetry_updated') return;
+    if (!msg) return;
+
+    if (msg.type === 'machine_cnc_live_updated') {
+      if (!machineId || String(msg.id) !== String(machineId)) return;
+      if (msg.cnc_live && typeof msg.cnc_live === 'object') {
+        setDetail((prev) => (prev ? { ...prev, cnc_live: msg.cnc_live } : prev));
+      }
+      return;
+    }
+
+    if (msg.type !== 'machine_telemetry_updated') return;
     if (!machineId || String(msg.id) !== String(machineId)) return;
 
     const patch = msg.telemetry;
     if (patch && typeof patch === 'object') {
-      setDetail((prev) => {
-        if (!prev) return prev;
-        const prevTel = prev.telemetry || {};
-        return {
-          ...prev,
-          telemetry: {
-            ...prevTel,
-            ...patch,
-            // Keep rings that the live push omits (history / alarms / full trend)
-            trend: patch.trend != null ? patch.trend : prevTel.trend,
-            alarms: patch.alarms != null ? patch.alarms : prevTel.alarms,
-            history: patch.history != null ? patch.history : prevTel.history,
-            thresholds: patch.thresholds != null ? patch.thresholds : prevTel.thresholds,
-            threshold_breaches: patch.threshold_breaches != null
-              ? patch.threshold_breaches
-              : prevTel.threshold_breaches,
-            email_alert_status: patch.email_alert_status != null
-              ? patch.email_alert_status
-              : prevTel.email_alert_status,
-            available: true,
-          },
-        };
-      });
+      pendingTelPatch.current = patch;
+      if (!telPatchTimer.current) {
+        telPatchTimer.current = setTimeout(() => {
+          telPatchTimer.current = null;
+          flushTelPatch();
+        }, 400);
+      }
       return;
     }
 
     // Fallback: debounce a full detail reload if the push has no telemetry body
     clearTimeout(telPatchTimer.current);
     telPatchTimer.current = setTimeout(() => { load(); }, 50);
-  }, [machineId, load]));
+  }, [machineId, load, flushTelPatch]));
 
-  useEffect(() => () => clearTimeout(telPatchTimer.current), []);
+  useEffect(() => () => {
+    clearTimeout(telPatchTimer.current);
+    pendingTelPatch.current = null;
+  }, []);
 
   const machines = listData?.machines || [];
 
@@ -531,6 +570,8 @@ export default function EquipmentOverview() {
               </div>
             </section>
           ) : null}
+
+          <CncLiveTagsPanel cncLive={detail.cnc_live} theme={t} isDark={isDark} />
         </div>
       ) : (
         <>

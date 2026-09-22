@@ -1,0 +1,264 @@
+[
+    {
+        "id": "2468729adb55318d",
+        "type": "tab",
+        "label": "Live_servo_data",
+        "disabled": false,
+        "info": "SIE Servo Press → map live Modbus readings → POST PMS /api/machines/telemetry.\n\nRaw integers are posted (do NOT pre-scale).\nPMS applies catalog scales: position/velocity/Pressed Pos ×0.001, force/Pressed Force ×0.1, standby/pressing ×0.1, production ×0.01.\n\nreplaceReadings=true so each Edge snapshot replaces sticky simulator residue.\nFirst successful map also sends resetLog=true once to clear old alarm/history rows.\n\nEdit node 'cfg PMS URL + device' so DEVICE_NAME matches machines.name (or set MACHINE_ID / plc_topic).",
+        "env": []
+    },
+    {
+        "id": "9bf82faa1001c0f5",
+        "type": "debug",
+        "z": "2468729adb55318d",
+        "name": "servo_press_debug",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 530,
+        "y": 300,
+        "wires": []
+    },
+    {
+        "id": "98d5d38dd513a78b",
+        "type": "sie-device-data",
+        "z": "2468729adb55318d",
+        "name": "Servo_Press",
+        "broker": "be0bd145e8a8a8f9",
+        "prefetch": 0,
+        "noAck": true,
+        "exchangeName": "message-bus",
+        "exchangeType": "topic",
+        "exchangeRoutingKey": "eda.data.edgexevent.#.871fdce1-b1d4-4d8f-ae69-5c173c622c00.#",
+        "exchangeDurable": true,
+        "queueName": "",
+        "queueExclusive": true,
+        "queueDurable": false,
+        "queueAutoDelete": true,
+        "headers": "{}",
+        "device": "871fdce1-b1d4-4d8f-ae69-5c173c622c00",
+        "x": 250,
+        "y": 400,
+        "wires": [
+            [
+                "9bf82faa1001c0f5",
+                "7efe4373339fd0d9"
+            ]
+        ]
+    },
+    {
+        "id": "7efe4373339fd0d9",
+        "type": "function",
+        "z": "2468729adb55318d",
+        "name": "cfg PMS URL + device",
+        "func": "// ===== EDIT THESE FOR YOUR LAN =====\nconst PMS_BASE = 'http://192.168.1.216:8010'; // PC running PMS (uvicorn :8010)\nconst DEVICE_NAME = 'Press Machine 1';        // must match machines.name in PMS\nconst DEVICE_UUID = '871fdce1-b1d4-4d8f-ae69-5c173c622c00';\nconst MACHINE_ID = 7; // machine_id=7; set null to match by name/uuid\n// ====================================\n\nmsg.pmsBase = String(PMS_BASE).replace(/\\/$/, '');\nmsg.deviceName = DEVICE_NAME;\nmsg.deviceUuid = DEVICE_UUID;\nif (MACHINE_ID !== null && MACHINE_ID !== undefined) msg.machineId = MACHINE_ID;\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 480,
+        "y": 400,
+        "wires": [
+            [
+                "50b69393cc56407b",
+                "03a0d8c60890f812"
+            ]
+        ]
+    },
+    {
+        "id": "50b69393cc56407b",
+        "type": "function",
+        "z": "2468729adb55318d",
+        "name": "map live → PMS telemetry",
+        "func": "// Forward LIVE SIE/EdgeX readings to PMS (no simulation).\n// Keep raw Modbus integers — PMS scales them:\n//   Pressed Pos / Live position ×0.001 → mm\n//   Pressed Force / Live force ×0.1 → kgf\n\nconst src = msg.payload || {};\nconst incoming = Array.isArray(src.readings) ? src.readings : [];\nif (!incoming.length) {\n    node.status({ fill: 'yellow', shape: 'ring', text: 'no readings' });\n    return null;\n}\n\nconst NAME_MAP = {\n    'live position': 'Live position',\n    'live force': 'Live force',\n    'live velocity': 'Live Velocity',\n    'status': 'status:Int16',\n    'status*1': 'status:Int16',\n    'live mode': 'Live Mode',\n    'total steps': 'Total Steps',\n    'live step': 'Live Step',\n    'recipe number': 'Recipe number',\n    'total amount': 'Total amount',\n    'pass amount': 'Pass amount',\n    'ng amount': 'NG amount',\n    'standby time': 'Standby time',\n    'pressing time': 'Pressing time',\n    'production time': 'Production time',\n    'alarm code': 'Alarm Code',\n    'pressing result': 'Pressing result',\n    'pressed position (step 1)': 'Pressed position (Step 1)',\n    'pressed position (step 2)': 'Pressed position (Step 2)',\n    'pressed position (step 3)': 'Pressed position (Step 3)',\n    'pressed pos1': 'Pressed position (Step 1)',\n    'pressed pos2': 'Pressed position (Step 2)',\n    'pressed pos3': 'Pressed position (Step 3)',\n    'pressed pos4': 'Pressed position (Step 4)',\n    'pressed pos5': 'Pressed position (Step 5)',\n    'pressed pos': 'Pressed Pos',\n    'pressed force': 'Pressed Force',\n    'pressed force1': 'Pressed Force',\n    'device type': 'device type:String',\n    'device_type': 'device type:String'\n};\n\nfunction stripType(name) {\n    let s = String(name || '').trim();\n    for (const sep of [';', ':']) {\n        if (s.indexOf(sep) >= 0) {\n            s = s.split(sep, 1)[0].trim();\n            break;\n        }\n    }\n    return s;\n}\n\nfunction canonicalName(rawName) {\n    const base = stripType(rawName).toLowerCase().replace(/\\s+/g, ' ');\n    return NAME_MAP[base] || stripType(rawName);\n}\n\nconst origin = Number(src.origin) || Date.now();\nconst byName = {};\nlet statusRaw = null;\nlet livePosRaw = null;\nlet passN = null;\nlet ngN = null;\nlet totalN = null;\n\nfor (const r of incoming) {\n    if (!r || r.name == null) continue;\n    const name = canonicalName(r.name);\n    let value = r.value;\n    if (value === undefined || value === null) value = '';\n    value = String(value);\n\n    const num = Number(value);\n    if (name === 'Total amount') {\n        if (!isNaN(num) && num >= 0) totalN = num;\n        else continue;\n    }\n    if (name === 'Pass amount' && !isNaN(num)) passN = num;\n    if (name === 'NG amount' && !isNaN(num)) ngN = num;\n\n    byName[name] = {\n        name: name,\n        value: value,\n        origin: Number(r.origin) || origin\n    };\n\n    if (name === 'status:Int16' || /^status$/i.test(stripType(r.name))) {\n        statusRaw = value;\n    }\n    if (name === 'Live position') {\n        livePosRaw = value;\n    }\n}\n\nif (totalN == null && passN != null && ngN != null) {\n    totalN = passN + ngN;\n    byName['Total amount'] = {\n        name: 'Total amount',\n        value: String(totalN),\n        origin: origin\n    };\n}\n\nif (statusRaw != null && !byName['Status*1']) {\n    byName['Status*1'] = { name: 'Status*1', value: String(statusRaw), origin: origin };\n}\nif (!byName['device type:String']) {\n    byName['device type:String'] = {\n        name: 'device type:String',\n        value: 'Press',\n        origin: origin\n    };\n}\n\nconst readings = Object.keys(byName).map(k => byName[k]);\n\nconst needReset = !flow.get('liveLogResetDone');\nif (needReset) flow.set('pendingResetLog', true);\n\nconst body = {\n    id: src.id || ('live-' + origin),\n    syncBy: src.syncBy || 'MODBUS',\n    deviceName: msg.deviceName,\n    device: msg.deviceUuid || src.device,\n    origin: origin,\n    readings: readings,\n    replaceReadings: true\n};\nif (needReset) body.resetLog = true;\nif (msg.machineId) body.machine_id = msg.machineId;\n\nmsg.payload = body;\nmsg.headers = { 'Content-Type': 'application/json' };\nmsg.url = msg.pmsBase + '/api/machines/telemetry';\nmsg.method = 'POST';\nmsg.status = statusRaw != null ? Number(statusRaw) : undefined;\nmsg.livePositionRaw = livePosRaw;\nmsg.livePositionMm = livePosRaw != null && livePosRaw !== ''\n    ? (Number(livePosRaw) * 0.001)\n    : undefined;\n\nconst posTxt = msg.livePositionMm != null && !isNaN(msg.livePositionMm)\n    ? (' pos=' + msg.livePositionMm.toFixed(3) + 'mm')\n    : '';\nconst totTxt = totalN != null ? (' tot=' + totalN) : '';\nnode.status({\n    fill: 'green',\n    shape: 'dot',\n    text: 'status=' + (statusRaw != null ? statusRaw : '?') + posTxt + totTxt +\n        (needReset ? ' resetLog' : '') + ' → PMS'\n});\nreturn msg;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 760,
+        "y": 400,
+        "wires": [
+            [
+                "91f0a51520a9e29c"
+            ]
+        ]
+    },
+    {
+        "id": "91f0a51520a9e29c",
+        "type": "delay",
+        "z": "2468729adb55318d",
+        "name": "max 1 POST / sec",
+        "pauseType": "rate",
+        "timeout": "5",
+        "timeoutUnits": "seconds",
+        "rate": "1",
+        "nbRateUnits": "1",
+        "rateUnits": "second",
+        "randomFirst": "1",
+        "randomLast": "5",
+        "randomUnits": "seconds",
+        "drop": true,
+        "allowrate": false,
+        "outputs": 1,
+        "x": 1010,
+        "y": 400,
+        "wires": [
+            [
+                "b1367a9c9b70f716",
+                "0e7a334add8a9e7f"
+            ]
+        ]
+    },
+    {
+        "id": "b1367a9c9b70f716",
+        "type": "debug",
+        "z": "2468729adb55318d",
+        "name": "payload out",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": true,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "livePositionMm",
+        "statusType": "msg",
+        "x": 1210,
+        "y": 340,
+        "wires": []
+    },
+    {
+        "id": "0e7a334add8a9e7f",
+        "type": "http request",
+        "z": "2468729adb55318d",
+        "name": "POST /api/machines/telemetry",
+        "method": "use",
+        "ret": "obj",
+        "paytoqs": "ignore",
+        "url": "",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [],
+        "x": 1270,
+        "y": 420,
+        "wires": [
+            [
+                "24c241f22399f570",
+                "5b466d5b8f82bcdd"
+            ]
+        ]
+    },
+    {
+        "id": "24c241f22399f570",
+        "type": "function",
+        "z": "2468729adb55318d",
+        "name": "mark resetLog done",
+        "func": "const code = msg.statusCode;\nconst ok = typeof code === 'number' && code >= 200 && code < 300;\nif (ok && flow.get('pendingResetLog')) {\n    flow.set('liveLogResetDone', true);\n    flow.set('pendingResetLog', false);\n    node.status({ fill: 'green', shape: 'dot', text: 'log reset done' });\n}\nreturn null;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 1520,
+        "y": 360,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "5b466d5b8f82bcdd",
+        "type": "debug",
+        "z": "2468729adb55318d",
+        "name": "PMS response",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": true,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "statusCode",
+        "statusType": "auto",
+        "x": 1520,
+        "y": 420,
+        "wires": []
+    },
+    {
+        "id": "03a0d8c60890f812",
+        "type": "debug",
+        "z": "2468729adb55318d",
+        "name": "servo_press_function",
+        "active": false,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": false,
+        "complete": "payload",
+        "targetType": "msg",
+        "statusVal": "",
+        "statusType": "auto",
+        "x": 800,
+        "y": 480,
+        "wires": []
+    },
+    {
+        "id": "e63892fbcbf822e7",
+        "type": "inject",
+        "z": "2468729adb55318d",
+        "name": "force clear PMS log next post",
+        "props": [
+            {
+                "p": "payload"
+            }
+        ],
+        "repeat": "",
+        "crontab": "",
+        "once": false,
+        "onceDelay": 0.1,
+        "topic": "",
+        "payload": "",
+        "payloadType": "date",
+        "x": 280,
+        "y": 500,
+        "wires": [
+            [
+                "ea52c75c4e417b6d"
+            ]
+        ]
+    },
+    {
+        "id": "ea52c75c4e417b6d",
+        "type": "function",
+        "z": "2468729adb55318d",
+        "name": "allow resetLog again",
+        "func": "flow.set('liveLogResetDone', false);\nnode.status({ fill: 'yellow', shape: 'ring', text: 'next post will resetLog' });\nnode.warn('Next live telemetry POST will send resetLog=true (clears alarm/history residue).');\nreturn null;",
+        "outputs": 1,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 560,
+        "y": 500,
+        "wires": [
+            []
+        ]
+    },
+    {
+        "id": "be0bd145e8a8a8f9",
+        "type": "broker-config",
+        "name": "",
+        "host": "rabbitmq.eda",
+        "port": "5672",
+        "vhost": "",
+        "tls": false,
+        "credsFromSettings": false
+    }
+]

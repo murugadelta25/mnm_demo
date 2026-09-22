@@ -778,6 +778,21 @@ class MachineTelemetry(Base):
     updated_at = Column(DateTime)
 
 
+class MachineCncLive(Base):
+    """
+    CNC (Delta NC510 / Edge LO tags) live snapshot — separate from Servo Press Modbus telemetry.
+    Status still arrives via PATCH /api/machines/{id}/status (StatusCode); this table only
+    stores the tag array for the classic CNC equipment overview.
+    """
+    __tablename__ = "machine_cnc_live"
+    machine_id = Column(Integer, ForeignKey("machines.id"), primary_key=True)
+    device_id = Column(Integer)
+    device_name = Column(String(120))
+    source = Column(String(40), default="nodered")
+    tags_json = Column(Text)  # normalized [{name,value,unit,group,type,status,...}]
+    updated_at = Column(DateTime)
+
+
 class TelemetryTag(Base):
     """
     Editable Node-RED ↔ UI parameter map (Modbus §8.4.2 style).
