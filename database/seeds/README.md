@@ -68,3 +68,22 @@ CLIENT_NAME=MAHINDRA_HYD python3 scripts/restore_demo_seed.py --force
 CLIENT_NAME=MAHINDRA_HYD python3 scripts/apply_client_branding.py --force
 sudo systemctl restart mahindra_hyd-backend
 ```
+
+## Troubleshooting: 502 Bad Gateway after git pull
+
+If all API calls return 502, nginx is proxying to the wrong backend port.
+This happens when another project's service was previously on port 8010.
+
+1. Confirm backend is on 8010: `sudo systemctl status mahindra_hyd-backend`
+2. Fix nginx if it has the wrong port:
+   ```bash
+   sudo sed -i 's/127.0.0.1:8011/127.0.0.1:8010/g' /etc/nginx/sites-enabled/eappms-*
+   sudo nginx -t && sudo systemctl reload nginx
+   ```
+3. Remove any conflicting service permanently:
+   ```bash
+   sudo systemctl stop <other>-backend.service
+   sudo systemctl disable <other>-backend.service
+   sudo rm /etc/systemd/system/<other>-backend.service
+   sudo systemctl daemon-reload
+   ```
