@@ -1327,7 +1327,7 @@ export default function LossTracker() {
           {paretoData.length === 0 ? (
             <div style={{ color: t.textFaint, textAlign: 'center', padding: 24, fontSize: 13 }}>No breaches found.</div>
           ) : (
-            <ResponsiveContainer width="100%" height={220}>
+            <ResponsiveContainer width="100%" height={220} minWidth={0}>
               <BarChart data={paretoData} margin={{ top: 4, right: 16, left: 0, bottom: 4 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke={t.border} />
                 <XAxis dataKey="label" tick={{ fill: t.textDim, fontSize: 12 }} />
@@ -1642,7 +1642,7 @@ export default function LossTracker() {
                   &nbsp;&middot;&nbsp;<span style={{ color: '#8b5cf6', fontWeight: 600 }}>highlighted:</span>{' '}
                   {shiftHourSlots.find(s => s.value === histoHour)?.label}
                 </div>
-                <ResponsiveContainer width="100%" height={280}>
+                <ResponsiveContainer width="100%" height={280} minWidth={0}>
                   <BarChart data={bellData.bars} margin={{ top: 8, right: 20, left: 0, bottom: 30 }}
                     barCategoryGap="20%" barGap={1}>
                     <defs>

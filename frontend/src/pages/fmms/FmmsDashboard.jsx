@@ -107,7 +107,7 @@ export default function FmmsDashboard() {
             <span style={{ fontSize: 11, color: t.textFaint }}>Ongoing, Planned, Completed, Delayed</span>
           </div>
           <div style={{ width: '100%', height: 240 }}>
-            <ResponsiveContainer>
+            <ResponsiveContainer width="100%" height="100%" minWidth={0}>
               <BarChart data={EXECUTION_BAR} margin={{ top: 8, right: 8, left: 0, bottom: 4 }}>
                 <CartesianGrid stroke={gridStroke} strokeDasharray="3 3" />
                 <XAxis dataKey="category" tick={chartTick} interval={0} angle={-12} textAnchor="end" height={56} />
@@ -129,7 +129,7 @@ export default function FmmsDashboard() {
             <span style={{ fontSize: 11, color: t.textFaint }}>Methods used</span>
           </div>
           <div style={{ width: '100%', height: 240 }}>
-            <ResponsiveContainer>
+            <ResponsiveContainer width="100%" height="100%" minWidth={0}>
               <PieChart>
                 <Pie
                   data={RCA_PIE}

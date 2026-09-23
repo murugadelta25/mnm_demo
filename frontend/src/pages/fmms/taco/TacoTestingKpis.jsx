@@ -51,7 +51,7 @@ export default function TacoTestingKpis() {
         <section className={surfaceClass(t)} style={cardStyle(t)}>
           <h3 style={{ margin: '0 0 10px', fontSize: 14 }}>Requests by BU</h3>
           <div style={{ width: '100%', height: 240 }}>
-            <ResponsiveContainer>
+            <ResponsiveContainer width="100%" height="100%" minWidth={0}>
               <BarChart data={data?.by_bu || []} margin={{ top: 8, right: 8, left: 0, bottom: 40 }}>
                 <CartesianGrid stroke={t.border} strokeDasharray="3 3" />
                 <XAxis dataKey="business_unit" tick={chartTick} interval={0} angle={-18} textAnchor="end" height={56} />
